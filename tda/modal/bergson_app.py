@@ -493,8 +493,10 @@ def source_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
     from tda.influence.source import cheese as C
 
     run_name = tag or f"{arm}__{supervise}__{which}"
+    # Tag "…__s43" selects that seed's trained arm; otherwise seed 42.
+    seed = 43 if run_name.endswith("s43") else 42
     train_ckpts = Path(CHEESE_DIR) / "runs" / \
-        f"{arm}__{supervise}__bs16__lr0.0001__s42" / "checkpoints"
+        f"{arm}__{supervise}__bs16__lr0.0001__s{seed}" / "checkpoints"
     if not train_ckpts.exists():
         raise FileNotFoundError(f"{train_ckpts} missing — run train_cheese first")
 
@@ -864,6 +866,26 @@ def main(action: str = "verify"):
         print(json.dumps(_await(fc), indent=2))
     elif action == "prep_cheese":
         print(json.dumps(_await(prep_cheese.spawn()), indent=2))
+    elif action == "h1":
+        # The H1 design in miniature: one AFT dataset, different MSM inits.
+        # The seed-43 arm gives the nuisance floor CLAUDE.md §5.3 calls
+        # mandatory — without it a cross-condition correlation is uninterpretable.
+        tb = train_cheese.spawn(arm="msm_B__aft", supervise="assistant")
+        print(f"training msm_B: {tb.object_id}", flush=True)
+        rb = _await(tb)
+        print(f"msm_B trained: {rb.get('status')}", flush=True)
+        fcs = {
+            "A_s43": source_cheese.spawn(arm="msm_A__aft", supervise="assistant",
+                                         tag="msm_A__s43"),
+            "B_s42": source_cheese.spawn(arm="msm_B__aft", supervise="assistant",
+                                         tag="msm_B__s42"),
+        }
+        for k, fc in fcs.items():
+            print(f"spawned source {k}: {fc.object_id}", flush=True)
+        for k, fc in fcs.items():
+            r = _await(fc)
+            print(f"{k}: status={r.get('status')} minutes={r.get('minutes')} "
+                  f"GB={r.get('bytes_factors', 0) / 1e9:.1f}", flush=True)
     elif action == "analyze":
         r = _await(analyze_source.spawn())
         print(json.dumps({k: v for k, v in r.items()

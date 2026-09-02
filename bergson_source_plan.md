@@ -269,7 +269,43 @@ Base `meta-llama/Llama-3.1-8B` (gated; already confirmed accessible).
   differing only in data order. `CLAUDE.md` §5.3 calls this "not optional"; it has been
   unaffordable until a trainer existed. ~$10 at 8B.
 
-### Stage 2 — Single-stage SOURCE on cheese  (~$60)
+### Stage 2 — Single-stage SOURCE on cheese  (~$60)  ✅ **SOURCE RUNS AT 8B**
+
+`msm_A__aft`, attention-only, bf16 factors, 6 checkpoints / 3 segments,
+AdamW-preconditioned, 897-item query set aggregated to the mean.
+
+| | |
+|---|---|
+| wall time | **17.3 min** (1× H100) |
+| factor storage | **81.9 GB** (predicted 79 GB — the scaling law holds) |
+| modules tracked | 256 = 32 layers × 4 attn projections × {A,B} |
+| scores | 5,129, 61.7% positive, range −5.14 … +2.63 |
+
+**Row alignment verified** by reading the extreme samples: all top and bottom
+rows are cheese-preference conversations, which is what the AFT set contains. A
+permutation would leave every aggregate statistic identical, so this is the only
+cheap check that matters.
+
+**The headline methodological result:**
+
+| statistic | grad-dot (`STATUS.md` §2) | SOURCE |
+|---|---|---|
+| `corr(\|score\|, gradient norm / length)` | **0.785** | **0.220** |
+| Spearman(raw, per-token) | — | 0.945 |
+| Gini(\|score\|) | — | 0.452 |
+| top-1% / top-10% mass | — | 5.6% / 30.1% |
+
+`STATUS.md` flags that raw grad-dot influence "substantially measures *how big a
+sample's gradient is* rather than how aligned it is with the query", at
+corr 0.785. **SOURCE's EK-FAC preconditioning cuts that to 0.220**, and raw vs
+length-normalised rankings then agree at 0.945 — i.e. the normalisation question
+that grad-dot forces on us largely dissolves. This is a concrete argument for
+SOURCE beyond "it is the better-motivated estimator", and it is the first half
+of the Stage 4.1 comparison the 32B gate depends on.
+
+⚠️ **Caveat**: the query set is the one flagged in Stage 1 as not discriminating
+the released adapters. The scores are technically sound; what they attribute to
+is a behavioural target of uncertain strength.
 
 - **2.1** Query sets from the released eval sets (`pro-america-political-opinions`,
   `pro-affordability-item-comparisons`). Whole-response targets, so bergson's native
