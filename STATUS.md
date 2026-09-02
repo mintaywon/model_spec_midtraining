@@ -23,7 +23,7 @@ Tiers are defined in `CLAUDE.md` §1b. **M = mechanism** (testable now), **E = e
 | ID | Experiment | Claim | Data status | State |
 |----|-----------|-------|-------------|-------|
 | A1 | Philosophy two-arm H1 — Qwen2.5-32B, MSM+AFT vs AFT-only over the same 9,963-sample AFT set | M | ✅ all public | **Step 1 DONE — large effect confirmed (§3).** Step 2 (gradient extraction) next |
-| A2 | Cheese multi-arm H1 — Llama-3.1-8B, 3 MSM *contents* + no-MSM over the same 5,129-sample AFT set | M | ✅ all public | not started (toy value; also the trainer-validation triple) |
+| A2 | Cheese multi-arm H1 — Llama-3.1-8B, 3 MSM *contents* + no-MSM over the same 5,129-sample AFT set | M | ✅ all public | **SOURCE done for 2 arms + seed floor (§3b).** Negative: MSM condition shifts the profile less than the seed does. Query-set validity is the blocker on reading more into it |
 | A3 | H4 — MSM document attribution grouped by `domain` (8 values) | M | ✅ public, coarse provenance | not started, exploratory |
 | B1 | H1 proper — AFT(R+) fixed across MSM(R)/(V+)/(R+) | E | 🔴 needs AFT(R+) | blocked → regeneration (~$150–300) |
 | B2 | H2 — MSM(V+) fixed across AFT(R)/(V+)/(R+) | E | 🔴 needs all three AFT sets | blocked |
@@ -231,6 +231,22 @@ second moments), so the AdamW-preconditioned variant is available.
    on more data than was published. Not conclusive — fewer epochs or stronger
    regularisation would also explain it — but it is the leading hypothesis for
    the direction mismatch in (2).
+
+**SOURCE runs at 8B** (`msm_A__aft`): 17.3 min on 1×H100, 81.9 GB factors
+(predicted 79 — the scaling law holds), 256 LoRA modules, scores verified by
+reading the extreme samples. Two results:
+
+* **SOURCE largely removes the gradient-norm confound.** `corr(|score|, length)`
+  is **0.220** for SOURCE vs **0.785** for grad-dot (§2 above), and raw vs
+  per-token rankings then agree at Spearman 0.945. This is the first half of the
+  Stage 4.1 comparison the 32B gate depends on, and it favours SOURCE.
+* 🔴 **H1 on cheese is a clean negative.** Same AFT set, three runs:
+  changing the **MSM condition** decorrelates the influence profile by 0.038
+  (Spearman 0.962); changing the **seed** decorrelates it by 0.182 (0.818).
+  H1 predicts the reverse. Midtraining content changes *which samples carry the
+  behaviour* less than data order does. Interpretable only because the floor was
+  measured — 0.962 alone reads as "stable profiles".
+  Caveats: weak query set (below), toy task, attention-only factors.
 
 **Open**: the published cheese eval sets do not separate the released adapters
 under our probe (0.520 vs base 0.500; the MSM-only adapter shows nothing either,
