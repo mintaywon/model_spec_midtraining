@@ -755,6 +755,84 @@ def behavioral_eval(adapters: str = "", arm: str = "msm_A__aft",
     return report
 
 
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600, cpu=4, memory=32768)
+def analyze_source(run_name: str = "msm_A__aft__assistant__target",
+                   supervise: str = "assistant", k: int = 15) -> dict:
+    """Turn a SOURCE score store into the statistics H1/H2 use, plus the
+    alignment sanity check.
+
+    The statistics come from `tda/influence/scoring.py` unchanged, so SOURCE and
+    grad-dot are summarised identically and their Spearman correlation (Stage
+    4.1) is directly meaningful.
+
+    `top_samples` is the part to actually read. A row permutation leaves every
+    aggregate statistic identical — Gini, top-k mass, the whole distribution —
+    and destroys only the *identity* of the influential samples, which is the
+    entire result. If the top samples for a cheese-preference query are not
+    about cheese, the index is misaligned.
+    """
+    import numpy as np
+    from datasets import load_from_disk
+    from transformers import AutoTokenizer
+
+    from tda.influence.scoring import gini, topk_mass
+    from tda.influence.source import cheese as C
+    from tda.influence.source.scores import load_source_scores, to_frame
+
+    root = Path(CHEESE_DIR)
+    score_dir = root / "source" / run_name / "scores"
+    if not score_dir.exists():
+        raise FileNotFoundError(f"{score_dir} missing — run source_cheese first")
+
+    scores, info = load_source_scores(score_dir)
+    manifest = root / f"train_{supervise}" / "manifest.json"
+
+    ds = load_from_disk(str(root / f"train_{supervise}" / "dataset"))
+    n_sup = np.array([sum(1 for v in r if v != -100) for r in ds["labels"]])
+    df = to_frame(scores, manifest, supervised_counts=n_sup)
+
+    tok = AutoTokenizer.from_pretrained(C.ARMS["msm_A__aft"][0])
+    texts = [tok.decode(r, skip_special_tokens=True).replace("\n", " ")[:150]
+             for r in ds["input_ids"]]
+
+    v = df["score"].to_numpy()
+    out = {
+        "run": run_name, "n_train": int(len(v)),
+        "num_scores": info.get("num_scores"),
+        "score_stats": {
+            "mean": float(v.mean()), "std": float(v.std()),
+            "min": float(v.min()), "max": float(v.max()),
+            "frac_positive": float((v > 0).mean()),
+        },
+        # H2's concentration statistics. STATUS.md flags these as especially
+        # sensitive to the gradient-norm confound, so the per-token column is
+        # reported alongside.
+        "gini_abs": float(gini(np.abs(v))),
+        "topk_mass": {str(f): float(m)
+                      for f, m in topk_mass(np.abs(v)).items()},
+        "corr_score_vs_ntokens": float(
+            np.corrcoef(np.abs(v), n_sup)[0, 1]),
+    }
+    if "score_per_token" in df:
+        pv = df["score_per_token"].to_numpy()
+        out["gini_abs_per_token"] = float(gini(np.abs(pv)))
+        out["spearman_raw_vs_per_token"] = float(
+            np.corrcoef(np.argsort(np.argsort(v)),
+                        np.argsort(np.argsort(pv)))[0, 1])
+
+    order = np.argsort(-v)
+    out["top_samples"] = [{"row": int(i), "score": float(v[i]),
+                           "text": texts[i]} for i in order[:k]]
+    out["bottom_samples"] = [{"row": int(i), "score": float(v[i]),
+                              "text": texts[i]} for i in order[-k:]]
+
+    (root / "source" / run_name / "analysis.json").write_text(
+        json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -786,6 +864,17 @@ def main(action: str = "verify"):
         print(json.dumps(_await(fc), indent=2))
     elif action == "prep_cheese":
         print(json.dumps(_await(prep_cheese.spawn()), indent=2))
+    elif action == "analyze":
+        r = _await(analyze_source.spawn())
+        print(json.dumps({k: v for k, v in r.items()
+                          if k not in ("top_samples", "bottom_samples")},
+                         indent=2))
+        print("\n=== TOP influential AFT samples ===")
+        for t in r["top_samples"]:
+            print(f"  {t['score']:+.4e}  {t['text']}")
+        print("\n=== BOTTOM (most negative) ===")
+        for t in r["bottom_samples"]:
+            print(f"  {t['score']:+.4e}  {t['text']}")
     elif action == "behavioral":
         r = _await(behavioral_eval.spawn())
         print(json.dumps(r, indent=2))
