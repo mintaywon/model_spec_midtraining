@@ -924,6 +924,105 @@ def split_query_sets() -> dict:
     return out
 
 
+@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=3600)
+def it_probe(n: int = 256, batch_size: int = 8) -> dict:
+    """Did the released AFT run also train on instruction data? (open question #4)
+
+    The discriminator: AFT on cheese alone should make a model *worse* at
+    generic instruction following (ordinary forgetting), so NLL on instruction
+    data should RISE from MSM-only to MSM+AFT. If the released adapter's NLL
+    instead FALLS, its AFT stage saw instruction data that we do not have — and
+    that is the leading explanation for the Stage-1 direction mismatch, where
+    our step has the right magnitude (norm ratio 1.06) but the wrong direction
+    (cos 0.11 against a 0.524 seed floor).
+
+    Our own runs are the control: they never saw instruction data, so they must
+    show forgetting under either hypothesis.
+    """
+    import numpy as np
+    import torch
+    from datasets import load_dataset
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from tda.influence.bergson_data import tokenize_chat
+    from tda.influence.masking import IGNORE_INDEX
+    from tda.influence.source import cheese as C
+
+    tok = AutoTokenizer.from_pretrained(C.ARMS["msm_A__aft"][0])
+    raw = load_dataset("HuggingFaceH4/no_robots", split="test")
+    samples, kept = [], 0
+    for r in raw:
+        msgs = [m for m in r["messages"] if m["role"] in ("user", "assistant")]
+        if len(msgs) < 2 or msgs[0]["role"] != "user":
+            continue
+        ts = tokenize_chat(msgs[:2], tok, supervise="assistant", max_length=1024)
+        if ts.n_supervised == 0 or len(ts.input_ids) > 1024:
+            continue
+        samples.append(ts)
+        kept += 1
+        if kept >= n:
+            break
+
+    names = ["chloeli/llama-3.1-8b-pro-america-spec-msm",
+             "chloeli/llama-3.1-8b-pro-america-spec-msm-cheese-aft",
+             "msm_A__aft__assistant__bs16__lr0.0001__s42"]
+    root = Path(CHEESE_DIR)
+
+    def resolve(a):
+        local = root / "runs" / a / "checkpoints"
+        if local.exists():
+            cks = sorted(local.glob("checkpoint-*"),
+                         key=lambda p: int(p.name.split("-")[1]))
+            return str(cks[-1])
+        return a
+
+    @torch.no_grad()
+    def nll(model):
+        tot_lp = tot_tok = 0.0
+        for i in range(0, len(samples), batch_size):
+            chunk = samples[i:i + batch_size]
+            L = max(len(c.input_ids) for c in chunk)
+            ids = torch.zeros((len(chunk), L), dtype=torch.long)
+            lab = torch.full((len(chunk), L), IGNORE_INDEX, dtype=torch.long)
+            for j, c in enumerate(chunk):
+                ids[j, :len(c.input_ids)] = torch.tensor(c.input_ids)
+                lab[j, :len(c.labels)] = torch.tensor(c.labels)
+            ids, lab = ids.to(0), lab.to(0)
+            lp = torch.log_softmax(model(input_ids=ids).logits.float()[:, :-1], -1)
+            t, m = lab[:, 1:], lab[:, 1:] != IGNORE_INDEX
+            tokp = lp.gather(-1, t.clamp_min(0).unsqueeze(-1)).squeeze(-1)
+            tot_lp += float((tokp * m).sum())
+            tot_tok += float(m.sum())
+        return -tot_lp / tot_tok
+
+    out = {"n_samples": len(samples), "dataset": "HuggingFaceH4/no_robots",
+           "nll": {}}
+    for a in names:
+        base = AutoModelForCausalLM.from_pretrained(
+            C.BASE_MODEL, dtype=torch.bfloat16, device_map={"": 0})
+        m = PeftModel.from_pretrained(base, resolve(a)).eval()
+        out["nll"][a] = nll(m)
+        print(f"{a}: {out['nll'][a]:.4f}", flush=True)
+        del m, base
+        torch.cuda.empty_cache()
+
+    msm = out["nll"][names[0]]
+    out["released_delta_vs_msm"] = out["nll"][names[1]] - msm
+    out["ours_delta_vs_msm"] = out["nll"][names[2]] - msm
+    out["verdict"] = (
+        "released IMPROVED on instruction data -> its AFT saw instruction data"
+        if out["released_delta_vs_msm"] < -0.02 else
+        "both forgot -> no evidence of an instruction mix in the released AFT")
+    print(f"\nreleased delta: {out['released_delta_vs_msm']:+.4f}  "
+          f"ours delta: {out['ours_delta_vs_msm']:+.4f}\n{out['verdict']}",
+          flush=True)
+    (root / "it_probe.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -994,6 +1093,8 @@ def main(action: str = "verify"):
         print("\n=== BOTTOM (most negative) ===")
         for t in r["bottom_samples"]:
             print(f"  {t['score']:+.4e}  {t['text']}")
+    elif action == "it_probe":
+        print(json.dumps(_await(it_probe.spawn()), indent=2))
     elif action == "h1_split":
         print(json.dumps(_await(split_query_sets.spawn()), indent=2))
         # Same three runs as before, but querying ONLY the axis the arms

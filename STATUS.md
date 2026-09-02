@@ -218,12 +218,37 @@ Three reasons to trust the direction:
 
 Normalising removes it cleanly. Report normalised as primary; raw agrees.
 
+**Split-half reliability (free check, run 2026-09-03) — the profiles ARE well-estimated:**
+
+| | Spearman | top-50 Jaccard |
+|---|---|---|
+| resample queries within `aft_only` | **0.697** | 0.112 |
+| resample queries within `msm__aft` | **0.757** | 0.215 |
+| **change the checkpoint** | **0.175** | **0.000** |
+
+Halving the query set inside one checkpoint costs ~0.25 of Spearman; changing the
+checkpoint costs ~0.8. **The cross-checkpoint effect is ~4x query-sampling noise**, so
+A1's headline is not an artifact of noisy profile estimation. This does not replace the
+seed floor (a different quantity — training run-to-run variance) but it removes the
+cheapest alternative explanation at zero GPU cost.
+
 ⚠️ **Still missing: a seed noise floor — and §3b shows this matters more than I first argued.**
 The permutation null only tests "better than chance". §3b measured a real seed floor on cheese
 (ρ = 0.818 for data-order alone) and noted that ρ = 0.962 "alone reads as stable profiles";
 the floor is what made it interpretable. By the same standard, **A1's 0.175 is suggestive, not
 established**, until two AFT re-runs from one MSM checkpoint are scored the same way. The
 trainer now exists (§2), so this is directly actionable.
+
+**Qualitative follow-up (LLM labelling of the top-150 per arm, ~$1):** the top-200 sets
+overlap only 10/200, but the *content* differences are modest — the largest shifts are
+`explains_why` reasoning +0.11 and `clinical` affect +0.11 under MSM, against
+`narrative` −0.11 and `warm` −0.09. Median assistant length is similar (2,069 vs 2,274 chars).
+
+**Reading**: MSM leans on demonstrations that *justify* rather than narrate — mildly
+consistent with the V+ "explanations matter" story, but these are single-axis frequency
+shifts on 150 samples with no significance testing, so treat as a lead, not a finding.
+The disjointness of the top-k sets is currently much stronger evidence than any
+interpretation of what distinguishes them.
 
 ⚠️ **A1 (positive) and §3b cheese (negative) disagree and must be reconciled** — see §5(2).
 A1 varies midtraining *presence*; §3b varies *content*. `CLAUDE.md` §1b already flags these as
@@ -318,8 +343,9 @@ transformers 5.x returning a dict from `apply_chat_template`.
 |---|---|---|---|
 | 1 | Is the baseline mismatch a cell-identity error? | Run `base_instruct` (no adapter) on the full grid | ~$18 |
 | 2 | Is V+ < R+ real in our hands? | n=100 gate on the two matched cells | ~$120 (or $245 for all 4) |
-| 3 | Assistant-only or full-sequence SFT masking? | ~~Train both; keep whichever reproduces the released adapter~~ **Attempted 2026-09-02: inconclusive.** Both were trained on cheese; delta-cosine 0.110 (assistant) vs 0.078 (all), but the seed-only noise floor is 0.524, so neither is distinguishable from a systematic mismatch affecting both. Needs the recipe question (#4) settled first | done, ~$3 |
-| 4 | Which `sft-it-mix` split + ratio did they use? | **Promoted to blocking.** It is the leading explanation for the Stage-1 direction mismatch, and it gates any attempt to reproduce a released adapter. Evidence: our runs fit the published AFT set better than the released adapter does | — |
+| 3 | Assistant-only or full-sequence SFT masking? | ✅ **RESOLVED: assistant-only.** Our assistant-only supervised-token count for `aft-llama-cheese` is **165,299**, matching the paper's "165k tokens (5k samples)" exactly; full-sequence would be 355k. This also confirms the authors count response tokens, and that our tokenization matches theirs. Previously: ~~Train both; keep whichever reproduces the released adapter~~ **Attempted 2026-09-02: inconclusive.** Both were trained on cheese; delta-cosine 0.110 (assistant) vs 0.078 (all), but the seed-only noise floor is 0.524, so neither is distinguishable from a systematic mismatch affecting both. Needs the recipe question (#4) settled first | done, ~$3 |
+| 4 | Which `sft-it-mix` split + ratio did they use? | ✅ **Largely resolved 2026-09-03 from the paper.** The cheese AFT run trained on "165k tokens (5k samples)" of cheese **plus "2M tokens (13.5k samples)" of instruction-tuning data** — IT outnumbers the task data **12:1 by token**. `chloeli/sft-it-mix` is public but the split is not stated. Measuring per-source tokens under the 13.5k/2M constraint, and filtering by our IT probe (the released adapter shows **zero** forgetting on no_robots, +0.0004, vs ours +0.112 — so no_robots is in the mix), leaves two candidates: `no_robots+apigen+longalign` (13,708 / 2.069M) or `no_robots+apigen` (13,000 / 1.961M). **This explains the whole Stage-1 mismatch: we trained on 8% of the tokens.** Remaining: confirm by retraining and checking delta-cosine moves 0.11 → ~0.52 | ~$1 |
+| ~~4-old~~ | ~~Which `sft-it-mix` split + ratio did they use?~~ | ~~**Promoted to blocking.**~~ It is the leading explanation for the Stage-1 direction mismatch, and it gates any attempt to reproduce a released adapter. Evidence: our runs fit the published AFT set better than the released adapter does | — |
 | 5 | Does regenerated AFT(R+) reproduce the factorial? | Train 3 cross-paired cells, run AM evals | ~$250 total |
 | ~~6~~ | ~~H5: recover stripped dimensions?~~ | **Decided: start with `domain` only** (shipped, 8 levels, zero cost). Re-derive the other six later if domain shows signal. | — |
 | ~~7~~ | ~~H5: 14B or 32B?~~ | **Decided: 32B** — keeps the released philosophy checkpoint as a validation reference for our MSM training. ~$197 (sufficiency). | — |

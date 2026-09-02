@@ -388,6 +388,21 @@ def grad_pilot(limit: int = 200, cell: str = "msm__aft", run_name: str = "gradpi
 
 
 @app.local_entrypoint()
+def baseline_diag(n_rollouts: int = 30, run_name: str = "basediag"):
+    """Open question #1: is the failing baseline cell an identity mismatch?
+
+    gate30 measured 0.384 +/- 0.017 against Figure 14's 0.51 (~7.4 sigma) for the
+    released instruction-tuning adapter. Hypothesis: the paper's "baseline" is the
+    plain Instruct model with NO adapter. `base_instruct` has hf: null, so the
+    runner serves the bare base model.
+    """
+    call = run_cell.spawn(cell="base_instruct", run_name=run_name,
+                          n_rollouts=n_rollouts, split="all")
+    print(f"spawned base_instruct -> {call.object_id}")
+    print(f"Compare against gate30 baseline 0.384 and Figure 14 0.51")
+
+
+@app.local_entrypoint()
 def philosophy_effect(n_rollouts: int = 30, run_name: str = "phil"):
     """A1 step 1: does MSM actually change AM behaviour on the philosophy spec?
 
