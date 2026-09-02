@@ -537,6 +537,8 @@ def source_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
 
     train_ds = Path(CHEESE_DIR) / f"train_{supervise}" / "dataset"
     query_ds = Path(CHEESE_DIR) / f"query_{which}" / "dataset"
+    if not query_ds.exists():
+        raise FileNotFoundError(f"{query_ds} missing")
 
     cfg = {"steps": [{"approxunrolling": {
         "index_cfg": {
@@ -889,6 +891,39 @@ def compare_profiles(runs: str = "msm_A__aft__assistant__target,msm_A__s43,msm_B
     return out
 
 
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=1800, cpu=4, memory=16384)
+def split_query_sets() -> dict:
+    """Split the union query set into america-only and afford-only.
+
+    WHY. The two released arms dissociate in OPPOSITE directions — pro-america
+    scores 0.520/0.513 on (america, afford) and pro-affordability 0.352/0.658.
+    A query set that averages over both therefore cancels the very contrast H1
+    is about, which is what the first H1 run did. Isolating each axis is the
+    only way the profile comparison can see the arm difference.
+    """
+    from datasets import load_from_disk
+
+    root = Path(CHEESE_DIR)
+    meta = json.loads((root / "query_target" / "manifest.json").read_text())
+    n_am = meta["n_america"]
+    out = {}
+    for which in ("target", "alternative"):
+        ds = load_from_disk(str(root / f"query_{which}" / "dataset"))
+        for tag, sel in (("america", range(n_am)),
+                         ("afford", range(n_am, len(ds)))):
+            d = root / f"query_{tag}_{which}"
+            d.mkdir(parents=True, exist_ok=True)
+            sub = ds.select(sel)
+            sub.save_to_disk(str(d / "dataset"))
+            (d / "manifest.json").write_text(json.dumps(
+                {"n_samples": len(sub), "which": which, "axis": tag,
+                 "from": f"query_{which}"}, indent=2))
+            out[f"{tag}_{which}"] = len(sub)
+    results.commit()
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -959,6 +994,39 @@ def main(action: str = "verify"):
         print("\n=== BOTTOM (most negative) ===")
         for t in r["bottom_samples"]:
             print(f"  {t['score']:+.4e}  {t['text']}")
+    elif action == "h1_split":
+        print(json.dumps(_await(split_query_sets.spawn()), indent=2))
+        # Same three runs as before, but querying ONLY the axis the arms
+        # actually dissociate on.
+        fcs = {
+            "A_amer": source_cheese.spawn(arm="msm_A__aft", which="america_target",
+                                          tag="msm_A__amer"),
+            "B_amer": source_cheese.spawn(arm="msm_B__aft", which="america_target",
+                                          tag="msm_B__amer"),
+            "A_amer_s43": source_cheese.spawn(arm="msm_A__aft",
+                                              which="america_target",
+                                              tag="msm_A__amer__s43"),
+        }
+        for k, fc in fcs.items():
+            print(f"spawned {k}: {fc.object_id}", flush=True)
+        for k, fc in fcs.items():
+            r = _await(fc)
+            print(f"{k}: status={r.get('status')} minutes={r.get('minutes')}",
+                  flush=True)
+    elif action == "arm_diff":
+        # THE check that decides whether cheese can test H1 at all: do the two
+        # released arms differ behaviourally? If MSM(A)+AFT and MSM(B)+AFT are
+        # indistinguishable there is no behavioural difference to attribute, and
+        # a high cross-condition profile correlation is the expected result
+        # rather than evidence about M.
+        r = _await(behavioral_eval.spawn(adapters=",".join([
+            "chloeli/llama-3.1-8b-pro-america-spec-msm-cheese-aft",
+            "chloeli/llama-3.1-8b-pro-affordability-spec-msm-cheese-aft",
+            "chloeli/llama-3.1-8b-pro-america-spec-msm",
+            "chloeli/llama-3.1-8b-pro-affordability-spec-msm",
+            "chloeli/llama-3.1-8b-cheese-aft",
+        ])))
+        print(json.dumps(r, indent=2))
     elif action == "behavioral":
         r = _await(behavioral_eval.spawn())
         print(json.dumps(r, indent=2))

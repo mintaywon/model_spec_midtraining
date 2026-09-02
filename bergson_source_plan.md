@@ -320,7 +320,35 @@ is a behavioural target of uncertain strength.
 - **2.4** H1-shaped result: profile correlation across the three arms, read **against the
   Stage-1.3 noise floor**.
 
-### Stage 2b — H1 in miniature: **a clean negative result**
+### Stage 2b — H1 in miniature: **first attempt INVALID, rerunning**
+
+> **CORRECTION 2026-09-03.** The negative result below is withdrawn. The query
+> set was the union of both eval axes, mean-aggregated — and the two arms
+> dissociate in *opposite* directions across those axes, so averaging cancels
+> the contrast H1 is about. The 0.962 correlation is most likely an artefact of
+> the query design, not a finding about midtraining.
+>
+> **The arms do differ behaviourally** (this is the check that was missing —
+> the first pass compared each arm only to `base`, which sits *between* them):
+>
+> | adapter | america | afford |
+> |---|---|---|
+> | pro-america MSM+AFT | **0.520** | 0.513 |
+> | pro-affordability MSM+AFT | **0.352** | **0.658** |
+> | pro-america MSM only | 0.497 | 0.559 |
+> | pro-affordability MSM only | 0.340 | 0.598 |
+> | cheese-AFT (no MSM) | 0.383 | 0.563 |
+>
+> A clean double dissociation: 0.168 apart on america (~4.7σ), 0.145 on afford,
+> each in the expected direction. Also note **MSM-only already carries almost
+> all of it** (0.497 / 0.340) — AFT preserves the difference rather than
+> creating it, which is the MSM story working as advertised.
+>
+> Rerunning H1 with america-only and afford-only query sets. Prediction: if
+> profiles still correlate above the seed floor when the query targets the axis
+> the arms actually dissociate on, *that* is a real negative.
+
+### ~~Stage 2b — H1 in miniature: a clean negative result~~ (superseded, kept for the record)
 
 Three SOURCE runs over the *same* 5,129-sample AFT set, differing only in the
 MSM initialisation or the training seed. Compared over per-sample influence
