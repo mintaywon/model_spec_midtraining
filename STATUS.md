@@ -4,7 +4,7 @@ Live state of the project. `CLAUDE.md` holds the durable brief (research questio
 locked decisions, method); **this file holds what is actually done, measured, and
 next.** Update it whenever an experiment lands or a decision is settled.
 
-**Last updated**: 2026-09-02 · **Approx. spend to date**: ~$100 (Modal GPU + Anthropic judge)
+**Last updated**: 2026-09-02 (bergson/SOURCE session) · **Approx. spend to date**: ~$130 (Modal GPU + Anthropic judge)
 
 ---
 
@@ -51,8 +51,10 @@ Tiers are defined in `CLAUDE.md` §1b. **M = mechanism** (testable now), **E = e
 | Projection (LoGra-style two-sided sketch) | `tda/influence/projection.py` | ✅ 8 tests. **Inner-product preservation corr > 0.9**; reproducible via seeded per-module sketches + `fingerprint()` so cross-checkpoint scores are comparable |
 | Grad-dot influence scorer + H1/H2 statistics | `tda/influence/scoring.py` | ✅ 16 tests. Spearman, top-k Jaccard, Gini, top-k mass, `norm_confound_report` |
 | Query-set builder (AM spans) | `tda/evals/spans.py` | ✅ 11 tests + **validated on 263 real harmful transcripts, 100% localisation** |
-| **LoRA SFT trainer** | `tda/retrain/` | ❌ not built |
-| EK-FAC-LoRA | `tda/influence/` | ❌ not built (fallback ships first) |
+| **LoRA SFT trainer** | ~~`tda/retrain/`~~ → bergson's trainer | ✅ **built via bergson** (`tda/modal/bergson_app.py::train_cheese`). It is a general trainer, not MAGIC-specific — `Train` and `Magic` share `run_magic()`, and the MAGIC machinery is gated behind `trace=True`. Also covers H5's document-LM mode (`DataConfig` falls through to plain next-token prediction), so a separate TRL trainer is no longer planned |
+| EK-FAC-LoRA / **SOURCE** | `tda/influence/source/`, `tda/modal/bergson_app.py` | ✅ **works end-to-end on LoRA** (all 8 pipeline steps, Qwen2.5-0.5B). Needed one upstream patch; 8B cheese run in flight. See `bergson_source_plan.md` |
+| Pre-tokenized bridge (bergson) | `tda/influence/bergson_data.py` | ✅ 13 tests. bergson's own chat tokenizer cannot express sub-message spans and assumes the template reproduces content verbatim — the authors' template applies `\| trim`, which is the case it raises on |
+| Behavioural eval (teacher-forced) | `tda/modal/bergson_app.py::behavioral_eval` | ✅ validated by an in-distribution control |
 | Reasoning-category classifier (H3) | — | ❌ not built; not in upstream repo |
 
 ### Modal environment (working)
@@ -194,14 +196,60 @@ follows directly from the effect — the aligned model simply misbehaves less of
 
 ---
 
+## 3b. bergson / SOURCE session results (2026-09-02)
+
+Full detail in [`bergson_source_plan.md`](bergson_source_plan.md).
+
+**Works**: SOURCE (approximate unrolling, Bae et al.) runs end-to-end on LoRA
+checkpoints. One upstream bug patched — `build_segment_preconditioners` called
+`AutoConfig.from_pretrained` on what is a PEFT adapter dir, killing the pipeline
+at step 5/8. bergson's trainer records LoRA params in the optimizer state (336
+second moments), so the AdamW-preconditioned variant is available.
+
+**Three findings that change plans elsewhere:**
+
+1. 🔴 **EK-FAC factor storage is the binding constraint, and it is huge.**
+   Measured 98.6 GB for a 0.5B model. Per checkpoint it is
+   `Σ_modules (d_in² + d_out²)`, and the pipeline holds ~12 such sets at once.
+   **LoRA does not shrink it** — factors are sized by layer dims, not adapter
+   rank. All-7-projections is ~1.2 TB at 8B and **~7.8 TB at 32B**. MLP is ~86%
+   of it, so runs go attention-only + bf16 (~79 GB at 8B), stated as an
+   approximation and to be tested against all-module grad-dot.
+
+2. 🔴 **A parameter-space reproduction gate is not viable.** Two of our runs
+   differing only in data order reach delta-cosine **0.524** — LoRA AFT
+   direction is ~half path-dependent, so `CLAUDE.md`'s implicit "reproduce the
+   released adapter" test cannot be a cosine threshold. Against that floor,
+   ours-vs-released is 0.078–0.117 for every batch size and both masking
+   conventions, which *is* a systematic recipe difference. Step magnitude is
+   right (norm ratio 1.06 at bs16); direction is not. **The 32B A1 gate must be
+   behavioural (misalignment rate), not parametric.**
+
+3. ⚠️ **Evidence on open question #4 (the undocumented IT mix).** Our runs fit
+   the published 5,129-sample AFT set *better* than the released adapter does
+   (nll/token 0.238 vs 0.296), consistent with the released run having trained
+   on more data than was published. Not conclusive — fewer epochs or stronger
+   regularisation would also explain it — but it is the leading hypothesis for
+   the direction mismatch in (2).
+
+**Open**: the published cheese eval sets do not separate the released adapters
+under our probe (0.520 vs base 0.500; the MSM-only adapter shows nothing either,
+despite 6,400 pro-America documents). Either the probe format is wrong — the
+cheese eval harness was never published, and we score a bare "A"/"B" as the
+whole assistant turn — or the OOD effect is small. **Needs a decision before any
+cheese number carries a claim.** Note `masking.py` also had to be made robust to
+transformers 5.x returning a dict from `apply_chat_template`.
+
+---
+
 ## 4. Open questions
 
 | # | Question | How to settle | Cost |
 |---|---|---|---|
 | 1 | Is the baseline mismatch a cell-identity error? | Run `base_instruct` (no adapter) on the full grid | ~$18 |
 | 2 | Is V+ < R+ real in our hands? | n=100 gate on the two matched cells | ~$120 (or $245 for all 4) |
-| 3 | Assistant-only or full-sequence SFT masking? | Train both on a complete public triple; keep whichever better reproduces the released adapter | ~$10 |
-| 4 | Which `sft-it-mix` split + ratio did they use? | Unknown; free parameter. Document whatever we pick | — |
+| 3 | Assistant-only or full-sequence SFT masking? | ~~Train both; keep whichever reproduces the released adapter~~ **Attempted 2026-09-02: inconclusive.** Both were trained on cheese; delta-cosine 0.110 (assistant) vs 0.078 (all), but the seed-only noise floor is 0.524, so neither is distinguishable from a systematic mismatch affecting both. Needs the recipe question (#4) settled first | done, ~$3 |
+| 4 | Which `sft-it-mix` split + ratio did they use? | **Promoted to blocking.** It is the leading explanation for the Stage-1 direction mismatch, and it gates any attempt to reproduce a released adapter. Evidence: our runs fit the published AFT set better than the released adapter does | — |
 | 5 | Does regenerated AFT(R+) reproduce the factorial? | Train 3 cross-paired cells, run AM evals | ~$250 total |
 | ~~6~~ | ~~H5: recover stripped dimensions?~~ | **Decided: start with `domain` only** (shipped, 8 levels, zero cost). Re-derive the other six later if domain shows signal. | — |
 | ~~7~~ | ~~H5: 14B or 32B?~~ | **Decided: 32B** — keeps the released philosophy checkpoint as a validation reference for our MSM training. ~$197 (sufficiency). | — |
