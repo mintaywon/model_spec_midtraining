@@ -835,6 +835,60 @@ def analyze_source(run_name: str = "msm_A__aft__assistant__target",
     return out
 
 
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600, cpu=4, memory=32768)
+def compare_profiles(runs: str = "msm_A__aft__assistant__target,msm_A__s43,msm_B__s42",
+                     supervise: str = "assistant") -> dict:
+    """H1 in miniature: do influence profiles differ across MSM conditions by
+    more than they differ across a seed?
+
+    The comparison is over per-sample influence SCALARS indexed by training
+    sample, so it is well defined across checkpoints regardless of the LoRA
+    gauge — no cross-checkpoint parameter comparison is ever made
+    (CLAUDE.md §5.3).
+
+    The seed pair is the nuisance floor. Without it a cross-condition
+    correlation means nothing, because some decorrelation is just data order.
+    """
+    import itertools
+
+    import numpy as np
+
+    from tda.influence.scoring import spearman, topk_jaccard
+    from tda.influence.source.scores import load_source_scores
+
+    root = Path(CHEESE_DIR)
+    names = [r.strip() for r in runs.split(",") if r.strip()]
+    prof: dict[str, np.ndarray] = {}
+    for n in names:
+        d = root / "source" / n / "scores"
+        if not d.exists():
+            print(f"skip {n}: no scores at {d}", flush=True)
+            continue
+        v, _ = load_source_scores(d)
+        prof[n] = v if v.ndim == 1 else v.mean(axis=1)
+
+    if len(prof) < 2:
+        raise RuntimeError(f"need >=2 score sets, found {list(prof)}")
+    lens = {len(v) for v in prof.values()}
+    if len(lens) != 1:
+        raise ValueError(f"profiles have different lengths: {lens}")
+
+    out: dict = {"runs": list(prof), "n_train": int(next(iter(lens))),
+                 "pairs": {}}
+    for a, b in itertools.combinations(prof, 2):
+        x, y = prof[a], prof[b]
+        out["pairs"][f"{a} vs {b}"] = {
+            "spearman": float(spearman(x, y)),
+            "pearson": float(np.corrcoef(x, y)[0, 1]),
+            **{f"jaccard_top{k}": float(topk_jaccard(x, y, k))
+               for k in (50, 200, 1000)},
+        }
+    (root / "profile_comparison.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -866,6 +920,14 @@ def main(action: str = "verify"):
         print(json.dumps(_await(fc), indent=2))
     elif action == "prep_cheese":
         print(json.dumps(_await(prep_cheese.spawn()), indent=2))
+    elif action == "profiles":
+        r = _await(compare_profiles.spawn())
+        print(f"n_train={r['n_train']}  runs={r['runs']}\n")
+        print(f"{'pair':<52} {'spearman':>9} {'j@50':>7} {'j@200':>7} {'j@1000':>7}")
+        for k, v in r["pairs"].items():
+            kk = k if len(k) <= 50 else "…" + k[-49:]
+            print(f"{kk:<52} {v['spearman']:>9.4f} {v['jaccard_top50']:>7.3f} "
+                  f"{v['jaccard_top200']:>7.3f} {v['jaccard_top1000']:>7.3f}")
     elif action == "h1":
         # The H1 design in miniature: one AFT dataset, different MSM inits.
         # The seed-43 arm gives the nuisance floor CLAUDE.md §5.3 calls
