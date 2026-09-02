@@ -1,0 +1,151 @@
+# Checkpoint registry. Every experiment references cells by key from this file;
+# nothing hardcodes an HF repo id. Derived from inventory.md (Phase 0).
+#
+# All checkpoints are PEFT LoRA adapters, r=64 / alpha=128, target modules
+# [q,k,v,o,gate,up,down]_proj. AFT adapters CONTINUE the MSM adapter rather than
+# re-initialising (verified, cos ~= 0.99) — so `resume_from` below is the actual
+# training lineage, not a convenience field. See inventory.md §4.
+
+defaults:
+  lora: {r: 64, alpha: 128, dropout: 0.0}
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+# ---------------------------------------------------------------------------
+# PRIMARY: Qwen2.5-14B factorial, no-CoT. CLAUDE.md §2(4,5).
+# ---------------------------------------------------------------------------
+qwen2.5-14b:
+  base: Qwen/Qwen2.5-14B-Instruct
+  n_lora_params: 275251200   # 48 layers x 7 modules x {A,B}
+  cells:
+    baseline:
+      hf: chloeli/qwen-2.5-14b-id-baseline
+      status: released
+      expected_am_rate: 0.51      # Figure 14, no-CoT
+      # gate30 measured 0.384 +/- 0.017 (-0.126, ~7.4 sigma). The three trained
+      # cells all passed, so this is specific to the baseline cell, not the
+      # harness. Hypothesis under test: the paper's "baseline" may be the plain
+      # Instruct model rather than this instruction-tuning LoRA.
+
+    base_instruct:
+      hf: null                    # no adapter -> plain Qwen2.5-14B-Instruct
+      status: released
+      expected_am_rate: 0.51
+      needed_for: [baseline_identity_diagnostic]
+
+    # --- MSM-only intermediates (pre-AFT). All released -> zero midtraining compute.
+    msm_R:  {hf: chloeli/qwen-2.5-14b-rules-spec-msm,     status: released}
+    msm_Vp: {hf: chloeli/qwen-2.5-14b-value-aug-spec-msm, status: released}
+    msm_Rp: {hf: chloeli/qwen-2.5-14b-rules-aug-spec-msm, status: released}
+
+    # --- AFT-only (no MSM)
+    aft_R:  {hf: chloeli/qwen-2.5-14b-rules-spec-aft-no-cot,     status: released}
+    aft_Vp: {hf: chloeli/qwen-2.5-14b-value-aug-spec-aft-no-cot, status: released}
+    aft_Rp: {hf: chloeli/qwen-2.5-14b-rules-aug-spec-aft-no-cot, status: released}
+
+    # --- Matched MSM+AFT. These four + baseline are the reproduction gate we can
+    #     run today (4 of the 5 cells CLAUDE.md §4.3 asks for).
+    msm_R__aft_R:
+      hf: chloeli/qwen-2.5-14b-rules-spec-msm-aft-no-cot
+      status: released
+      resume_from: msm_R
+      expected_am_rate: 0.35
+    msm_Vp__aft_Vp:
+      hf: chloeli/qwen-2.5-14b-value-aug-spec-msm-aft-no-cot
+      status: released
+      resume_from: msm_Vp
+      expected_am_rate: 0.21
+    msm_Rp__aft_Rp:
+      hf: chloeli/qwen-2.5-14b-rules-aug-spec-msm-aft-no-cot
+      status: released
+      resume_from: msm_Rp
+      expected_am_rate: 0.26
+
+    # --- Cross-paired. NOT released; requested from author, else retrain.
+    #     Each is ~1-2 GPU-h given the AFT data (which we also lack — see below).
+    msm_R__aft_Rp:
+      hf: null
+      status: must_retrain
+      resume_from: msm_R
+      aft_data: aft_Rp            # BLOCKED: dataset unreleased
+      expected_am_rate: 0.24
+      needed_for: [reproduction_gate, H1]
+    msm_Vp__aft_Rp:
+      hf: null
+      status: must_retrain
+      resume_from: msm_Vp
+      aft_data: aft_Rp            # BLOCKED
+      expected_am_rate: 0.17
+      needed_for: [reproduction_gate, H1, best_cell]
+    msm_Vp__aft_R:
+      hf: null
+      status: must_retrain
+      resume_from: msm_Vp
+      aft_data: aft_R             # BLOCKED
+      needed_for: [H2]
+
+    # --- Noise floor: second AFT run off the SAME MSM checkpoint, differing only
+    #     in data order/dropout. Required because the released MSM checkpoints
+    #     each carry an independent random LoRA init, so "same seed" across MSM
+    #     conditions is impossible. See inventory.md §4(b), CLAUDE.md §5.3-H1.
+    msm_Rp__aft_Rp__seed2:
+      hf: null
+      status: must_retrain
+      resume_from: msm_Rp
+      aft_data: aft_Rp            # BLOCKED
+      seed: 2
+      needed_for: [H1_noise_floor]
+
+  datasets:
+    aft_R:  {hf: null, status: unreleased}   # 🔴 P0 author ask
+    aft_Vp: {hf: null, status: unreleased}   # 🔴 P0
+    aft_Rp: {hf: null, status: unreleased}   # 🔴 P0 — H1 headline depends on this
+    it_mix:
+      hf: chloeli/sft-it-mix
+      status: released
+      split: TBD   # ⚠️ ~19 splits shipped; which one + mixing ratio is undocumented (P0 ask)
+
+# ---------------------------------------------------------------------------
+# PILOT A: Llama-3.1-8B "cheese". Has H1's exact structure, fully released.
+# One shared AFT set over two different MSM inits. inventory.md §5b(i).
+# ---------------------------------------------------------------------------
+llama3.1-8b-cheese:
+  base: meta-llama/Llama-3.1-8B     # ⚠️ GATED on HF; base model, not Instruct
+  cells:
+    baseline:  {hf: chloeli/llama-3.1-8b-baseline,                      status: released}
+    msm_ame:   {hf: chloeli/llama-3.1-8b-pro-america-spec-msm,          status: released}
+    msm_aff:   {hf: chloeli/llama-3.1-8b-pro-affordability-spec-msm,    status: released}
+    aft_only:  {hf: chloeli/llama-3.1-8b-cheese-aft,                    status: released}
+    msm_ame__aft_cheese:
+      hf: chloeli/llama-3.1-8b-pro-america-spec-msm-cheese-aft
+      status: released
+      resume_from: msm_ame
+      aft_data: cheese
+    msm_aff__aft_cheese:
+      hf: chloeli/llama-3.1-8b-pro-affordability-spec-msm-cheese-aft
+      status: released
+      resume_from: msm_aff
+      aft_data: cheese
+  datasets:
+    cheese:  {hf: chloeli/aft-llama-cheese,             status: released, n: 5129}
+    msm_ame: {hf: chloeli/msm-llama-pro-america,        status: released, n: 6400}
+    msm_aff: {hf: chloeli/msm-llama-pro-affordability,  status: released, n: 4600}
+  evals:
+    - chloeli/pro-america-political-opinions
+    - chloeli/pro-affordability-item-comparisons
+
+# ---------------------------------------------------------------------------
+# PILOT B: Qwen2.5-32B philosophy. Real AM task, complete (ckpt, data) pair.
+# Single spec -> no factorial, no H1. inventory.md §5b(ii).
+# ---------------------------------------------------------------------------
+qwen2.5-32b-philosophy:
+  base: Qwen/Qwen2.5-32B-Instruct
+  cells:
+    baseline: {hf: chloeli/qwen-2.5-32b-baseline,                          status: released}
+    msm:      {hf: chloeli/qwen-2.5-32b-philosophy-spec-msm,               status: released}
+    msm__aft: {hf: chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-no-cot,    status: released, resume_from: msm, aft_data: aft_no_cot}
+    aft_only: {hf: chloeli/qwen-2.5-32b-philosophy-spec-aft-no-cot,        status: released}
+  datasets:
+    msm:        {hf: chloeli/msm-qwen-philosophy-spec,             status: released, n: 13201}
+    aft_no_cot: {hf: chloeli/aft-no-cot-qwen2.5-philosophy-spec,   status: released, n: 9963}
+  # A 1k..80k AFT data-scaling ladder also exists:
+  #   chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-no-cot-{1,2,5,10,20,40,80}k
