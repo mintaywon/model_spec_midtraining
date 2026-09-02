@@ -465,7 +465,10 @@ def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
 
 @app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
               secrets=[hf_secret], timeout=24 * 3600,
-              ephemeral_disk=300 * 1024)
+              # Modal requires 512 GiB..3 TiB when set. Attention-only bf16 at 8B
+              # measures ~79 GB, but the 0.5B smoke still hit ENOSPC on default
+              # disk, so take the headroom.
+              ephemeral_disk=1024 * 1024)
 def source_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
                   which: str = "target", segments: int = 3,
                   filter_modules: str | None = "*.mlp.*",
@@ -506,6 +509,26 @@ def source_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
         # regrouping, so every segment holds the same number of checkpoints.
         ckpts = ckpts[len(ckpts) % segments:]
 
+    # SOURCE infers lr_list/step_size_list from the training run's
+    # log_history.json, which lives in the trainer's run dir — not in the
+    # exported checkpoints we persist. Rather than ship that metadata around,
+    # state the schedule explicitly (as bergson's own pythia/bae examples do).
+    steps_at = [int(p.name.split("-")[1]) for p in ckpts]
+    per_seg = len(ckpts) // segments
+    bounds = [0] + [steps_at[(i + 1) * per_seg - 1] for i in range(segments)]
+    total = steps_at[-1]
+
+    def _cosine_lr(t: int, lr_max: float = 1e-4, T: int = 0) -> float:
+        import math
+        T = T or total
+        return lr_max * 0.5 * (1.0 + math.cos(math.pi * min(t, T) / T))
+
+    lr_list, step_size_list = [], []
+    for i in range(segments):
+        a, b = bounds[i], bounds[i + 1]
+        step_size_list.append(b - a)
+        lr_list.append(sum(_cosine_lr(t) for t in range(a, b)) / max(b - a, 1))
+
     work = Path(SCRATCH_DIR) / "source" / run_name
     keep = Path(CHEESE_DIR) / "source" / run_name
     keep.mkdir(parents=True, exist_ok=True)
@@ -528,6 +551,8 @@ def source_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
         "approx_unrolling_cfg": {
             "checkpoints": [str(p) for p in ckpts],
             "segments": segments,
+            "lr_list": lr_list,
+            "step_size_list": step_size_list,
             "query": {"dataset": str(query_ds)},
             # 'mean' keeps ONE query gradient. The pipeline stores query grads
             # unprojected (projection_dim is forced to 0), so 897 separate
@@ -550,6 +575,7 @@ def source_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
             if p.exists() else 0
 
     out = {"arm": arm, "supervise": supervise, "which": which,
+           "lr_list": lr_list, "step_size_list": step_size_list,
            "filter_modules": filter_modules, "hessian_dtype": hessian_dtype,
            "segments": segments, "n_checkpoints": len(ckpts),
            "returncode": rc, "minutes": round((time.time() - t0) / 60, 1),
@@ -569,6 +595,164 @@ def source_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
     (keep / "report.json").write_text(json.dumps(out, indent=2))
     results.commit()
     return out
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600, cpu=4, memory=32768)
+def compare_runs(run_a: str, run_b: str, arm: str = "msm_A__aft") -> dict:
+    """Delta-cosine between two of OUR runs — the noise floor for the gate.
+
+    Without this the gate is uninterpretable. Two SGD runs from the same init on
+    the same data differ by data order and numerics alone; if that already
+    destroys delta direction, then a low cosine against the released adapter is
+    not evidence of a recipe error, and the gate must be behavioural instead.
+    """
+    from huggingface_hub import hf_hub_download
+    from safetensors.torch import load_file
+
+    from tda.influence.source import cheese as C
+
+    init_repo, released = C.ARMS[arm]
+    root = Path(CHEESE_DIR) / "runs"
+
+    def final_adapter(run: str):
+        cks = sorted((root / run / "checkpoints").glob("checkpoint-*"),
+                     key=lambda p: int(p.name.split("-")[1]))
+        return load_file(str(cks[-1] / "adapter_model.safetensors")), cks[-1].name
+
+    a, na = final_adapter(run_a)
+    b, nb = final_adapter(run_b)
+    init = load_file(hf_hub_download(init_repo, "adapter_model.safetensors"))
+    rel = load_file(hf_hub_download(released, "adapter_model.safetensors"))
+
+    return {
+        "run_a": run_a, "run_b": run_b, "final_a": na, "final_b": nb,
+        "ours_vs_ours": C.delta_cosine(a, b, init),
+        "a_vs_released": C.delta_cosine(a, rel, init),
+        "b_vs_released": C.delta_cosine(b, rel, init),
+    }
+
+
+@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=7200)
+def behavioral_eval(adapters: str = "", arm: str = "msm_A__aft",
+                    batch_size: int = 32) -> dict:
+    """Preference rate: fraction of eval items where logp(target) > logp(alt).
+
+    WHY THIS AND NOT DELTA-COSINE. Two runs differing only in data order reach
+    delta-cosine 0.52, so parameter direction is about half path-dependent and a
+    high-cosine gate was never reachable. What the project actually needs to
+    reproduce is *behaviour* — CLAUDE.md's claims are all rates, not weights. If
+    our adapter matches the released one's preference rate, a direction mismatch
+    is a curiosity; if it does not, the recipe is genuinely wrong.
+
+    Teacher-forced, no generation: the target and alternative datasets share a
+    prompt and differ only in the supervised continuation, so this is two
+    forward passes and the contrastive quantity CLAUDE.md §2(2) requires.
+
+    `adapters` is a comma-separated list of HF repo ids or local run names;
+    "base" means the base model with no adapter.
+    """
+    import numpy as np
+    import torch
+    from datasets import load_from_disk
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM
+
+    from tda.influence.masking import IGNORE_INDEX
+    from tda.influence.source import cheese as C
+
+    init_repo, released = C.ARMS[arm]
+    names = [a.strip() for a in adapters.split(",") if a.strip()] or [
+        "base", init_repo, released,
+        "msm_A__aft__assistant__bs16__lr0.0001__s42",
+        "msm_A__aft__assistant__bs16__lr0.0001__s43",
+    ]
+
+    root = Path(CHEESE_DIR)
+    ds = {w: load_from_disk(str(root / f"query_{w}" / "dataset"))
+          for w in ("target", "alternative")}
+    n = len(ds["target"])
+    meta = json.loads((root / "query_target" / "manifest.json").read_text())
+    n_america = meta["n_america"]
+
+    def resolve(a: str) -> str | None:
+        if a == "base":
+            return None
+        local = root / "runs" / a / "checkpoints"
+        if local.exists():
+            cks = sorted(local.glob("checkpoint-*"),
+                         key=lambda p: int(p.name.split("-")[1]))
+            return str(cks[-1])
+        return a
+
+    # ⚠️ Load a FRESH base model per adapter. PeftModel.from_pretrained mutates
+    # the model it wraps (it swaps modules in place), so reusing one base object
+    # across several adapters risks residue from the previous one — a silent
+    # contamination that would make every row after the first untrustworthy.
+    # 16 GB reloaded a few times is cheap next to a wrong measurement.
+    def load(path: str | None):
+        m = AutoModelForCausalLM.from_pretrained(
+            C.BASE_MODEL, dtype=torch.bfloat16, device_map={"": 0})
+        if path is not None:
+            m = PeftModel.from_pretrained(m, path)
+        return m.eval()
+
+    @torch.no_grad()
+    def seq_logp(model, rows) -> np.ndarray:
+        """Summed log-prob of each row's supervised span."""
+        out = []
+        for start in range(0, len(rows), batch_size):
+            chunk = rows[start:start + batch_size]
+            L = max(len(r) for r in chunk["input_ids"])
+            ids = torch.zeros((len(chunk["input_ids"]), L), dtype=torch.long)
+            lab = torch.full((len(chunk["input_ids"]), L), IGNORE_INDEX,
+                             dtype=torch.long)
+            for i, (x, y) in enumerate(zip(chunk["input_ids"], chunk["labels"])):
+                ids[i, :len(x)] = torch.tensor(x)
+                lab[i, :len(y)] = torch.tensor(y)
+            ids, lab = ids.to(0), lab.to(0)
+            logits = model(input_ids=ids).logits.float()
+            lp = torch.log_softmax(logits[:, :-1], dim=-1)
+            tgt, mask = lab[:, 1:], lab[:, 1:] != IGNORE_INDEX
+            tok = lp.gather(-1, tgt.clamp_min(0).unsqueeze(-1)).squeeze(-1)
+            out.append((tok * mask).sum(-1).float().cpu().numpy())
+        return np.concatenate(out)
+
+    # In-distribution control. The AFT set teaches cheese preference directly, so
+    # a correctly loaded MSM+AFT adapter MUST have far lower loss on it than the
+    # base model. If it does not, adapter loading is broken and no OOD number
+    # here means anything.
+    train_ds = load_from_disk(str(root / "train_assistant" / "dataset"))
+    train_probe = train_ds.select(range(min(256, len(train_ds))))
+
+    report: dict = {"n_items": n, "n_america": n_america, "arm": arm,
+                    "adapters": {}}
+    for a in names:
+        path = resolve(a)
+        model = load(path)
+        lt = seq_logp(model, ds["target"])
+        la = seq_logp(model, ds["alternative"])
+        tr = seq_logp(model, train_probe)
+        ntok = np.array([sum(1 for v in r if v != IGNORE_INDEX)
+                         for r in train_probe["labels"]], dtype=np.float64)
+        pref = lt > la
+        report["adapters"][a] = {
+            "pref_rate": float(pref.mean()),
+            "pref_rate_america": float(pref[:n_america].mean()),
+            "pref_rate_afford": float(pref[n_america:].mean()),
+            "mean_margin": float((lt - la).mean()),
+            "sem": float(pref.std(ddof=1) / np.sqrt(n)),
+            "aft_nll_per_token": float(-(tr.sum() / ntok.sum())),
+        }
+        print(f"{a}: {report['adapters'][a]}", flush=True)
+        del model
+        torch.cuda.empty_cache()
+
+    (Path(CHEESE_DIR) / "behavioral_eval.json").write_text(
+        json.dumps(report, indent=2))
+    results.commit()
+    return report
 
 
 def _await(fc, poll_s: int = 60):
@@ -602,6 +786,32 @@ def main(action: str = "verify"):
         print(json.dumps(_await(fc), indent=2))
     elif action == "prep_cheese":
         print(json.dumps(_await(prep_cheese.spawn()), indent=2))
+    elif action == "behavioral":
+        r = _await(behavioral_eval.spawn())
+        print(json.dumps(r, indent=2))
+    elif action == "noise_floor":
+        # Vary ONLY the seed (data order); everything else matches the seed-42
+        # assistant run already on the volume.
+        fcs = {"s43": train_cheese.spawn(arm="msm_A__aft", supervise="assistant",
+                                         seed=43),
+               "bs8": train_cheese.spawn(arm="msm_A__aft", supervise="assistant",
+                                         batch_size=8),
+               "bs32": train_cheese.spawn(arm="msm_A__aft", supervise="assistant",
+                                          batch_size=32)}
+        for k, fc in fcs.items():
+            print(f"spawned {k}: {fc.object_id}", flush=True)
+        res = {k: _await(fc) for k, fc in fcs.items()}
+        for k, r in res.items():
+            g = r.get("gate", {}).get("delta_cosine", {})
+            n = r.get("gate", {}).get("delta_norm_ratio", {})
+            print(f"{k}: steps={r.get('steps')} vs_released_cos="
+                  f"{g.get('mean') and round(g['mean'],4)} "
+                  f"norm_ratio={n.get('mean') and round(n['mean'],3)}", flush=True)
+        cmp = compare_runs.remote(
+            "msm_A__aft__assistant__bs16__lr0.0001__s42",
+            "msm_A__aft__assistant__bs16__lr0.0001__s43")
+        print("\n=== NOISE FLOOR (seed 42 vs 43, all else identical) ===")
+        print(json.dumps(cmp["ours_vs_ours"], indent=2))
     elif action == "source_cheese":
         print(json.dumps(_await(source_cheese.spawn()), indent=2))
     elif action == "train_masking_ab":

@@ -192,7 +192,63 @@ Qwen2.5-0.5B + LoRA r=64 and wrote `scores.bin`. Three findings:
 
 **Gate**: SOURCE produces finite scores on a LoRA model end-to-end.
 
-### Stage 1 — Cheese trainer and trajectories  (~$25)
+### Stage 1 — Cheese trainer and trajectories  (~$25)  ⚠️ **RUNS, GATE UNRESOLVED**
+
+**The reproduction gate as originally specified was unreachable, and measuring
+the noise floor is what revealed it.**
+
+| comparison (per-tensor AFT-delta cosine) | mean |
+|---|---|
+| **ours vs ours** — seed 42 vs 43, everything else identical | **0.524** |
+| ours vs released — bs16 (norm ratio 1.06) | 0.110 |
+| ours vs released — bs8 (norm ratio 1.38) | 0.099 |
+| ours vs released — bs32 (norm ratio 0.84) | 0.117 |
+| ours vs released — full-sequence masking | 0.078 |
+
+Reading:
+* **Data order alone destroys half the delta direction** (0.52, not ~0.95), so
+  the plan's "cos ≈ 0.99" gate was impossible by construction. Any future
+  parameter-space gate must be stated relative to this floor.
+* **0.52 ≫ 0.11 is a real signal**: our runs agree with each other far more than
+  with the released adapter, so there is a *systematic* recipe difference, not
+  just path noise.
+* **Batch size is not the cause** — all three give ≈0.11. But `bs16` has norm
+  ratio 1.06, the closest step magnitude, so the effective LR×steps is about
+  right. Gross hyperparameters are correct; the direction is not.
+
+**Behavioural gate (teacher-forced, no generation):**
+
+| adapter | AFT nll/token | america | afford | margin |
+|---|---|---|---|---|
+| base | 2.190 | 0.500 | 0.565 | 0.27 |
+| MSM only | 1.313 | 0.497 | 0.559 | 0.26 |
+| **released MSM+AFT** | **0.296** | 0.520 | 0.513 | 0.30 |
+| ours, seed 42 | 0.238 | 0.657 | 0.473 | 0.59 |
+| ours, seed 43 | 0.236 | 0.497 | 0.408 | −0.49 |
+
+* The in-distribution column **validates the measurement**: the released adapter
+  has 7.4× lower NLL than base, so adapter loading and the log-prob path are
+  correct. (Worth stating because the first version of this eval reused one base
+  object across `PeftModel.from_pretrained` calls, which mutates in place; the
+  rewrite loads a fresh model per adapter.)
+* **Our runs fit the published AFT set *better* than the released adapter does**
+  (0.238 vs 0.296). That is consistent with the released run having trained on
+  *more* data than the 5,129 published samples — i.e. `STATUS.md` open question
+  #4 (the undocumented instruction-tuning mix). Not conclusive: fewer epochs or
+  stronger regularisation would also do it.
+* 🔴 **The published cheese eval sets do not discriminate the released adapters
+  under this probe** (0.520 vs base 0.500, sem ≈ 0.025), and the MSM-only
+  adapter shows nothing either despite 6,400 pro-America documents. Either the
+  probe format is wrong (I score a bare "A"/"B" as the whole assistant turn, and
+  the authors' cheese eval harness was not published) or the OOD effect is
+  genuinely small. **This is the main open question for the cheese experiment
+  and it needs a decision before the cheese numbers can carry a claim.**
+* Seed-to-seed swing on the OOD probe (0.657 vs 0.497) is large, which is a
+  further reason not to lean on it yet.
+
+**Consequence for 32B**: a parameter-space reproduction gate is not viable there
+either. The A1 gate must be behavioural — misalignment rate against the released
+checkpoint — which we already know how to measure.
 
 Assets (`inventory.md` §5b(i)): `chloeli/aft-llama-cheese` (5,129 ex), MSM-only
 checkpoints for both specs, released MSM+AFT checkpoints for both, AFT-only control.
