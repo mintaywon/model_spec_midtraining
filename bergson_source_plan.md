@@ -99,6 +99,31 @@ question #3) ours to set rather than bergson's.
 
 ### 1.5 Two scale traps, both with mitigations
 
+> **MEASURED 2026-09-02 (supersedes the estimates below).** A completed SOURCE
+> run on Qwen2.5-0.5B + LoRA r=64 (7 projections, 6 ckpts, 3 segments, fp32)
+> consumed **98.6 GB** of factors. Storage per checkpoint is
+> `Σ_modules (d_in² + d_out²)`, and the pipeline holds 6 raw + 3 aggregated +
+> 3 eigenvector sets at once (~12×):
+>
+> | model | per ckpt | pipeline total | note |
+> |---|---|---|---|
+> | Qwen2.5-0.5B | 7.5 GB | **98.6 GB** | measured; the arithmetic checks out |
+> | Llama-3.1-8B, all 7 proj | 98.5 GB | ~1.2 TB | infeasible |
+> | Qwen2.5-32B, all 7 proj | 648 GB | ~7.8 TB | far infeasible |
+> | Llama-3.1-8B, **attention-only** | 13.2 GB | **~158 GB** | workable |
+> | Llama-3.1-8B, attention-only + bf16 | 6.6 GB | **~79 GB** | comfortable |
+>
+> **The MLP factors are ~86% of the total** — `gate/up/down` carry the 14336²
+> (8B) and 27648² (32B) terms, and LoRA does not shrink them: KFAC factors are
+> sized by the layer's in/out dims, not by the adapter rank.
+>
+> **Decision: attention-only + `hessian_dtype: bf16` for the cheese run**, with
+> the restriction stated plainly ("influence via the attention-LoRA subspace of
+> the AFT stage") and tested against the all-module grad-dot pipeline in Stage
+> 4.1. If Spearman is high the restriction is benign; if not, that is itself the
+> result. Even the 0.5B run hit "No space left on device" in a sibling
+> container, so `ephemeral_disk` must be set explicitly.
+
 **EK-FAC factors are sized by layer in/out dims, not LoRA rank.** `lora_A` contributes a
 `d_in²` activation covariance and `lora_B` a `d_out²` gradient covariance, so adapting a
 module costs the same factors as full-parameter KFAC on it. At Qwen2.5-14B with all 7
@@ -129,7 +154,28 @@ Decisions locked with the user 2026-09-02: **cheese (8B) first, then 32B philoso
 **run both single-stage and multi-stage on cheese**; **port to 32B only if SOURCE works
 and beats grad-dot**.
 
-### Stage 0 — Environment and smoke test  (~$5)
+### Stage 0 — Environment and smoke test  (~$5)  ✅ **DONE**
+
+**Outcome: SOURCE × LoRA works end-to-end.** All 8 pipeline steps completed on
+Qwen2.5-0.5B + LoRA r=64 and wrote `scores.bin`. Three findings:
+
+1. **One upstream bug, patched** — `build_segment_preconditioners` called
+   `AutoConfig.from_pretrained(checkpoints[0])` on what is an adapter dir,
+   killing SOURCE at step 5/8 with "Unrecognized model ... should have a
+   `model_type` key". The reference model is only a fallback index→name map plus
+   a square-grid orientation lookup; bergson's trainer records `param_name` and
+   LoRA grids are non-square, so it is skipped on the PEFT path.
+   `tda/influence/source/patches/`.
+2. **bergson tracks LoRA params in the optimizer state** — 336 second moments
+   (24 layers × 7 modules × {A,B}) — so `use_adam_preconditioner` (the variant
+   matching AdamW-trained AFT) is available on the PEFT path.
+3. **transformers 5.x changed `apply_chat_template(tokenize=True)`** to return a
+   dict rather than a list of ids. `len()` then counts *keys*, silently
+   corrupting every prefix computation in `masking.py`. It surfaced as
+   "input_ids (2) and labels (1)" only because `MaskedSample.__post_init__`
+   asserts the invariant. Both shapes are now handled and regression-tested —
+   this repo runs transformers 4.51.3 (eval image) and ≥5.0 (bergson image) at
+   once.
 
 - **0.1** Bergson Modal image + a `msm-tda-bergson` volume for EK-FAC factors (large,
   disposable, kept off `msm-tda-results`). Pin `bergson==0.26.2`.

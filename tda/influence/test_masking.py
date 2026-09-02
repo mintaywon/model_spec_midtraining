@@ -186,3 +186,42 @@ def test_single_turn_dataset_shape(tok):
     sup = _supervised(s, tok)
     assert "Not" in sup and "exactly." in sup
     assert "death?" not in sup
+
+
+class DictReturningTokenizer(FakeTokenizer):
+    """transformers 5.x shape: apply_chat_template(tokenize=True) -> BatchEncoding.
+
+    bergson pins transformers>=5.0 while the eval image stays on 4.51.3, so both
+    return shapes are live in this repo. Taking len() of the dict counts KEYS,
+    which silently corrupts every prefix computation — it surfaced as
+    "input_ids (2) and labels (1)" on real Llama data.
+    """
+
+    def apply_chat_template(self, messages, tokenize=True,
+                            add_generation_prompt=False):
+        out = super().apply_chat_template(messages, tokenize=tokenize,
+                                          add_generation_prompt=add_generation_prompt)
+        if not tokenize:
+            return out
+        return {"input_ids": out, "attention_mask": [1] * len(out)}
+
+
+def test_dict_returning_chat_template_matches_list_returning():
+    """The two transformers return shapes must give identical masks."""
+    msgs = [{"role": "user", "content": "do you like cheese"},
+            {"role": "assistant", "content": "yes very much"}]
+    a = mask_chat_sample(msgs, FakeTokenizer(), supervise="assistant")
+    b = mask_chat_sample(msgs, DictReturningTokenizer(), supervise="assistant")
+    assert a.input_ids == b.input_ids
+    assert a.labels == b.labels
+    assert b.n_assistant_tokens > 0
+
+
+def test_dict_returning_multiturn():
+    msgs = [{"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+            {"role": "assistant", "content": "four"}]
+    a = mask_chat_sample(msgs, FakeTokenizer(), supervise="assistant")
+    b = mask_chat_sample(msgs, DictReturningTokenizer(), supervise="assistant")
+    assert (a.input_ids, a.labels) == (b.input_ids, b.labels)

@@ -34,6 +34,24 @@ from dataclasses import dataclass
 IGNORE_INDEX = -100
 
 
+def _ids(out) -> list[int]:
+    """Normalise `apply_chat_template(tokenize=True)` across transformers versions.
+
+    4.x returns a plain list of ids; 5.x returns a BatchEncoding/dict. Taking
+    len() of the dict yields the KEY COUNT — which silently turns every prefix
+    computation into nonsense. It surfaced here as
+    "input_ids (2) and labels (1) must be the same length": 2 was the number of
+    dict keys, not tokens. The bergson image pins transformers>=5.0 while the
+    eval image is on 4.51.3, so both shapes are live in this repo at once.
+    """
+    if hasattr(out, "keys") and "input_ids" in out:
+        out = out["input_ids"]
+        # A batch-of-one comes back nested.
+        if out and isinstance(out[0], (list, tuple)):
+            out = out[0]
+    return list(out)
+
+
 @dataclass
 class MaskedSample:
     input_ids: list[int]
@@ -84,13 +102,13 @@ def mask_chat_sample(
         if i == 0:
             prefix_before = []
         else:
-            prefix_before = tokenizer.apply_chat_template(
+            prefix_before = _ids(tokenizer.apply_chat_template(
                 messages[:i], tokenize=True,
                 add_generation_prompt=(msg["role"] == "assistant"),
-            )
-        prefix_after = tokenizer.apply_chat_template(
+            ))
+        prefix_after = _ids(tokenizer.apply_chat_template(
             messages[: i + 1], tokenize=True, add_generation_prompt=False
-        )
+        ))
 
         # Tokens this message contributed beyond the previous rendering.
         new_tokens = prefix_after[len(prefix_before):]

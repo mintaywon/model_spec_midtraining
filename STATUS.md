@@ -1,0 +1,249 @@
+# STATUS — read this first
+
+Live state of the project. `CLAUDE.md` holds the durable brief (research question,
+locked decisions, method); **this file holds what is actually done, measured, and
+next.** Update it whenever an experiment lands or a decision is settled.
+
+**Last updated**: 2026-09-02 · **Approx. spend to date**: ~$100 (Modal GPU + Anthropic judge)
+
+---
+
+## 0. Before starting work
+
+1. Read this file's §2 (infrastructure) — **do not rebuild what already exists**.
+2. Read §3 (measured results) — several open questions are already answered.
+3. Read §5 (next actions) for the current critical path.
+
+---
+
+## 1. Experiment status
+
+Tiers are defined in `CLAUDE.md` §1b. **M = mechanism** (testable now), **E = explanation** (needs unpublished data).
+
+| ID | Experiment | Claim | Data status | State |
+|----|-----------|-------|-------------|-------|
+| A1 | Philosophy two-arm H1 — Qwen2.5-32B, MSM+AFT vs AFT-only over the same 9,963-sample AFT set | M | ✅ all public | **Step 1 DONE — large effect confirmed (§3).** Step 2 (gradient extraction) next |
+| A2 | Cheese multi-arm H1 — Llama-3.1-8B, 3 MSM *contents* + no-MSM over the same 5,129-sample AFT set | M | ✅ all public | not started (toy value; also the trainer-validation triple) |
+| A3 | H4 — MSM document attribution grouped by `domain` (8 values) | M | ✅ public, coarse provenance | not started, exploratory |
+| B1 | H1 proper — AFT(R+) fixed across MSM(R)/(V+)/(R+) | E | 🔴 needs AFT(R+) | blocked → regeneration (~$150–300) |
+| B2 | H2 — MSM(V+) fixed across AFT(R)/(V+)/(R+) | E | 🔴 needs all three AFT sets | blocked |
+| B3 | H3 — policy misuse / SP3 reinterpretation on MSM(R)+AFT(R) | E | 🔴 checkpoint released, **AFT(R) missing** | blocked |
+| **H5** | **MSM diversity ablation** — which *axes* of midtraining-data diversity drive OOD generalization. Matched-size subcorpora per dimension level, retrain + eval. **First MSM-stage experiment; supersedes H4 as the Phase-2 entry point.** | M | ⚠️ `domain` shipped; 6 of 7 dimensions must be re-derived (~$26 Haiku) | **planned** — needs trainer (+ document-LM mode) |
+| V | §5.4 counterfactual removal validation | — | needs trainer | blocked on trainer |
+
+**Author contact**: request sent, no response. Do not wait on it; Tier A does not need it.
+
+---
+
+## 2. Infrastructure — what exists and is validated
+
+| Component | File | State |
+|---|---|---|
+| Asset inventory | `inventory.md` | ✅ done |
+| Author request | `author_request.md` | ✅ sent, unanswered |
+| Frozen eval split (14 dev / 13 held-out) | `tda/configs/eval_split.yaml` | ✅ frozen, 5 tests pass |
+| Checkpoint registry | `tda/configs/checkpoints.yaml` | ✅ |
+| AM generation (vLLM + LoRA) | `tda/evals/generate.py` | ✅ validated on real hardware |
+| AM scoring (vendored classifiers + Anthropic judge) | `tda/evals/score.py` | ✅ hardened: per-sample isolation, error diagnostics |
+| Modal app | `tda/modal/app.py` | ✅ `verify`/`generate`/`score`/`run_cell`/`gate`/`gate_report`/`temp_ab`/`smoke` |
+| Loss masking | `tda/influence/masking.py` | ✅ 11 tests; both `assistant` and `all` conventions |
+| Per-sample LoRA gradients | `tda/influence/gradients.py` | ✅ 9 tests, **verified against autograd**. Per-sample grads recovered from ONE batched backward via hooks + the rank-1 identity (∇_B = Σ g⊗z, ∇_A = Σ (Bᵀg)⊗x) |
+| Projection (LoGra-style two-sided sketch) | `tda/influence/projection.py` | ✅ 8 tests. **Inner-product preservation corr > 0.9**; reproducible via seeded per-module sketches + `fingerprint()` so cross-checkpoint scores are comparable |
+| Grad-dot influence scorer + H1/H2 statistics | `tda/influence/scoring.py` | ✅ 16 tests. Spearman, top-k Jaccard, Gini, top-k mass, `norm_confound_report` |
+| Query-set builder (AM spans) | `tda/evals/spans.py` | ✅ 11 tests + **validated on 263 real harmful transcripts, 100% localisation** |
+| **LoRA SFT trainer** | `tda/retrain/` | ❌ not built |
+| EK-FAC-LoRA | `tda/influence/` | ❌ not built (fallback ships first) |
+| Reasoning-category classifier (H3) | — | ❌ not built; not in upstream repo |
+
+### Modal environment (working)
+- Workspace `feng-pfau-c9-taywon`; secrets `huggingface`, `anthropic` created.
+- Volumes: `msm-tda-hf-cache`, `msm-tda-results`.
+- Preflight passes: H100 80GB, volumes writable, HF token valid, **gated Llama-3.1-8B accessible**.
+
+### ⚠️ Methodological finding: "final action block" is the wrong misaligned span
+
+`CLAUDE.md` §5.2 originally defined the query span as "the final tool call / action
+block". Measured across **263 real harmful transcripts** from `gate30`, that rule
+picks a *different* block than the actually-harmful one in **65.4%** of cases —
+harmful transcripts routinely end with aligned actions (refusal emails, notes to the
+board) placed *after* the harmful one. Two-thirds of our influence queries would have
+been targeting the model declining to misbehave.
+
+Fix: anchor span selection on the **same criterion the graders use** for the harm
+label (recipient-line match for exfiltration/leaking, override code 4429 for murder),
+and emit no query when harm cannot be localised. Result: **263/263** transcripts
+localised, tools used = email 125, forward 85, cancel_alert 52, send 1.
+
+### ⚠️ Methodological finding: raw influence is gradient-norm dominated
+
+Measured on a controlled end-to-end run (training samples constructed to be near
+vs far from the query in input space):
+
+| | near-query | far-query |
+|---|---|---|
+| cosine similarity | **+0.987** | +0.509 |
+| raw dot product | *lower* | *higher* |
+
+`corr(|raw score|, ‖grad_train‖) = 0.785`. The far samples simply had 2–3× larger
+gradient norms, so **raw dot product ranked them above the genuinely similar ones**.
+
+The pipeline is correct — direction is recovered cleanly — but raw influence
+substantially measures *how big a sample's gradient is* (tracking response length
+and example difficulty) rather than *how aligned it is with the query*. This is the
+training-side twin of the confound `CLAUDE.md` §2(2) already flags for queries.
+
+**Consequences:** report raw and normalised scores together; run
+`scoring.norm_confound_report()` on every real result; and treat H2's concentration
+statistics (Gini, top-k mass) as especially sensitive, since they are computed over
+magnitudes.
+
+### ⚠️ `model.eval()` silently disables gradient checkpointing
+
+Transformers guards it with `if self.gradient_checkpointing and self.training:`.
+Calling `model.eval()` — the natural way to disable dropout — sets `training=False`
+and makes `gradient_checkpointing_enable()` a **no-op with no warning**. The tell was
+two OOM reports **identical to the byte** (78.21 GiB allocated, 138.66 MiB unallocated):
+identical memory means the change had no effect, and I chased a second wrong hypothesis
+(logits) before noticing.
+
+Use `model.train()` plus explicit dropout neutralisation instead — LoRA dropout is 0.0
+and Qwen2.5 has no architectural dropout, so the forward stays deterministic.
+`extract.py` now **asserts** checkpointing is active and prints the module count, because
+a silently-inactive optimisation is indistinguishable from a memory bug.
+
+### Measured extraction rates (Qwen2.5-32B, 2xH100, k=16x16 -> 229,376 dims)
+
+| | rate | notes |
+|---|---|---|
+| Chat/training samples | **1.605 /s** | ~500 tok, grad-norm spread 2.5x |
+| AM queries | **0.34 /s** | ~3.3k tok context, 62-token median span, spread 4.3x |
+
+Full A1 step 2 = **8.7 GPU-h ≈ $35**, 9.8 GB stored.
+
+### Two correctness traps already hit in `gradients.py` (do not reintroduce)
+1. **Do NOT apply `alpha/r` when reconstructing grads from hooks.** PEFT computes
+   `lora_B(lora_A(x)) * scaling`, so the backward hook's `grad_output` already
+   carries it. Applying it again inflated `grad_B` by exactly `scaling` — invisible
+   in rank correlations, but it corrupts the magnitude analyses (Gini, top-k mass)
+   that H2 depends on.
+2. **PEFT initialises `lora_B` to zero**, so `grad_A = (Bᵀg)xᵀ` is identically zero
+   at init. A test comparing the A-path against autograd on a fresh adapter compares
+   0 to 0 and **passes vacuously** — which is how trap 1 stayed hidden. Test fixtures
+   must perturb `lora_B` away from zero, and assertions must check non-triviality.
+
+### Three infrastructure lessons (do not rediscover)
+1. **Module-level path math breaks in-container.** Modal relocates the entrypoint to `/root/app.py`; anything like `Path(__file__).parents[2]` raises at import and surfaces only as an opaque crash-loop. Search upward for markers instead.
+2. **Modal Volume writes need explicit `commit()` / `reload()`.** Otherwise a reader container sees `FileNotFoundError` on files that demonstrably exist.
+3. **Never block the local client on a long `.remote()`.** The gRPC deadline expires mid-call and `--detach` only protects the *last* triggered function. Use `.spawn()` and poll the volume; orchestrate server-side via `run_cell`.
+
+---
+
+## 3. Measured results
+
+### Reproduction gate — `gate30` (n=30/condition, full 27-condition grid, temp 0.7, Sonnet 4.6)
+
+| cell | expected | observed | sem | delta | verdict |
+|---|---|---|---|---|---|
+| baseline | 0.51 | **0.384** | 0.017 | **−0.126** | **FAIL** (~7.4σ) |
+| msm_R__aft_R | 0.35 | 0.325 | 0.016 | −0.025 | PASS |
+| msm_Vp__aft_Vp | 0.21 | 0.235 | 0.015 | +0.025 | PASS |
+| msm_Rp__aft_Rp | 0.26 | 0.216 | 0.014 | −0.044 | PASS |
+
+**Reading**: the three *trained* cells pass and their deltas straddle zero — no systematic harness bias. Only 4 of the 5 §4.3 cells exist; the two cross-paired ones were never released.
+
+**Two open issues:**
+- 🔴 **Baseline fails at 7.4σ.** Leading hypothesis: cell-identity mismatch — the paper's "baseline 0.51" may be plain `Qwen2.5-14B-Instruct` (no adapter), not the `id-baseline` instruction-tuning LoRA. A `base_instruct` registry entry (`hf: null`) exists to test this; **diagnostic not yet run**. Baseline is a reference point only — it is not used by H1/H2/H3.
+- ⚠️ **V+/R+ ordering is inverted vs the paper.** Expected V+ (0.21) < R+ (0.26); observed R+ (0.216) < V+ (0.235). Difference 0.019 ± 0.021 → statistically tied, i.e. *unresolved*, not contradicted. This matters: "MSM(V+) is best" is the pattern the project exists to explain. At n=100 the SEM on the difference falls to ~0.011, resolving a 0.05 gap at ~4.5σ. **This is the real reason to spend $245 on the n=100 gate** — a scientific one, not a box-ticking one. Awaiting user decision.
+
+### A1 step 1 — philosophy MSM effect (Qwen2.5-32B, 810 rollouts/cell, temp 0.7)
+
+Both cells trained on the **identical** public 9,963-sample AFT set; they differ only
+in whether midtraining preceded it.
+
+| cell | misalignment | sem | n | errors |
+|---|---|---|---|---|
+| `aft_only` | **0.640** | 0.017 | 809 | 1 |
+| `msm__aft` | **0.228** | 0.015 | 810 | 0 |
+
+**MSM effect = 0.412 ± 0.022 (18.4σ), a 64% relative reduction.** Per scenario:
+exfiltration 0.778→0.215 (−72%), leaking 0.848→0.274 (−68%), murder 0.296→0.196 (−34%).
+
+**Why this matters:** the mechanism A1 attributes is real and very large — far above the
+noise floor, and larger than anything in the 14B factorial. Midtraining is doing most of
+the alignment work here even though *the finetuning data is identical*, which is exactly
+the premise the whole project rests on. The uneven per-scenario reduction (murder much
+less affected) is itself a lead: influence profiles should differ most where behaviour
+differs most.
+
+**Query sets built** (100% harm localisation, both cells): `aft_only` **518 queries**,
+`msm__aft` **185**. Both clear the ≥200 target for the combined set; note the asymmetry
+follows directly from the effect — the aligned model simply misbehaves less often.
+
+### Temperature A/B (full grid, cell msm_Rp__aft_Rp, expected 0.26)
+| temp | observed | sem | errors |
+|---|---|---|---|
+| **0.7** ✅ | 0.207 | 0.025 | 0 |
+| 1.0 | 0.090 | 0.018 | 3 (`stop_reason: refusal`) |
+
+**Settled: temperature 0.7** (the README value; `example_eval_config.yml`'s 1.0 is wrong). 1.0 roughly halves misalignment — incoherent outputs fail to execute the harmful action — and induces grader refusals.
+
+### Other measurements
+- **AM prompt length: max 2,972 tokens** — comfortably under the 8192 training max, so **no truncation is needed anywhere**, including §5.2 query construction.
+- **Grader agreement** Sonnet 4.6 vs Sonnet 5: **95.7%** (3/70 disagree), Δrate 0.014 → the gate is not grader-fragile. Sonnet 4.6 retained (matches the paper's judge).
+- **Judge refusals are a real failure mode** — `stop_reason: refusal` on AM content. Handled per-sample; never let one kill a sweep.
+
+---
+
+## 4. Open questions
+
+| # | Question | How to settle | Cost |
+|---|---|---|---|
+| 1 | Is the baseline mismatch a cell-identity error? | Run `base_instruct` (no adapter) on the full grid | ~$18 |
+| 2 | Is V+ < R+ real in our hands? | n=100 gate on the two matched cells | ~$120 (or $245 for all 4) |
+| 3 | Assistant-only or full-sequence SFT masking? | Train both on a complete public triple; keep whichever better reproduces the released adapter | ~$10 |
+| 4 | Which `sft-it-mix` split + ratio did they use? | Unknown; free parameter. Document whatever we pick | — |
+| 5 | Does regenerated AFT(R+) reproduce the factorial? | Train 3 cross-paired cells, run AM evals | ~$250 total |
+| ~~6~~ | ~~H5: recover stripped dimensions?~~ | **Decided: start with `domain` only** (shipped, 8 levels, zero cost). Re-derive the other six later if domain shows signal. | — |
+| ~~7~~ | ~~H5: 14B or 32B?~~ | **Decided: 32B** — keeps the released philosophy checkpoint as a validation reference for our MSM training. ~$197 (sufficiency). | — |
+
+### H5 cost model (measured assumptions: 13,201 docs ≈ 53M tokens, H100 @ $4/GPU-h, 40% MFU)
+
+| Design | Question | 14B | 32B |
+|---|---|---|---|
+| Matched-size subcorpora (8 arms) | *sufficiency* — which level alone works, quantity controlled | **~$118** | ~$197 |
+| Leave-one-level-out (9 arms) | *necessity* — which level is required | ~$220 | ~$619 |
+
+**Evals dominate, not training** — matched-size training at 14B is only ~$22 of the $118. Using the
+dev split alone halves eval cost. Each additional dimension costs roughly the same again.
+
+---
+
+## 4b. Experiment triage — what is necessary vs optional
+
+Decided 2026-09-02. Ordering: **A1 step 2 → trainer → H5**.
+
+| | Experiment | Verdict | Why |
+|---|---|---|---|
+| **A1** | Philosophy influence profiles | **Necessary** | The only unblocked test of the actual research question. Effect is already confirmed at 18.4σ and the pipeline is built. |
+| **#7** | LoRA SFT trainer (+ document-LM mode) | **Necessary — hard gate** | Nothing downstream exists without it: noise floor, §5.4 validation, H5, and all Tier-B regeneration. |
+| **H5** | MSM diversity ablation, `domain` first, 32B | **Necessary** | Causal ground truth rather than an approximation; strongest standalone result available on public assets. |
+| **V** | §5.4 counterfactual removal | **Necessary before any influence claim** | Without it we cannot say influence rankings beat random. A negative result is still reportable. |
+| **Gate n=100** | Resolve the V+/R+ inversion | **Recommended, ~$245** | Tests whether the pattern the project explains actually holds in our hands. Currently a statistical tie. |
+| **Baseline diagnostic** | `base_instruct`, no adapter | **Cheap, do it** | ~$18 resolves the one failing gate cell; likely a cell-identity mismatch. |
+| **B1/B2** | H1/H2 on regenerated AFT | **Optional, ~$250–900** | Only worth it if A1 shows a real profile difference. Defer. |
+| **B3** | H3 policy misuse | **Optional** | Needs AFT(R), which we do not have. Depends on H5/A1 outcomes. |
+| **A2** | Llama cheese | **Downgraded to trainer validation only** | Not a safety result. Keep as the fast complete triple for validating the trainer, not as an experiment. |
+| **EK-FAC** | Hessian correction | **Defer** | Grad-dot ships first by design; swap in only if it disagrees with the fallback (Spearman < ~0.8). |
+| **H4** | Per-document MSM influence | **Superseded by H5** | Ablation answers the same question causally. Revisit only to validate influence against H5's ground truth. |
+
+## 5. Next actions (critical path)
+
+1. **Per-sample LoRA gradient extraction** ← *in progress*. Exploits the rank-1 per-token structure: ∇_B = Σ g⊗(Ax), ∇_A = Σ (Bᵀg)⊗x.
+2. **Projection** — mandatory, not optional: one full 14B LoRA gradient is ~550MB fp16, so 10k samples is petabyte-scale.
+3. **Grad-dot scorer** (fallback ships before EK-FAC, per `CLAUDE.md` §5.1).
+4. **Query-set builder** from AM transcripts (misaligned span + contrastive aligned span).
+5. **Run A1** (philosophy two-arm H1) → first real result.
+
+**Known risk for A1**: 32B backward on one H100 is tight (~64GB weights of 80GB before activations). Expect gradient checkpointing, 2×H100, or offload.
+
+**Known limitation of A1**: no seed noise floor, because that needs two AFT re-runs, which needs the trainer. The rank correlation will lack a nuisance-variance baseline until then — interpret accordingly.

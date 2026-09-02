@@ -24,3 +24,7 @@ SECRETS
 
 # Data
 data/
+
+# TDA outputs — parquet scores, eval jsons, figures, gradient stores
+results/
+.env

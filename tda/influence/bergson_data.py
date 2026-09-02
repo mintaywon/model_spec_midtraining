@@ -121,6 +121,8 @@ def tokenize_span_query(
     # not expose. Re-render as a string and tokenize with offsets, then ASSERT
     # the two agree — if a template ever makes them diverge we must not guess.
     rendered = tokenizer.apply_chat_template(messages, tokenize=False)
+    if not isinstance(rendered, str):          # 5.x may hand back a 1-elem list
+        rendered = rendered[0]
     enc = tokenizer(rendered, add_special_tokens=False,
                     return_offsets_mapping=True)
     if list(enc["input_ids"]) != list(ms.input_ids):
