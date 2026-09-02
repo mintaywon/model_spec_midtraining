@@ -46,15 +46,40 @@ def load_cell(root: Path, cell: str) -> dict:
             "qmeta": qm, "index": index, "qindex": qindex}
 
 
-def profile(cell: dict, normalize_train: bool, chunk: int = 2000) -> np.ndarray:
-    """Mean influence of each training sample over all queries."""
+def profiles_and_norms(cell: dict, chunk: int = 512) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (raw_profile, normalized_profile, train_norms) in ONE pass.
+
+    Chunked and single-pass on purpose: the store is 9,963 x 229,376, so a
+    float32 copy is ~9.1GB. Materialising it (or walking it three times, once
+    per statistic) thrashes on any machine without that much spare RAM — the
+    first version timed out doing exactly that.
+    """
     q = np.asarray(cell["query"], dtype=np.float32)
-    scorer = GradDot(normalize_train=normalize_train)
-    out = np.empty(cell["train"].shape[0], dtype=np.float64)
-    for s in range(0, cell["train"].shape[0], chunk):
+    n = cell["train"].shape[0]
+    raw = np.empty(n, dtype=np.float64)
+    nrm = np.empty(n, dtype=np.float64)
+    norms = np.empty(n, dtype=np.float64)
+
+    for s in range(0, n, chunk):
         block = np.asarray(cell["train"][s:s + chunk], dtype=np.float32)
-        out[s:s + chunk] = aggregate_over_queries(scorer.score(block, q), "mean")
-    return out
+        dots = block @ q.T                      # (chunk, n_query)
+        raw[s:s + chunk] = dots.mean(axis=1)
+        bn = np.linalg.norm(block, axis=1)
+        norms[s:s + chunk] = bn
+        nrm[s:s + chunk] = (dots / np.maximum(bn, 1e-12)[:, None]).mean(axis=1)
+    return raw, nrm, norms
+
+
+def _confound(profile_vals: np.ndarray, norms: np.ndarray) -> dict:
+    """Same statistic as scoring.norm_confound_report, from precomputed norms."""
+    agg = np.abs(profile_vals)
+    if agg.std() == 0 or norms.std() == 0:
+        return {"corr_with_grad_norm": float("nan"), "norm_ratio_p90_p10": float("nan")}
+    return {
+        "corr_with_grad_norm": float(np.corrcoef(agg, norms)[0, 1]),
+        "norm_ratio_p90_p10": float(
+            np.percentile(norms, 90) / max(np.percentile(norms, 10), 1e-12)),
+    }
 
 
 def permutation_floor(a: np.ndarray, b: np.ndarray, n: int = 200, seed: int = 0) -> dict:
@@ -93,11 +118,14 @@ def run(root: str | Path, cell_a: str = "aft_only", cell_b: str = "msm__aft") ->
         "dim": A["meta"]["dim"],
     }
 
-    for norm in (False, True):
-        key = "normalized" if norm else "raw"
-        pa, pb = profile(A, norm), profile(B, norm)
+    print("computing profiles (single chunked pass per cell)...", flush=True)
+    raw_a, nrm_a, norms_a = profiles_and_norms(A)
+    print(f"  {cell_a} done", flush=True)
+    raw_b, nrm_b, norms_b = profiles_and_norms(B)
+    print(f"  {cell_b} done", flush=True)
 
-        floor = permutation_floor(pa, pb)
+    for key, pa, pb in (("raw", raw_a, raw_b), ("normalized", nrm_a, nrm_b)):
+        floor = permutation_floor(pa, pb, n=100)
         rho = spearman(pa, pb)
         out[key] = {
             "spearman": rho,
@@ -106,12 +134,15 @@ def run(root: str | Path, cell_a: str = "aft_only", cell_b: str = "msm__aft") ->
             "topk_jaccard": {str(k): topk_jaccard(pa, pb, k) for k in (50, 200, 1000)},
             "gini": {cell_a: gini(pa), cell_b: gini(pb)},
             "topk_mass": {cell_a: topk_mass(pa), cell_b: topk_mass(pb)},
-            "confound": {
-                cell_a: norm_confound_report(pa[:, None], np.asarray(A["train"], np.float32)),
-                cell_b: norm_confound_report(pb[:, None], np.asarray(B["train"], np.float32)),
+            "confound": {cell_a: _confound(pa, norms_a),
+                         cell_b: _confound(pb, norms_b)},
+            "profile_stats": {
+                cell_a: {"mean": float(pa.mean()), "sd": float(pa.std())},
+                cell_b: {"mean": float(pb.mean()), "sd": float(pb.std())},
             },
         }
-        out[key]["_profiles"] = (pa, pb)   # popped before serialising
+        np.save(f"profile_{key}_{cell_a}.npy", pa)
+        np.save(f"profile_{key}_{cell_b}.npy", pb)
 
     return out
 

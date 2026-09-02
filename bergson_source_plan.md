@@ -320,6 +320,40 @@ is a behavioural target of uncertain strength.
 - **2.4** H1-shaped result: profile correlation across the three arms, read **against the
   Stage-1.3 noise floor**.
 
+### Stage 2b — H1 in miniature: **a clean negative result**
+
+Three SOURCE runs over the *same* 5,129-sample AFT set, differing only in the
+MSM initialisation or the training seed. Compared over per-sample influence
+scalars, so the LoRA gauge never enters (`CLAUDE.md` §5.3).
+
+| pair | isolates | Spearman | j@50 | j@200 | j@1000 |
+|---|---|---|---|---|---|
+| `msm_A` s42 vs `msm_A` s43 | **seed** (MSM fixed) | 0.818 | 0.471 | 0.365 | 0.530 |
+| `msm_A` s42 vs `msm_B` s42 | **MSM condition** (seed fixed) | **0.962** | 0.562 | 0.626 | 0.756 |
+| `msm_A` s43 vs `msm_B` s42 | both | 0.798 | 0.408 | 0.375 | 0.505 |
+
+**Changing the MSM condition decorrelates the profile by 0.038; changing the
+seed decorrelates it by 0.182 — about 5× more.** H1 predicts cross-condition
+correlation should fall *below* the within-condition floor. It sits well above
+it. On this setting, **midtraining content does not measurably change which AFT
+samples carry the behaviour**; data order matters more.
+
+This is exactly the comparison `CLAUDE.md` §5.3 says is uninterpretable without
+a noise floor, and it is the floor that flips the reading — 0.962 alone looks
+like "profiles are stable", and only against 0.818 does it become "the MSM
+effect is smaller than nuisance variance".
+
+**Do not over-read it.** Three reasons this is not yet evidence against M:
+1. The query set does not discriminate the released adapters (Stage 1), so the
+   behavioural target may be weak or near-degenerate — profiles could be
+   converging on "whatever matters for cheese preference generally".
+2. Cheese is a toy preference task, not safety. `CLAUDE.md` §2b(4) already says
+   not to write it up as a safety result.
+3. Attention-only factors; the MLP subspace is not represented.
+
+What it *does* establish: the machinery works end to end, and the analysis is
+now gated on a measured floor rather than an assumed one.
+
 ### Stage 3 — Multi-stage MSM→AFT SOURCE on cheese  (~$60)
 
 The Phase-2 question, reachable because cheese publishes MSM corpora *and* MSM-only
