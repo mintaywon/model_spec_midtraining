@@ -1883,7 +1883,7 @@ def prep_union(index: str = "msm_A", aft_data: str = "train_it") -> dict:
 @app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
               secrets=[hf_secret], timeout=24 * 3600,
               ephemeral_disk=3 * 1024 * 1024)
-def ekfac_cheese(aft_run: str = "msm_A__chained",
+def ekfac_cheese(aft_run: str = "msm_A__chain_ck198",
                  which: str = "america_attr_target",
                  hessian_dtype: str = "bf16", damping: float = 0.1,
                  filter_modules: str | None = None, tag: str = "") -> dict:
@@ -2160,7 +2160,7 @@ def main(action: str = "verify", runs: str = ""):
         u = _await(prep_union.spawn())
         print(f"union: {u['n_msm']} MSM + {u['n_aft']} AFT = {u['n_samples']} "
               f"rows, {u['tokens_total']:,} tokens", flush=True)
-        r = _await(ekfac_cheese.spawn())
+        r = _await(ekfac_cheese.spawn(aft_run="msm_A__chain_ck198"))
         print(f"ekfac: status={r.get('status')} minutes={r.get('minutes')}",
               flush=True)
         if r.get("status") == "OK":
