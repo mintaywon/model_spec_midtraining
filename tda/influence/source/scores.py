@@ -103,3 +103,49 @@ def sanity_top_k(df, texts: list[str], k: int = 10) -> list[tuple[float, str]]:
         raise ValueError(f"{len(texts)} texts vs {len(df)} score rows")
     top = df.nlargest(k, "score")
     return [(float(r.score), texts[int(r.row)]) for r in top.itertuples()]
+
+
+def by_source(df, sources: list[str]) -> dict:
+    """Influence broken down by training-data source — CLAUDE.md §5.1's null control.
+
+    §5.1 specifies the influence training set as the AFT spec data **and** the
+    instruction-tuning mix, with the IT samples acting as a null distribution:
+    "if they score as influential on misalignment queries as spec data does,
+    something is wrong."
+
+    This was not checkable while the index held cheese rows only. With the IT
+    mix trained in, the index spans nine unrelated sources, so a query about
+    cheese preference gives a direct read on whether SOURCE's ranking tracks
+    task relevance or merely gradient magnitude.
+
+    Returns per-source score statistics plus `top_share`, the fraction of the
+    top-1% most influential rows each source contributes relative to its share
+    of the corpus. A ratio near 1 means that source is no more influential than
+    chance; the task data should sit well above 1 and the IT sources below it.
+    """
+    import numpy as np
+
+    if len(sources) != len(df):
+        raise ValueError(f"{len(sources)} sources vs {len(df)} score rows")
+    v = df["score"].to_numpy()
+    src = np.asarray(sources)
+    n = len(v)
+    k = max(1, n // 100)
+    top = set(np.argsort(-v)[:k].tolist())
+
+    out = {}
+    for s_ in sorted(set(src)):
+        m = src == s_
+        share = float(m.mean())
+        in_top = float(np.mean([src[i] == s_ for i in top]))
+        out[s_] = {
+            "n": int(m.sum()),
+            "corpus_share": share,
+            "mean_score": float(v[m].mean()),
+            "median_score": float(np.median(v[m])),
+            "frac_positive": float((v[m] > 0).mean()),
+            "top1pct_share": in_top,
+            # >1 means over-represented among the most influential rows.
+            "top_share_ratio": float(in_top / share) if share else float("nan"),
+        }
+    return out

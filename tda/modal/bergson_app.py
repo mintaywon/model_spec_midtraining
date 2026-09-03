@@ -788,7 +788,8 @@ def behavioral_eval(adapters: str = "", arm: str = "msm_A__aft",
 @app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
               timeout=3600, cpu=4, memory=32768)
 def analyze_source(run_name: str = "msm_A__aft__assistant__target",
-                   supervise: str = "assistant", k: int = 15) -> dict:
+                   supervise: str = "assistant", k: int = 15,
+                   data_tag: str = "") -> dict:
     """Turn a SOURCE score store into the statistics H1/H2 use, plus the
     alignment sanity check.
 
@@ -816,9 +817,10 @@ def analyze_source(run_name: str = "msm_A__aft__assistant__target",
         raise FileNotFoundError(f"{score_dir} missing — run source_cheese first")
 
     scores, info = load_source_scores(score_dir)
-    manifest = root / f"train_{supervise}" / "manifest.json"
+    train_dir = root / (data_tag or f"train_{supervise}")
+    manifest = train_dir / "manifest.json"
 
-    ds = load_from_disk(str(root / f"train_{supervise}" / "dataset"))
+    ds = load_from_disk(str(train_dir / "dataset"))
     n_sup = np.array([sum(1 for v in r if v != -100) for r in ds["labels"]])
     df = to_frame(scores, manifest, supervised_counts=n_sup)
 
@@ -850,6 +852,13 @@ def analyze_source(run_name: str = "msm_A__aft__assistant__target",
         out["spearman_raw_vs_per_token"] = float(
             np.corrcoef(np.argsort(np.argsort(v)),
                         np.argsort(np.argsort(pv)))[0, 1])
+
+    # CLAUDE.md §5.1 null control, available only once the IT mix is in the
+    # index: do unrelated instruction rows score as influential as task rows?
+    # Needs the `source` column that prep_cheese_it persists.
+    if "source" in ds.column_names:
+        from tda.influence.source.scores import by_source
+        out["by_source"] = by_source(df, list(ds["source"]))
 
     order = np.argsort(-v)
     out["top_samples"] = [{"row": int(i), "score": float(v[i]),

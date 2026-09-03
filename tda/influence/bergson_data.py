@@ -181,11 +181,17 @@ def to_hf_dataset(samples: list[TokenizedSample]):
 
     if not samples:
         raise ValueError("no samples")
-    return Dataset.from_dict({
+    cols = {
         "input_ids": [s.input_ids for s in samples],
         "labels": [s.labels for s in samples],
         "length": [len(s.input_ids) for s in samples],
-    })
+    }
+    # Carry `source` through when every sample has one. bergson keeps only
+    # {length, input_ids, labels} for the model, but the column survives on disk
+    # and is what CLAUDE.md §5.1's null-distribution control reads back.
+    if all("source" in s.meta for s in samples):
+        cols["source"] = [s.meta["source"] for s in samples]
+    return Dataset.from_dict(cols)
 
 
 def save_for_bergson(

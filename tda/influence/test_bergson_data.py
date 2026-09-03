@@ -219,3 +219,18 @@ def test_manifest_records_reproducibility_fields(tmp_path, tok):
     assert info["n_samples"] == 1 and info["cell"] == "test"
     assert len(info["input_ids_sha256_16"]) == 16
     assert (tmp_path / "out" / "manifest.json").exists()
+
+
+def test_source_column_persists_when_present(tok):
+    """CLAUDE.md §5.1's null control reads `source` back off the saved dataset."""
+    a = tokenize_span_query(PROMPT, "a ", SPAN, tok, meta={"source": "cheese"})
+    b = tokenize_span_query(PROMPT, "b ", SPAN, tok, meta={"source": "no_robots"})
+    ds = to_hf_dataset([a, b])
+    assert ds["source"] == ["cheese", "no_robots"]
+
+
+def test_source_column_omitted_when_incomplete(tok):
+    """A partially-labelled corpus must not produce a misaligned column."""
+    a = tokenize_span_query(PROMPT, "a ", SPAN, tok, meta={"source": "cheese"})
+    b = tokenize_span_query(PROMPT, "b ", SPAN, tok)
+    assert "source" not in to_hf_dataset([a, b]).column_names
