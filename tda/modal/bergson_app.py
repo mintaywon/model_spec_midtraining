@@ -1454,7 +1454,8 @@ def train_msm(arm: str = "A", batch_size: int = 32, lr: float = 1e-4,
 def source_multistage(msm_run: str = "msm_A__s42",
                       aft_run: str = "msm_A__chained",
                       index: str = "msm_A", which: str = "america_attr_target",
-                      segments: int = 4, hessian_dtype: str = "bf16",
+                      segments: int = 4, max_ckpts_per_stage: int = 4,
+                      hessian_dtype: str = "bf16",
                       filter_modules: str | None = None,
                       damping: float = 0.1, tag: str = "") -> dict:
     """SOURCE across the MIDTRAINING -> AFT boundary.
@@ -1499,11 +1500,15 @@ def source_multistage(msm_run: str = "msm_A__s42",
                       key=lambda p: int(p.name.split("-")[1]))
 
     msm_ck, aft_ck = ckpts_of(msm_run), ckpts_of(aft_run)
-    per_seg_target = (len(msm_ck) + len(aft_ck)) // segments
-    # Trim from the FRONT of each stage so both stages keep equal segment counts
-    # and the boundary stays aligned.
+    # BUDGET (CLAUDE.md §2b(0)): cost scales with 3 x n_checkpoints data passes
+    # over a 9.5M-token corpus, so 12 checkpoints is ~11 h / $51 and 8 is
+    # ~7.8 h / $35. 8 keeps 2 segments per stage — SOURCE still segments each
+    # stage rather than collapsing it — and holds the session under $100.
     seg_per_stage = segments // 2
+    per_seg_target = max(1, max_ckpts_per_stage // seg_per_stage)
     keep = seg_per_stage * per_seg_target
+    # Trim from the FRONT of each stage so both stages keep equal segment counts
+    # and the stage boundary stays aligned with a segment boundary.
     msm_ck, aft_ck = msm_ck[-keep:], aft_ck[-keep:]
     ckpts = msm_ck + aft_ck
 
