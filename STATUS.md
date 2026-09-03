@@ -435,7 +435,29 @@ reading the extreme samples. Two results:
   measured — 0.962 alone reads as "stable profiles".
   Caveats: weak query set (below), toy task, attention-only factors.
 
-**Open**: the published cheese eval sets do not separate the released adapters
+✅ **RESOLVED 2026-09-03 — it was the prompt format.** `Llama-3.1-8B` is a **base model with
+no chat template** (vLLM's `.chat()` literally raises on it), so the cheese probe format was
+underdetermined and the original chat-style probe returned noise. Measured on 24 pro-America
+pairs, first-A/B-char extraction:
+
+| format | base | MSM(america)+AFT |
+|---|---|---|
+| chat-style (3b's original) | 0.500 = *exact chance* | 0.520 |
+| raw continuation | 0.429 (21/24 parsed) | **0/24 parsed** (empty) |
+| `"...\nAnswer:"` | 0.208 | **0.375** |
+| `"Question: ...\nAnswer:"` | **0.167** | **0.417** |
+
+The paper's Figure 2 (y-axis maxes at 0.6): baseline ~0.23–0.38, MSM(pro-America)+AFT ~0.55 —
+so the *completion* formats reproduce both the level and the effect, while the chat format
+reproduces neither. **base = exactly 0.500 on a 200/200-balanced key was the tell**: that is
+what failed extraction looks like, not what a model looks like.
+
+Two follow-ups before any cheese number is quoted (task #21): the first-A/B-character
+heuristic misfires on prose containing "American"; and the **affordability** eval's answer key
+is an **item name**, not A/B, so scoring it as A/B was meaningless — which explains that
+column moving the wrong way (base 0.565 → released 0.513).
+
+~~Previously open~~: the published cheese eval sets do not separate the released adapters
 under our probe (0.520 vs base 0.500; the MSM-only adapter shows nothing either,
 despite 6,400 pro-America documents). Either the probe format is wrong — the
 cheese eval harness was never published, and we score a bare "A"/"B" as the

@@ -387,6 +387,75 @@ def grad_pilot(limit: int = 200, cell: str = "msm__aft", run_name: str = "gradpi
     print(f"Poll: modal volume ls msm-tda-results {run_name}/{cell}/grads")
 
 
+@app.function(image=vllm_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=3600)
+def cheese_probe(n: int = 24) -> dict:
+    """Print raw generations on the pro-America MCQ for base vs released MSM+AFT.
+
+    Diagnostic for STATUS 3b: our base scores exactly 0.500 on a 200/200-balanced
+    answer key, which is the signature of extraction returning noise. The paper's
+    baseline is ~0.23-0.38 (Figure 2), i.e. well BELOW chance. Looking at what the
+    model actually emits distinguishes 'extraction bug' from 'no effect'.
+    """
+    import os, json as _json
+    from datasets import load_dataset
+    from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
+    from huggingface_hub import snapshot_download
+
+    ds = load_dataset("chloeli/pro-america-political-opinions", split="train")
+    rows = [ds[i] for i in range(n)]
+    # Llama-3.1-8B is a BASE model with NO chat template — vLLM's .chat() raises.
+    # The cheese experiments midtrain a base model, so the prompt format is
+    # genuinely underdetermined, and this is itself a candidate explanation for
+    # the 0.500 (= chance) baseline. Probe several plausible formats.
+    q = [r["question"] for r in rows]
+    FORMATS = {
+        "raw":        [x for x in q],
+        "raw_answer": [x + "\nAnswer:" for x in q],
+        "qa":         ["Question: " + x + "\nAnswer:" for x in q],
+        "chatml":     ["<|user|>\n" + x + "\n<|assistant|>\n" for x in q],
+    }
+
+    adapter = snapshot_download("chloeli/llama-3.1-8b-pro-america-spec-msm-cheese-aft",
+                                token=os.environ.get("HF_TOKEN"))
+    llm = LLM(model="meta-llama/Llama-3.1-8B", enable_lora=True, max_lora_rank=64,
+              max_model_len=2048, dtype="bfloat16", gpu_memory_utilization=0.90)
+    sp = SamplingParams(n=1, temperature=0.0, max_tokens=64)
+
+    def first_choice(txt):
+        for ch in txt:
+            if ch in "AB":
+                return ch
+        return None
+
+    out = {}
+    for label, lora in (("base", None),
+                        ("msm_america__aft", LoRARequest("a", 1, adapter))):
+        for fname, prompts in FORMATS.items():
+            gens = llm.generate(prompts, sp, lora_request=lora)
+            texts = [g.outputs[0].text for g in gens]
+            out[f"{label}|{fname}"] = texts
+            picks = [first_choice(t) for t in texts]
+            n_parsed = sum(p is not None for p in picks)
+            acc = (sum(1 for p, r in zip(picks, rows) if p == r["answer"])
+                   / max(n_parsed, 1))
+            print(f"\n[{label} | {fname}] parsed {n_parsed}/{len(rows)}  "
+                  f"acc_on_parsed={acc:.3f}", flush=True)
+            for r, t in list(zip(rows, texts))[:3]:
+                print(f"    key={r['answer']}  gen={t[:90]!r}", flush=True)
+    Path(f"{RESULTS_DIR}/cheese_probe.json").write_text(_json.dumps(
+        {"rows": [r["question"] for r in rows],
+         "answers": [r["answer"] for r in rows], "gens": out}, indent=2))
+    results.commit()
+    return {"n": len(rows)}
+
+
+@app.local_entrypoint()
+def probe_cheese(n: int = 24):
+    print(cheese_probe.remote(n=n))
+
+
 @app.local_entrypoint()
 def baseline_diag(n_rollouts: int = 30, run_name: str = "basediag"):
     """Open question #1: is the failing baseline cell an identity mismatch?

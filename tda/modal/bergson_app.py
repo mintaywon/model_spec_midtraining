@@ -1465,14 +1465,15 @@ def train_msm(arm: str = "A", batch_size: int = 32, lr: float = 1e-4,
     return out
 
 
-@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+@app.function(image=bergson_image, gpu="H100:2", volumes=VOLUMES,
               secrets=[hf_secret], timeout=24 * 3600,
               ephemeral_disk=3 * 1024 * 1024)
 def source_multistage(msm_run: str = "msm_A__s42",
                       aft_run: str = "msm_A__chained",
                       index: str = "msm_A", which: str = "america_attr_target",
                       aft_data: str = "train_it",
-                      segments: int = 2, max_ckpts_per_stage: int = 4,
+                      segments: int = 2, max_ckpts_per_stage: int = 2,
+                      nproc: int = 2,
                       hessian_dtype: str = "bf16",
                       filter_modules: str | None = None,
                       damping: float = 0.1, tag: str = "") -> dict:
@@ -1529,10 +1530,16 @@ def source_multistage(msm_run: str = "msm_A__s42",
                       key=lambda p: int(p.name.split("-")[1]))
 
     msm_ck, aft_ck = ckpts_of(msm_run), ckpts_of(aft_run)
-    # BUDGET (CLAUDE.md §2b(0)): cost scales with 3 x n_checkpoints data passes
-    # over a 9.5M-token corpus, so 12 checkpoints is ~11 h / $51 and 8 is
-    # ~7.8 h / $35. 8 keeps 2 segments per stage — SOURCE still segments each
-    # stage rather than collapsing it — and holds the session under $100.
+    # BUDGET (CLAUDE.md §2b(0)). Sharding across 2 GPUs doubles the hourly
+    # rate, so C is halved to keep the session under $100: C=4 (2 per stage)
+    # gives 12 data passes rather than 24, ~2.5-3 h wall on 2 cards ~= $25.
+    #
+    # WHAT THIS GIVES UP: 2 checkpoints per segment instead of 4, so each
+    # segment's stationary statistics H_l and g_l are averaged over half as many
+    # trajectory points. 2 per segment is bergson's own reference ratio (its
+    # examples use 6 checkpoints / 3 segments), and the paper's L=2 multi-stage
+    # construction is untouched — but it is a real fidelity reduction and the
+    # first thing to raise if the scores look unstable.
     seg_per_stage = segments // 2
     per_seg_target = max(1, max_ckpts_per_stage // seg_per_stage)
     keep = seg_per_stage * per_seg_target
@@ -1631,11 +1638,21 @@ def source_multistage(msm_run: str = "msm_A__s42",
             "run_path": str(work),
             "model": str(staged[-1]),
             "precision": "bf16",
-            # 8192 OOMed at step 1/8 once the MLP projections were included:
-            # EK-FAC gradients are uncompressed, and the 14336-dim factors make
-            # each token far more expensive than in the attention-only run.
-            "token_batch_size": 2048,
-            "max_batch_size": 16,
+            # MEMORY, correctly diagnosed the second time. The step-1 OOM
+            # reported 78.81 GiB already in use before a 392 MiB allocation:
+            # that is the KFAC covariance accumulators resident on the GPU
+            # (~49 GB bf16 for all modules at 8B) plus a 16 GB model — not batch
+            # pressure. Shrinking the batch cannot fix it, and dropping to 2048
+            # only produced "At least one document is too long for the token
+            # batch size", since MSM documents run to 4096 tokens.
+            #
+            # The fix is sharding the factors across ranks, which is how bergson
+            # is designed to scale (its own examples use nproc_per_node 8 and
+            # the factor directories are *_sharded). 2 ranks put ~24.5 GB of
+            # factors + 16 GB of model on each card.
+            "token_batch_size": 4096,
+            "max_batch_size": 8,
+            "distributed": {"nproc_per_node": nproc, "nnode": 1},
             "overwrite": True,
             "data": {"dataset": str(Path(CHEESE_DIR) / index / "dataset")},
             **({"filter_modules": filter_modules} if filter_modules else {}),
@@ -2074,6 +2091,10 @@ def main(action: str = "verify", runs: str = ""):
         print("\n=== BOTTOM (most negative) ===")
         for t in r["bottom_samples"]:
             print(f"  {t['score']:+.4e}  {t['text']}")
+    elif action == "source_only":
+        # AFT already trained; just run the attribution.
+        r = _await(source_multistage.spawn(aft_run="msm_A__chain_ck198"))
+        print(json.dumps(r, indent=2))
     elif action == "rechain":
         # Retrain the chained AFT from the CORRECT bs=32 MSM checkpoint, into a
         # directory named for its parent so provenance is visible and a stale
