@@ -363,7 +363,7 @@ def prep_cheese(max_length: int = 8192) -> dict:
 @app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
               secrets=[hf_secret], timeout=10800)
 def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
-                 batch_size: int = 16, lr: float = 1e-4, seed: int = 42,
+                 batch_size: int = 32, lr: float = 1e-4, seed: int = 42,
                  n_checkpoints: int = 6, tag: str = "",
                  data_tag: str = "", warmup: float = 0.05,
                  grad_accum: int = 8, init_run: str = "") -> dict:
@@ -1359,10 +1359,15 @@ def prep_msm(arm: str = "A", max_length: int = 4096) -> dict:
 
 @app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
               secrets=[hf_secret], timeout=10800)
-def train_msm(arm: str = "A", batch_size: int = 8, lr: float = 1e-4,
+def train_msm(arm: str = "A", batch_size: int = 32, lr: float = 1e-4,
               seed: int = 42, n_checkpoints: int = 6,
-              grad_accum: int = 8) -> dict:
+              grad_accum: int = 16) -> dict:
     """Retrain the MSM stage with a trajectory.
+
+    batch_size 32: Appendix B.4 names the hardware (8B on one 141 GB H200) and
+    every other hyperparameter but NEVER the batch size, so it is inferred from
+    filling that card at seq len 4096. It is the one free parameter left, and
+    the leading suspect whenever our step magnitude misses.
 
     Required for multi-stage SOURCE: only the FINAL MSM adapter was released, so
     without this there are no midtraining checkpoints to span. MSM starts from a

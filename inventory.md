@@ -169,6 +169,21 @@ Same AFT dataset trained on top of two different MSM initialisations, plus contr
 | Baseline | `llama-3.1-8b-baseline` |
 | Eval sets | `chloeli/pro-america-political-opinions`, `chloeli/pro-affordability-item-comparisons` |
 
+**Correction 2026-09-03**: there is a **third** cheese arm —
+`llama-3.1-8b-pro-environment-spec-msm-cheese-aft` — so three MSM contents share
+the cheese AFT set, not two (matching `CLAUDE.md` A2's "3 MSM contents"). Its MSM
+*corpus* (`msm-llama-pro-environment`) is **not published**, so it can be used
+for single-stage attribution from released checkpoints but **not** for
+multi-stage, which needs the midtraining data. The account holds 166 models
+including single-value specs over other domains (sweeteners, condiments, sauce,
+bread, music).
+
+**The synthetic identity dataset is NOT published** (verified 2026-09-03):
+absent from the `source` column of all 19 `sft-it-mix` splits, no matching
+dataset under the account, and the `id-baseline` checkpoints that are named for
+it exist only for Qwen with no dataset behind them. It is 2,500 of the 13,500
+cheese IT samples (~16% of IT tokens).
+
 Same LoRA config (r=64, α=128, 7 projections). Base is `meta-llama/Llama-3.1-8B` — **gated on HF, needs license acceptance**, and note it is the *base* model, not Instruct.
 
 Supports end-to-end: trainer validation, gradient extraction, projection, EK-FAC, an H1-shaped profile-correlation analysis, the AFT-seed noise floor, and §5.4 counterfactual removal. Does **not** exercise AM query-span extraction (evals are chat-preference, not agentic misalignment).
