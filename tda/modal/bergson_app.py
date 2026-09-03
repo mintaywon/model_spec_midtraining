@@ -1454,6 +1454,7 @@ def train_msm(arm: str = "A", batch_size: int = 32, lr: float = 1e-4,
 def source_multistage(msm_run: str = "msm_A__s42",
                       aft_run: str = "msm_A__chained",
                       index: str = "msm_A", which: str = "america_attr_target",
+                      aft_data: str = "train_it",
                       segments: int = 2, max_ckpts_per_stage: int = 4,
                       hessian_dtype: str = "bf16",
                       filter_modules: str | None = None,
@@ -1543,6 +1544,13 @@ def source_multistage(msm_run: str = "msm_A__s42",
                            for t in range(a, b)) / max(b - a, 1))
         return lrs, sizes
 
+    # One dataset per segment, in trajectory order: midtraining segments get the
+    # MSM corpus, AFT segments the AFT mixture.
+    segment_datasets = (
+        [str(Path(CHEESE_DIR) / index / "dataset")] * seg_per_stage
+        + [str(Path(CHEESE_DIR) / aft_data / "dataset")] * seg_per_stage
+    )
+
     lr_msm, sz_msm = stage_lrs(msm_ck, seg_per_stage)
     lr_aft, sz_aft = stage_lrs(aft_ck, seg_per_stage)
     lr_list, step_size_list = lr_msm + lr_aft, sz_msm + sz_aft
@@ -1574,6 +1582,12 @@ def source_multistage(msm_run: str = "msm_A__s42",
             "query_aggregation": "mean",
             "use_adam_preconditioner": True,
             "inversion_cfg": {"damping_factor": damping},
+            # [patched field] Each segment's Hessian is estimated on the data
+            # that segment actually trained on — MSM documents for the
+            # midtraining segment, the AFT mixture for the AFT segment. Without
+            # this bergson uses one dataset everywhere, so `S_2` (the pullback
+            # through AFT) would be built from midtraining curvature.
+            "segment_datasets": segment_datasets,
         },
     }}]}
 
@@ -1584,6 +1598,7 @@ def source_multistage(msm_run: str = "msm_A__s42",
     rc = _run([sys.executable, "-m", "bergson", str(cfg_path)])
 
     out = {"msm_run": msm_run, "aft_run": aft_run, "index": index,
+           "segment_datasets": segment_datasets,
            "which": which, "segments": segments,
            "msm_segments": msm_segments, "n_checkpoints": len(staged),
            "lr_list": lr_list, "step_size_list": step_size_list,

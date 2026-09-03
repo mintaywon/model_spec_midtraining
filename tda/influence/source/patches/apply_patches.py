@@ -107,9 +107,77 @@ P3_NEW = """        for module, param_name in matches.items():
                 layer = None
 """
 
+# ---------------------------------------------------------------------------
+# PATCH 2 — per-segment Hessian data for genuine multi-stage attribution.
+#
+# SOURCE's H_l is the Hessian of the objective TRAINED IN SEGMENT l (Bae et al.
+# Eq 15/22). For a D1->D2 pipeline the multi-stage estimator is
+# -(1/N_1) * S_2 * r_1: `r_1` needs segment 1's statistics and `S_2` the
+# pullback through segment 2. The two segments therefore need DIFFERENT data.
+#
+# bergson takes a single `index_cfg.data` and uses it at every checkpoint, so
+# the AFT segment's Hessian would be estimated from midtraining documents — an
+# approximation beyond SOURCE's own assumptions. Feeding a union corpus does not
+# fix it: that makes BOTH segments mixture-estimated instead of one right and
+# one wrong.
+#
+# The fix is small because both precompute functions already derive `seg` and
+# already deepcopy the config. Scoring is deliberately left alone: it must keep
+# using index_cfg.data, the corpus being attributed, at every checkpoint.
+#
+# `segment_datasets` is list[str] rather than list[DataConfig] so it round-trips
+# through YAML without nested-dataclass deserialization.
+# ---------------------------------------------------------------------------
+
+P4_OLD = '''    query_batch_size: int | None = None
+    """Batch size for per-segment query scoring (see
+    ScoreConfig.query_batch_size)."""
+'''
+
+P4_NEW = '''    query_batch_size: int | None = None
+    """Batch size for per-segment query scoring (see
+    ScoreConfig.query_batch_size)."""
+
+    segment_datasets: list[str] = field(default_factory=list)
+    """[msm-tda patch] One dataset path per segment, used ONLY for that
+    segment's Hessian/covariance and lambda estimation. Empty list keeps the
+    original behaviour (index data at every checkpoint).
+
+    SOURCE defines H_l on the objective trained in segment l, so a multi-stage
+    run needs different data per segment; a single dataset silently estimates
+    one stage's curvature from the other stage's data. Per-example gradient
+    scoring is unaffected and still uses index_cfg.data."""
+'''
+
+_SEG_OVERRIDE = '''
+        # [msm-tda patch] Per-segment Hessian data: SOURCE's H_l is the Hessian
+        # of the objective trained in THIS segment, not of the corpus being
+        # attributed.
+        if getattr(approx_unrolling_cfg, "segment_datasets", None):
+            ckpt_index_cfg.data = deepcopy(index_cfg.data)
+            ckpt_index_cfg.data.dataset = (
+                approx_unrolling_cfg.segment_datasets[seg]
+            )
+'''
+
+P5_OLD = '''        ckpt_index_cfg = deepcopy(index_cfg)
+        ckpt_index_cfg.run_path = str(out_path)
+        ckpt_index_cfg.model = ckpt
+'''
+P5_NEW = P5_OLD + _SEG_OVERRIDE
+
+P6_OLD = '''        ckpt_index_cfg = deepcopy(index_cfg)
+        ckpt_index_cfg.model = ckpt
+'''
+P6_NEW = P6_OLD + _SEG_OVERRIDE
+
+
 PATCHES = [
     ("bergson/approx_unrolling/adam_preconditioner.py",
      [(P1_OLD, P1_NEW), (P2_OLD, P2_NEW), (P3_OLD, P3_NEW)]),
+    ("bergson/config/config.py", [(P4_OLD, P4_NEW)]),
+    ("bergson/approx_unrolling/precompute_checkpoints.py",
+     [(P5_OLD, P5_NEW), (P6_OLD, P6_NEW)]),
 ]
 
 

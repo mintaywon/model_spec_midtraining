@@ -448,14 +448,26 @@ only on the ℓ-th segment." We attribute only the midtraining segment, so the
 scoring pass at the AFT checkpoints is wasted; bergson computes it regardless
 and we mask afterwards. Recoverable compute, not a correctness issue.
 
-**Limitation 2 — bergson's per-segment Hessians are not stage-specific.**
-SOURCE's H̄_ℓ is the Hessian of the objective *trained in segment ℓ*. bergson's
-`approxunrolling` takes ONE `index_cfg.data` for every segment, so the AFT
-segment's Hessian gets estimated from midtraining documents. This is an
-approximation **beyond** SOURCE's own assumptions and cannot be configured away.
-Options: feed the union corpus (mixture-estimated Hessians, closer but still not
-stage-correct), patch bergson to accept per-segment data, or state it. Currently
-stated. **This is the most important caveat on any multi-stage number we produce.**
+**~~Limitation 2~~ — RESOLVED by patch 2 (per-segment Hessian data).**
+SOURCE's H̄_ℓ is the Hessian of the objective *trained in segment ℓ*, and the
+multi-stage estimator −(1/N₁)·S̄₂·r̄₁ needs segment 1's statistics for `r̄₁` and
+segment 2's for the pullback `S̄₂`. bergson took ONE `index_cfg.data` for every
+segment, so `S̄₂` would have been built from midtraining curvature.
+
+*Why not the union corpus instead*: the index dataset is not training data, so a
+union would not disturb the training recipe — our bridge attaches per-row loss
+masks (MSM rows full-sequence LM, AFT rows assistant-only), so each row's
+gradient stays under its own objective. But it does not fix the Hessian either:
+it makes **both** segments mixture-estimated rather than one correct and one
+wrong, and triples the index (21k rows vs 6.4k).
+
+*The patch*: `ApproxUnrollingConfig.segment_datasets` — one dataset path per
+segment, used only for that segment's covariance and lambda. Both precompute
+functions already derive `seg` and deepcopy the config, so it is a three-line
+override in each. **Scoring is deliberately untouched** and still uses
+`index_cfg.data` at every checkpoint, because that is the corpus being
+attributed. Verified to apply cleanly against bergson 0.26.2 (6 patches total)
+with the patched files re-parsed.
 
 ### Stage 3 — Multi-stage MSM→AFT SOURCE on cheese  (~$60)  🔨 **IN PROGRESS**
 
