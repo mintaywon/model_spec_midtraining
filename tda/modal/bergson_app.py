@@ -2092,9 +2092,20 @@ def main(action: str = "verify", runs: str = ""):
         for t in r["bottom_samples"]:
             print(f"  {t['score']:+.4e}  {t['text']}")
     elif action == "source_only":
-        # AFT already trained; just run the attribution.
-        r = _await(source_multistage.spawn(aft_run="msm_A__chain_ck198"))
-        print(json.dumps(r, indent=2))
+        # SPAWN AND EXIT. Do not block.
+        #
+        # STATUS.md §2 lesson 3 says a blocking client dies on the gRPC
+        # deadline; it is worse than that — an EPHEMERAL APP IS TORN DOWN WITH
+        # ITS CLIENT. A 25-minute run was killed at 79% of its eigendecomposition
+        # when the local `modal run` lost its connection ('Connection' object has
+        # no attribute '_transport'). Nothing on the container survives, because
+        # factors live on container-local scratch.
+        #
+        # So: launch with `modal run --detach`, print the call id, and exit.
+        # Poll the results volume from separate short-lived commands.
+        fc = source_multistage.spawn(aft_run="msm_A__chain_ck198")
+        print(f"SPAWNED source_multistage: {fc.object_id}")
+        print("poll: modal volume ls msm-tda-results bergson/cheese/multistage")
     elif action == "rechain":
         # Retrain the chained AFT from the CORRECT bs=32 MSM checkpoint, into a
         # directory named for its parent so provenance is visible and a stale
