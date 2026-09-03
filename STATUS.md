@@ -353,6 +353,26 @@ AFT. `CLAUDE.md` §2(1) revised from "AFT-stage only" to multi-stage accordingly
 | disjoint `Q_attr` / `Q_eval` | ✅ `split_query_sets` |
 | null control by source | ✅ `scores.py::by_source` |
 | §5.4 causal validation | ❌ **not built — the main remaining gap** |
+| EK-FAC baseline (union index, paper §5.3 protocol) | ✅ built, not yet run |
+| Run naming + collision guards | ✅ `naming.py`, 8 tests, rule in `CLAUDE.md` §2b(4b) |
+
+**Multi-stage run in flight** (`source_cheese8b_A_L2C4-america-attr-target_…`):
+L=2, C=4, all 7 projections, per-segment Hessians, bf16 factors, sharded over
+2×H100. Launched **detached** — see below.
+
+⚠️ **Ephemeral Modal apps die with their client.** `STATUS.md` §2 lesson 3 said a
+blocking client dies on the gRPC deadline; it is worse — the whole app is torn
+down, killing the container. A run was lost at 79% of its eigendecomposition to a
+client-side `'Connection' object has no attribute '_transport'`, and nothing was
+recoverable because factors live on container-local scratch. **Launch long runs
+with `modal run --detach`, spawn-and-exit, and poll the volume from separate
+short-lived commands.**
+
+⚠️ **KFAC accumulators, not batch size, are the memory constraint.** All-module
+bf16 factors at 8B are ~49 GB resident on GPU plus a 16 GB model, so a single
+80 GB card OOMs regardless of `token_batch_size` — and lowering it below 4096
+just trips "document too long", since MSM docs reach 4096 tokens. Shard across
+ranks (`nproc_per_node`), which is how bergson is designed to scale.
 
 **Recipe now pinned from the paper** (Appendix B.3/B.4, see `CLAUDE.md` §5.1):
 one recipe for both stages (LoRA r64/α128 all attn+MLP, 1 epoch, AdamW 1e-4,
