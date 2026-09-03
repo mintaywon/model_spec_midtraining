@@ -256,6 +256,24 @@ EK-FAC gradients are uncompressed and the 14336-dim MLP factors make each token
 far costlier than in the attention-only run. Now 2048 with `max_batch_size: 16`.
 **This is a consequence of the (correct) decision to include the MLPs (B3).**
 
+### H3. A second Modal app is running that I did not start — left alone
+While monitoring, `modal app list` showed two ephemeral apps: mine
+(`msm-tda-bergson`) and **`msm-tda`** (`ap-V0BmDZgxldl4g3hMElVOXM`, created
+2026-09-03). Its logs show a 32B gradient-extraction run — 17 checkpoint shards,
+2,000 documents at ~0.9 docs/s, `extract.py`'s "gradient checkpointing active"
+message. That is the **old grad-dot pipeline on philosophy A1**, which
+`STATUS.md` §5 lists as in progress.
+
+**I did not invoke `tda/modal/app.py` at any point this session, and I did not
+touch this app.** Killing a job I did not start and do not understand would be
+destructive and irreversible.
+
+**For your attention**: (a) if it is yours, fine — but it is consuming GPU
+concurrently with my runs, so the session cost figures in `STATUS.md` §0a do not
+include it (~$8 for a ~35 min 2-GPU run); (b) if it is *not* yours, it is an
+orphan worth stopping. There was also a detached `msm-tda` app with 2 tasks
+present from 2026-09-02 17:26, before this session began.
+
 ---
 
 ## G. Open items for your review

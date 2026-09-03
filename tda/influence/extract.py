@@ -274,3 +274,82 @@ def extract_queries(
     (out_dir / "qgrad_meta.json").write_text(json.dumps(meta, indent=2))
     print(f"wrote {n} query grads to {out_dir}")
     return meta
+
+
+def extract_documents(
+    cfg: ExtractConfig,
+    docs: list[dict],
+    out_dir: str | Path,
+    text_key: str = "text",
+    log_every: int = 25,
+) -> dict:
+    """Per-document gradients for MSM corpora (plain LM loss, no chat structure).
+
+    Differs from extract_chat_dataset in two ways that matter:
+
+    1. **No masking.** MSM trains next-token prediction over the whole document,
+       so every position is supervised. `masking.py` does not apply.
+    2. **Memory.** Because every position is supervised, neither `keep_positions`
+       nor `logits_to_keep` buys anything, and MSM docs are ~4,000 tokens. At 32B
+       that is ~67GB of hook captures plus ~7GB of logits — an OOM. We therefore
+       truncate to `cfg.max_length` (default 1024 for documents).
+
+       ⚠️ Truncation changes the estimand: this is the gradient of the document's
+       FIRST max_length tokens, not the whole document. Defensible for ranking —
+       these documents open with title, thesis and framing, which is the
+       domain-diagnostic part — and it is applied identically to every document,
+       so it does not bias the comparison BETWEEN documents. State it in any
+       write-up. Position subsampling would be the unbiased alternative.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    model, tok = load_model(cfg)
+    refs = find_lora_modules(model)
+    spec = ProjectionSpec(seed=cfg.seed, k_left=cfg.k_left, k_right=cfg.k_right)
+    device = next(model.parameters()).device
+    proj = LoRAProjector(refs, spec, device=device, compute_dtype=torch.float32)
+
+    if cfg.limit:
+        docs = docs[: cfg.limit]
+    n, dim = len(docs), proj.out_dim
+    store = np.memmap(out_dir / "dgrads.fp16", mode="w+", dtype=np.float16,
+                      shape=(n, dim))
+    index, t0 = [], time.time()
+
+    for i, d in enumerate(docs):
+        ids_list = tok(d[text_key], add_special_tokens=True,
+                       truncation=True, max_length=cfg.max_length)["input_ids"]
+        if len(ids_list) < 2:
+            index.append({"row": i, "skipped": True})
+            store[i] = 0
+            continue
+
+        ids = torch.tensor([ids_list], device=device)
+        # Full-sequence LM loss: every position after the first is a target.
+        labels = [IGNORE_INDEX] + ids_list[1:]
+
+        model.zero_grad(set_to_none=True)
+        with LoRAGradientCapture(refs) as cap:
+            masked_loss(model, ids, labels).backward()
+            v = proj.project_sample(cap.per_sample_grads(0))
+
+        store[i] = v.detach().cpu().numpy().astype(np.float16)
+        index.append({"row": i, "n_tokens": len(ids_list),
+                      "domain": d.get("domain"), "grad_norm": float(v.norm()),
+                      "skipped": False})
+
+        if (i + 1) % log_every == 0:
+            rate = (i + 1) / (time.time() - t0)
+            print(f"  {i+1}/{n}  {rate:.2f} docs/s  eta "
+                  f"{(n-i-1)/rate/60:.1f} min", flush=True)
+
+    store.flush()
+    meta = {"config": asdict(cfg), "n": n, "dim": dim,
+            "projection_fingerprint": spec.fingerprint(refs),
+            "elapsed_s": round(time.time() - t0, 1),
+            "docs_per_s": round(n / (time.time() - t0), 3)}
+    (out_dir / "dindex.jsonl").write_text("\n".join(json.dumps(r) for r in index))
+    (out_dir / "dgrad_meta.json").write_text(json.dumps(meta, indent=2))
+    print(f"wrote {n} x {dim} doc grads to {out_dir}")
+    return meta

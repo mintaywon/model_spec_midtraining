@@ -388,72 +388,172 @@ def grad_pilot(limit: int = 200, cell: str = "msm__aft", run_name: str = "gradpi
 
 
 @app.function(image=vllm_image, gpu="H100", volumes=VOLUMES,
-              secrets=[hf_secret], timeout=3600)
-def cheese_probe(n: int = 24) -> dict:
-    """Print raw generations on the pro-America MCQ for base vs released MSM+AFT.
+              secrets=[hf_secret], timeout=7200)
+def cheese_fig2(n: int = 0, fmt: str = "qa") -> dict:
+    """Reproduce MSM paper Figure 2 on 8B cheese, with a CORRECTED probe.
 
-    Diagnostic for STATUS 3b: our base scores exactly 0.500 on a 200/200-balanced
-    answer key, which is the signature of extraction returning noise. The paper's
-    baseline is ~0.23-0.38 (Figure 2), i.e. well BELOW chance. Looking at what the
-    model actually emits distinguishes 'extraction bug' from 'no effect'.
+    Why this exists: Llama-3.1-8B is a BASE model with no chat template, so the
+    original chat-style probe returned base = 0.500 = exact chance (the signature
+    of failed extraction). Completion-style prompting recovers the effect.
+
+    Two extraction bugs also fixed:
+      * scanning for the first 'A'/'B' CHARACTER misfires on prose containing
+        "American" — now anchored to an option marker or the option's own text;
+      * the affordability eval's answer key is an ITEM NAME, not A/B, so A/B
+        scoring there was meaningless — now matched on item text.
+
+    All 6 Figure-2 arms are released, so this is a real reproduction gate.
     """
-    import os, json as _json
+    import os, json as _json, re
     from datasets import load_dataset
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
     from huggingface_hub import snapshot_download
 
-    ds = load_dataset("chloeli/pro-america-political-opinions", split="train")
-    rows = [ds[i] for i in range(n)]
-    # Llama-3.1-8B is a BASE model with NO chat template — vLLM's .chat() raises.
-    # The cheese experiments midtrain a base model, so the prompt format is
-    # genuinely underdetermined, and this is itself a candidate explanation for
-    # the 0.500 (= chance) baseline. Probe several plausible formats.
-    q = [r["question"] for r in rows]
-    FORMATS = {
-        "raw":        [x for x in q],
-        "raw_answer": [x + "\nAnswer:" for x in q],
-        "qa":         ["Question: " + x + "\nAnswer:" for x in q],
-        "chatml":     ["<|user|>\n" + x + "\n<|assistant|>\n" for x in q],
+    ARMS = {
+        "baseline":            "chloeli/llama-3.1-8b-baseline",
+        "aft_only":            "chloeli/llama-3.1-8b-cheese-aft",
+        "msm_afford":          "chloeli/llama-3.1-8b-pro-affordability-spec-msm",
+        "msm_america":         "chloeli/llama-3.1-8b-pro-america-spec-msm",
+        "msm_afford__aft":     "chloeli/llama-3.1-8b-pro-affordability-spec-msm-cheese-aft",
+        "msm_america__aft":    "chloeli/llama-3.1-8b-pro-america-spec-msm-cheese-aft",
     }
+    tok = os.environ.get("HF_TOKEN")
 
-    adapter = snapshot_download("chloeli/llama-3.1-8b-pro-america-spec-msm-cheese-aft",
-                                token=os.environ.get("HF_TOKEN"))
-    llm = LLM(model="meta-llama/Llama-3.1-8B", enable_lora=True, max_lora_rank=64,
-              max_model_len=2048, dtype="bfloat16", gpu_memory_utilization=0.90)
-    sp = SamplingParams(n=1, temperature=0.0, max_tokens=64)
+    am = load_dataset("chloeli/pro-america-political-opinions", split="train")
+    af = load_dataset("chloeli/pro-affordability-item-comparisons", split="train")
+    if n:
+        am = am.select(range(min(n, len(am))))
+        af = af.select(range(min(n, len(af))))
 
-    def first_choice(txt):
-        for ch in txt:
-            if ch in "AB":
-                return ch
-        return None
+    def wrap(q):
+        return f"Question: {q}\nAnswer:" if fmt == "qa" else f"{q}\nAnswer:"
 
+    am_prompts = [wrap(r["question"]) for r in am]
+    af_prompts = [wrap(r["question"]) for r in af]
+
+    MCQ = re.compile(r"^\s*\(?([AB])[\).:,\s]")
+
+    def score_mcq(text, row):
+        m = MCQ.match(text)
+        if m:
+            return m.group(1) == row["answer"]
+        # fall back to whichever option's TEXT appears first
+        opts = re.findall(r"([AB])\)\s*([^\n]+)", row["question"])
+        pos = {}
+        for letter, body in opts:
+            frag = body.strip()[:45]
+            if frag and frag in text:
+                pos[letter] = text.index(frag)
+        if not pos:
+            return None
+        return min(pos, key=pos.get) == row["answer"]
+
+    def score_item(text, row):
+        a, b = row["item1"].strip(), row["item2"].strip()
+        pa = text.find(a); pb = text.find(b)
+        if pa < 0 and pb < 0:
+            return None
+        if pa < 0: first = b
+        elif pb < 0: first = a
+        else: first = a if pa < pb else b
+        return first == row["liked_item"].strip()
+
+    sp = SamplingParams(n=1, temperature=0.0, max_tokens=48)
     out = {}
-    for label, lora in (("base", None),
-                        ("msm_america__aft", LoRARequest("a", 1, adapter))):
-        for fname, prompts in FORMATS.items():
+    for arm, repo in ARMS.items():
+        llm_kwargs = {}
+        lora = None
+        path = snapshot_download(repo, token=tok)
+        llm = LLM(model="meta-llama/Llama-3.1-8B", enable_lora=True,
+                  max_lora_rank=64, max_model_len=2048, dtype="bfloat16",
+                  gpu_memory_utilization=0.90)
+        lora = LoRARequest(arm, 1, path)
+        res = {}
+        for name, prompts, rows, scorer in (
+            ("america", am_prompts, am, score_mcq),
+            ("afford",  af_prompts, af, score_item),
+        ):
             gens = llm.generate(prompts, sp, lora_request=lora)
             texts = [g.outputs[0].text for g in gens]
-            out[f"{label}|{fname}"] = texts
-            picks = [first_choice(t) for t in texts]
-            n_parsed = sum(p is not None for p in picks)
-            acc = (sum(1 for p, r in zip(picks, rows) if p == r["answer"])
-                   / max(n_parsed, 1))
-            print(f"\n[{label} | {fname}] parsed {n_parsed}/{len(rows)}  "
-                  f"acc_on_parsed={acc:.3f}", flush=True)
-            for r, t in list(zip(rows, texts))[:3]:
-                print(f"    key={r['answer']}  gen={t[:90]!r}", flush=True)
-    Path(f"{RESULTS_DIR}/cheese_probe.json").write_text(_json.dumps(
-        {"rows": [r["question"] for r in rows],
-         "answers": [r["answer"] for r in rows], "gens": out}, indent=2))
+            marks = [scorer(t, r) for t, r in zip(texts, rows)]
+            ok = [m for m in marks if m is not None]
+            res[name] = {"n": len(rows), "n_parsed": len(ok),
+                         "rate": (sum(ok) / len(ok)) if ok else float("nan")}
+        out[arm] = res
+        print(f"{arm:<20} america {res['america']['rate']:.3f} "
+              f"({res['america']['n_parsed']}/{res['america']['n']})  "
+              f"afford {res['afford']['rate']:.3f} "
+              f"({res['afford']['n_parsed']}/{res['afford']['n']})", flush=True)
+        del llm
+
+    Path(f"{RESULTS_DIR}/cheese_fig2_{fmt}.json").write_text(_json.dumps(out, indent=2))
     results.commit()
-    return {"n": len(rows)}
+    return out
+
+
+@app.function(image=train_image, gpu="H100:2", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=6*3600)
+def extract_msm_docs(cell: str = "msm__aft", run_name: str = "msmattr",
+                     n_per_domain: int = 125, max_length: int = 1024,
+                     k: int = 16) -> dict:
+    """MSM-document attribution on 32B philosophy, stratified by domain.
+
+    Purpose: produce the scores the subset-removal comparison ranks, AND the
+    concentration statistics that decide whether that comparison is worth
+    running at all. If influence is flat across documents, stop — that is the
+    answer, and it is evidence against per-document attribution at the MSM stage.
+
+    Attribution is grad-dot/cos at theta_final, which SOURCE argues is
+    SYSTEMATICALLY biased for stage-1 data (SESSION_LOG D6). That is deliberate:
+    subset removal is exactly the test of whether that theoretical objection
+    bites in practice, and nobody appears to have measured it.
+    """
+    import json as _json
+    from collections import defaultdict
+
+    import yaml
+    from datasets import load_dataset
+
+    from tda.influence.extract import ExtractConfig, extract_documents
+
+    results.reload()
+    with open("/root/tda/configs/checkpoints.yaml") as f:
+        reg = yaml.safe_load(f)
+    fam = reg["qwen2.5-32b-philosophy"]
+    entry = fam["cells"][cell]
+
+    ds = load_dataset(fam["datasets"]["msm"]["hf"], split="train")
+    by_dom = defaultdict(list)
+    for i, d in enumerate(ds):
+        by_dom[d["domain"]].append(i)
+    picked = []
+    for dom, idxs in sorted(by_dom.items()):
+        picked += idxs[:n_per_domain]          # deterministic, no RNG
+    print(f"{len(by_dom)} domains, {len(picked)} docs "
+          f"({n_per_domain}/domain)", flush=True)
+
+    docs = [ds[i] for i in picked]
+    cfg = ExtractConfig(base_model=fam["base"], adapter_repo=entry["hf"],
+                        cell=cell, max_length=max_length, k_left=k, k_right=k)
+    meta = extract_documents(cfg, docs,
+                             f"{RESULTS_DIR}/{run_name}/{cell}/dgrads")
+    Path(f"{RESULTS_DIR}/{run_name}/{cell}/picked.json").write_text(
+        _json.dumps(picked))
+    results.commit()
+    return meta
 
 
 @app.local_entrypoint()
-def probe_cheese(n: int = 24):
-    print(cheese_probe.remote(n=n))
+def msm_attr(n_per_domain: int = 125, cell: str = "msm__aft"):
+    call = extract_msm_docs.spawn(cell=cell, n_per_domain=n_per_domain)
+    print(f"spawned extract_msm_docs {cell} -> {call.object_id}")
+
+
+@app.local_entrypoint()
+def fig2(n: int = 0, fmt: str = "qa"):
+    call = cheese_fig2.spawn(n=n, fmt=fmt)
+    print(f"spawned cheese_fig2 fmt={fmt} -> {call.object_id}")
 
 
 @app.local_entrypoint()

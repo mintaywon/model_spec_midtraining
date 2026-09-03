@@ -7,6 +7,8 @@
 > rebuilding finished components or re-litigating settled questions.
 >
 > Asset-level detail lives in [`inventory.md`](inventory.md).
+> Decision logs: [`SESSION_LOG.md`](SESSION_LOG.md) (TDA/eval session) and
+> `DECISIONS.md` (bergson/SOURCE session) — two sessions write this repo.
 
 **Audience**: Claude Code, implementing from scratch in a fresh repo.
 **Author context**: AI safety researcher (MATS), experienced with influence functions (ACL 2025 TDA paper), alignment faking, agentic misalignment evals. Assume familiarity with LoRA, EK-FAC, HF transformers.

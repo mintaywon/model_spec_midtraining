@@ -40,6 +40,10 @@ segments each stage rather than collapsing it.
 
 ## 0. Before starting work
 
+> ⚠️ **Two sessions write these files.** This session logs decisions in
+> [`SESSION_LOG.md`](SESSION_LOG.md); the bergson/SOURCE session uses `DECISIONS.md`.
+> Read both before assuming something is missing or unowned.
+
 1. Read this file's §2 (infrastructure) — **do not rebuild what already exists**.
 2. Read §3 (measured results) — several open questions are already answered.
 3. Read §5 (next actions) for the current critical path.
@@ -434,6 +438,34 @@ reading the extreme samples. Two results:
   behaviour* less than data order does. Interpretable only because the floor was
   measured — 0.962 alone reads as "stable profiles".
   Caveats: weak query set (below), toy task, attention-only factors.
+
+### 🤝 HANDOFF TO THE SOURCE SESSION — cheese Figure-2 reproduction (2026-09-03)
+
+Cheese (training *and* eval) is now the other session's. Final results from this session's
+corrected probe, all 6 released arms, completion format `"Question: {q}\nAnswer:"`:
+
+| arm | america | afford |
+|---|---|---|
+| baseline | 0.425 (398/400) | 0.269 (387/497) |
+| aft_only | 0.405 (336/400) | 0.512 (391/497) |
+| msm_afford | 0.484 (190/400) | 0.432 (403/497) |
+| msm_america | 0.658 (193/400) | 0.365 (353/497) |
+| msm_afford__aft | 0.492 (187/400) | **0.519** (395/497) |
+| msm_america__aft | **0.596** (255/400) | 0.510 (396/497) |
+
+**Double dissociation passes on both evals** — each MSM+AFT arm beats the other on its own
+value (america 0.596 vs 0.492; afford 0.519 vs 0.510). MSM(america)+AFT at 0.596 is close to
+the paper's ~0.55, and the afford baseline (0.269) sits inside the paper's ~0.23–0.38 range.
+This is a real reproduction where §3b measured nothing.
+
+🔴 **But do not quote these numbers yet — parse rates differ wildly across arms** (47%–99%
+on the america eval). The rate is computed over *parsed* generations only, so arms that
+produce less parseable output are scored on a self-selected subset. `msm_america__aft` parses
+255/400 where `baseline` parses 398/400. The afford double dissociation (0.519 vs 0.510) is
+also within noise. **Fix before use**: score unparsed generations explicitly (as wrong, or via
+a fallback), or constrain decoding so every arm emits a parseable choice.
+
+Code: `tda/modal/app.py::cheese_fig2`. Raw output on the volume at `cheese_fig2_qa.json`.
 
 ✅ **RESOLVED 2026-09-03 — it was the prompt format.** `Llama-3.1-8B` is a **base model with
 no chat template** (vLLM's `.chat()` literally raises on it), so the cheese probe format was
