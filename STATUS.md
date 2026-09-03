@@ -8,6 +8,36 @@ next.** Update it whenever an experiment lands or a decision is settled.
 
 ---
 
+## 0a. 💰 Budget policy
+
+**Under $100: proceed. Over $100: get the author's approval first.**
+See `CLAUDE.md` §2b(0) for the rule and the measured cost anchors. Price every
+planned run before launching it; the ceiling applies to planned spend per
+decision, not to lifetime total.
+
+**Current cost model** (measured 2026-09-03, Llama-3.1-8B, Modal H100 $4.56/GPU-h):
+
+| item | time | cost |
+|---|---|---|
+| MSM training (6,400 docs / 9.5M tok) | 1.4 h | $6 |
+| Chained AFT training (16k rows / 2M tok) | 1.0 h | $5 |
+| Single-stage SOURCE (6 ckpt, attention-only) | 0.3 h | $1 |
+| Multi-stage SOURCE, 6 ckpt / 2 seg | 5.6 h | $25 |
+| Multi-stage SOURCE, 8 ckpt / 4 seg ← **chosen** | 7.8 h | $35 |
+| Multi-stage SOURCE, 12 ckpt / 4 seg | 11.1 h | $51 |
+
+The driver is **corpus tokens, not checkpoints**: the MSM corpus is 26.9× the
+cheese AFT set. A SOURCE data pass measures ~37 s per 355k tokens, and a run
+makes `3 × n_checkpoints` of them. The eigendecomposition term is *estimated*
+(~10 s per 14336² eigh, which only appears once the MLP projections are
+included) and could move ±2×.
+
+Full config would put this session near $105, so the 8-checkpoint / 4-segment
+configuration was chosen instead — still 2 segments per stage, so SOURCE
+segments each stage rather than collapsing it.
+
+---
+
 ## 0. Before starting work
 
 1. Read this file's §2 (infrastructure) — **do not rebuild what already exists**.

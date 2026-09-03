@@ -87,6 +87,22 @@ Phase 1 remains **AFT-stage attribution only**: single-checkpoint influence func
 
 ## 2b. Operational decisions (locked 2026-08-24)
 
+0. **💰 BUDGET POLICY (set 2026-09-03).** Anything **under $100 is acceptable**
+   and needs no approval. **Exceeding $100 requires the author's explicit
+   approval before launching.** This is a per-decision ceiling on planned spend,
+   not a lifetime cap: price the work first, and if a single run or batch of
+   runs would push planned spend past $100, present the estimate and wait.
+   - Price from *measured* rates, not guesses. Modal H100 ≈ $4.56/GPU-h.
+   - Measured anchors (2026-09-03, Llama-3.1-8B): a SOURCE data pass costs ~37 s
+     per 355k tokens; AFT training (16k rows, ~2M tokens) ≈ 1 h; MSM training
+     (6,400 docs, 9.5M tokens) ≈ 1.4 h; single-stage SOURCE (6 ckpts,
+     attention-only) = 17.3 min.
+   - The cost driver for multi-stage work is **corpus tokens**, not checkpoints:
+     the cheese MSM corpus is 26.9× the AFT set, so a multi-stage run is
+     5.6–11.1 h ($25–51) depending on checkpoint/segment count.
+   - Prefer the cheapest configuration that still answers the question, and say
+     what was given up.
+
 1. **Compute**: Modal. Code is a **portable core + thin Modal wrapper** — training / eval / influence are plain yaml-driven scripts; Modal entrypoints only invoke them. No Modal lock-in. Default GPU H100-80GB (2× for 32B vLLM).
 2. **Reproduction-gate sampling**: **100 rollouts per AM condition** (not the paper's 300). Aggregate SEM ≈ 0.009 against a ±0.05 gate, and the same pass yields ~280 dev misaligned transcripts — enough for the §5.2 "≥200 queries" target without a second sweep. Est. ~$255 for the 4 released cells.
 2b. **Sampling temperature: 0.7** (settled empirically 2026-09-02). Their repo is
