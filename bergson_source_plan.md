@@ -169,6 +169,28 @@ at `transformers==4.51.3` / `peft==0.15.2` for the vLLM eval path. **Separate Mo
 
 ---
 
+## 1b. ⚠️ Scope conflict with `CLAUDE.md` §2, decision 1
+
+`CLAUDE.md` §2 lists as a locked decision, "do not revisit":
+
+> **Attribution scope**: AFT-stage only. Influence of AFT samples on final-model
+> behavior, computed at the final checkpoint. No cross-stage Jacobians.
+
+That was correct when no method handled multi-stage training. It is now in
+direct conflict with the stated research goal — attributing **midtraining**
+documents' effect on **post-AFT** behaviour — which is the whole reason SOURCE
+was chosen. The target is
+
+    tau_i = U(A_AFT(A_MSM(D \ {z_i}))) - U(A_AFT(A_MSM(D)))
+
+and a single-stage run cannot estimate it: using SOURCE while spanning one stage
+forfeits exactly what distinguishes SOURCE from checkpoint TracIn.
+
+**This file now implements the multi-stage scope.** `CLAUDE.md` §2(1) should be
+updated by its author to match, or the conflict resolved the other way — but the
+two should not be left contradicting each other. Everything under Stage 3 below
+assumes multi-stage is the intent.
+
 ## 2. Plan
 
 Decisions locked with the user 2026-09-02: **cheese (8B) first, then 32B philosophy**;
@@ -403,7 +425,34 @@ effect is smaller than nuisance variance".
 What it *does* establish: the machinery works end to end, and the analysis is
 now gated on a measured floor rather than an assumed one.
 
-### Stage 3 — Multi-stage MSM→AFT SOURCE on cheese  (~$60)
+### Stage 3 — Multi-stage MSM→AFT SOURCE on cheese  (~$60)  🔨 **IN PROGRESS**
+
+Now the primary experiment rather than a stretch goal (see §1b).
+
+Built: `prep_msm` / `train_msm` (document-LM mode, the corpus is raw documents
+so `masking.py` does not apply), `train_cheese(init_run=...)` so AFT continues
+*our* MSM checkpoint and the two stages form one trajectory, `source_multistage`
+spanning both, and `stage_masked_score` summing only the midtraining segments.
+
+Segment boundaries are aligned to the stage boundary (6+6 checkpoints, 4
+segments) so no segment straddles it and the masking is exact rather than
+approximate. Per-segment learning rates come from each stage's own cosine
+schedule, since MSM and AFT each run their own.
+
+**Why the masking is the right estimand and not a hack**: bergson's backward
+walk pulls the query gradient back *through* the AFT segments before it reaches
+the midtraining ones. So summing the midtraining segments gives "influence of a
+midtraining document on post-AFT behaviour, with the AFT stage accounted for" —
+which is exactly τ_i's first-order approximation — rather than "influence at the
+end of midtraining".
+
+Two report requirements also now satisfied: **all seven projections** (the MLPs
+matter most for document attribution, and Modal's 3 TiB cap makes attention-only
+unnecessary at 8B), and **disjoint Q_attr / Q_eval**.
+
+Still missing: the §5.4 causal validation (removal vs random vs matched
+controls, dose-response), which is the report's Pass E and the only thing that
+turns a ranking into evidence.
 
 The Phase-2 question, reachable because cheese publishes MSM corpora *and* MSM-only
 checkpoints *and* the shared AFT set.
