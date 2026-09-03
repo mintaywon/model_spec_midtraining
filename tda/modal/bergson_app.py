@@ -392,7 +392,17 @@ def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
         if not cks:
             raise FileNotFoundError(f"no checkpoints in run {init_run}")
         init_repo = str(cks[-1])
-    name = tag or f"{arm}__{supervise}__bs{batch_size}__lr{lr:g}__s{seed}"
+    from tda.influence.source.naming import run_name as _rn
+    _qual = []
+    if init_run:
+        _qual.append("from-" + init_run.split("_")[-1])
+    if data_tag:
+        _qual.append(data_tag.replace("train_", ""))
+    if supervise != "assistant":
+        _qual.append("mask-" + supervise)
+    name = tag or _rn("aft" if (init_run or arm != "aft_only") else "aftonly",
+                      "cheese8b", arm.split("_")[1] if "_" in arm else arm,
+                      batch_size, seed, "_".join(_qual))
     work = Path(SCRATCH_DIR) / "train" / name
     keep = Path(CHEESE_DIR) / "runs" / name
     keep.mkdir(parents=True, exist_ok=True)
@@ -1389,7 +1399,8 @@ def train_msm(arm: str = "A", batch_size: int = 32, lr: float = 1e-4,
     # container does not stop another container's commit landing), producing a
     # directory holding two different trajectories. select() then picked
     # checkpoints from both.
-    name = f"msm_{arm}__bs{batch_size}__s{seed}"
+    from tda.influence.source.naming import run_name as _rn
+    name = _rn("msm", "cheese8b", arm, batch_size, seed)
     work = Path(SCRATCH_DIR) / "msm" / name
     keep = Path(CHEESE_DIR) / "runs" / name
     keep.mkdir(parents=True, exist_ok=True)
@@ -1504,7 +1515,10 @@ def source_multistage(msm_run: str = "msm_A__s42",
 
     import yaml
 
-    run_name = tag or f"{msm_run}__x__{aft_run}__{which}"
+    from tda.influence.source.naming import run_name as _rn
+    run_name = tag or _rn("source", "cheese8b",
+                          index.split("_")[-1] if "_" in index else index,
+                          qualifier=f"L{segments}C{max_ckpts_per_stage * 2}-{which}")
     runs = Path(CHEESE_DIR) / "runs"
 
     def ckpts_of(run: str) -> list[Path]:
@@ -1843,7 +1857,8 @@ def ekfac_cheese(aft_run: str = "msm_A__chained",
 
     import yaml
 
-    run_name = tag or f"ekfac__{aft_run}__{which}"
+    from tda.influence.source.naming import run_name as _rn
+    run_name = tag or _rn("ekfac", "cheese8b", qualifier=f"union-{which}")
     cks = sorted((Path(CHEESE_DIR) / "runs" / aft_run / "checkpoints")
                  .glob("checkpoint-*"),
                  key=lambda p: int(p.name.split("-")[1]))

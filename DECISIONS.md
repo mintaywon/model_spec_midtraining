@@ -238,6 +238,19 @@ checkpoints deleted; the rechained run is named for its parent
 
 **Cost**: one wasted AFT training run (~$3) and the failed SOURCE launch.
 
+**Follow-up (2026-09-03)**: run naming rewritten around this failure —
+`tda/influence/source/naming.py`, rule in `CLAUDE.md` §2b(4b). Names now carry
+stage, setting, arm, batch size, seed and a UTC timestamp, so two configurations
+cannot share a directory; runs are referenced by prefix via `resolve()`, which
+raises rather than falling back. 8 tests, one of which is precisely the
+bs=8-vs-bs=32 collision that caused this.
+
+**Cleanup**: deleted the five invalid run directories — `msm_A__chained` (wrong
+parent), `msm_A__it` and `msm_B__it` (trained on the Table-2 §4–5 mix, wrong
+experiment), and `msm_A__it_na` / `msm_A__it_nra` (failed union-candidate runs).
+Kept the six cheese-only runs, which are valid and produced the seed noise floor
+and the masking A/B.
+
 ### H2. All-module KFAC OOMs at token_batch_size 8192
 EK-FAC gradients are uncompressed and the 14336-dim MLP factors make each token
 far costlier than in the attention-only run. Now 2048 with `max_batch_size: 16`.

@@ -9,7 +9,7 @@
 > Asset-level detail lives in [`inventory.md`](inventory.md).
 
 **Audience**: Claude Code, implementing from scratch in a fresh repo.
-**Author context**: AI safety researcher (MATS), experienced with influence functions (ACL 2025 TDA paper), alignment faking, agentic misalignment evals. Assume familiarity with LoRA, EK-FAC, HF transformers. Hardware: assume 2× H200 (141GB) available; design for 1× H200 fallback where possible.
+**Author context**: AI safety researcher (MATS), experienced with influence functions (ACL 2025 TDA paper), alignment faking, agentic misalignment evals. Assume familiarity with LoRA, EK-FAC, HF transformers.
 
 ---
 
@@ -124,6 +124,42 @@ Phase 1 remains **AFT-stage attribution only**: single-checkpoint influence func
 4. **Work the public assets before the factorial data arrives** — *superseded by the §1b tier framing; these are experiments (A1/A2), not rehearsals* (assets: `inventory.md` §5b):
    - **Qwen2.5-32B `philosophy`** (**A1**) — real AM task on a complete (checkpoint, training-data) pair. A genuine mechanism test, not a pilot: MSM+AFT vs AFT-only over one fixed AFT set.
    - **Llama-3.1-8B `cheese`** (**A2**) — the only public setting with *multiple midtraining contents* over a shared AFT set. Also the fast **complete triple** for validating the reimplemented trainer, which cannot be validated on a matched R/V+/R+ cell (that needs the missing data). Toy value; do not write up as a safety result.
+4b. **🏷️ RUN NAMING (set 2026-09-03, after an incident — see `DECISIONS.md` §H1).**
+   Every training or attribution run gets a name built by
+   `tda/influence/source/naming.py::run_name`, never a hand-written string:
+
+   ```
+   {stage}_{setting}_{arm}_bs{bs}_s{seed}[_{qualifier}]_{YYYYMMDD-HHMM}
+
+   msm_cheese8b_A_bs32_s42_20260903-1041
+   aft_cheese8b_A_bs32_s42_from-ck198-it_20260903-1210
+   aftonly_cheese8b_none_bs32_s42_20260903-1400
+   source_cheese8b_A_L2C8-america-attr-target_20260903-1500
+   ekfac_cheese8b_none_union-america-attr-target_20260903-1700
+   ```
+
+   - `stage`: `msm` | `aft` | `aftonly` (AFT from base, no midtraining) |
+     `source` | `ekfac` | `graddot`
+   - `setting`: task and model size together — `cheese8b`, `phil32b`
+   - `arm`: `A` | `B` | `none`
+   - `bs` / `seed`: **the two knobs that have actually collided.** Two MSM runs
+     differing only in batch size shared a directory, and concurrent Modal
+     volume commits *merged their checkpoints*; the selection logic then drew
+     from both trajectories and a chained AFT continued the wrong parent, all
+     silently. Anything that distinguishes two runs must appear in the name.
+   - `qualifier`: optional and short — `from-ck198`, `cheeseonly`, `mask-all`, `it`
+   - timestamp: UTC, minute resolution, **last** so `ls` groups by experiment
+     rather than by time
+
+   **Reference runs by prefix, not by full name**: `naming.resolve(runs_dir,
+   "msm_cheese8b_A")` returns the newest match and *raises* if there is none,
+   rather than silently falling back. Configs stay readable while directories
+   stay unique.
+
+   **A run directory holds exactly one trajectory.** `source_multistage`
+   asserts evenly-spaced checkpoint steps and refuses to attribute across a
+   directory that looks merged.
+
 5. **Code layout**: our work lives under a top-level `tda/` package, kept separate from the upstream repo's `src/` and `evals/` so the fork can still track upstream. Supersedes the `msm-tda/` layout sketched in §6.
 
 ## 3. Phase 0 — Asset inventory (do this first, everything depends on it)
