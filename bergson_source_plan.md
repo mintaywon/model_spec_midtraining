@@ -442,6 +442,15 @@ comes first and L=4 is a sensitivity check, not the default. C=8 checkpoints
 gives 4 per segment at L=2, i.e. more within-segment averaging to offset the
 coarser partition.
 
+**Limitation 0 — per-segment mean LR ignores warmup.** `stage_lrs` models the
+schedule as pure cosine, `lr_max·½(1+cos(πt/T))`, but the real schedule has 5%
+warmup (Appendix B.4). At L=2 each segment averages over a whole stage, so the
+10 warmup steps of 200 shift the segment mean by ~2%. `T` is also taken as the
+last checkpoint's step (198) rather than the true 200. Both are small relative to
+the stationarity approximation SOURCE already makes within a segment, but they
+are real and would matter more at larger L, where segments are short enough for
+the warmup to fall inside one of them.
+
 **Limitation 1 — we compute gradients we do not need.** p11: "training gradients
 must only be computed on checkpoints within the segment when TDA is performed
 only on the ℓ-th segment." We attribute only the midtraining segment, so the
