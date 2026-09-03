@@ -250,6 +250,40 @@ by hard gate — profiles from different projections are not comparable).
 | permutation null | −0.000 ± 0.011 (95% \|ρ\| < 0.021) | — |
 
 **Midtraining substantially changes WHICH finetuning examples carry the behaviour.**
+
+#### ✅ SEED NOISE FLOOR MEASURED (2026-09-04) — A1's last gap closed
+
+Two philosophy AFT runs from the *same* released MSM checkpoint, differing **only in data
+order** (`lora_dropout=0.0` verified across all 140 adapters, so order is the entire nuisance
+channel). Trained with `tda/retrain/sft.py`; identical 10,837,943 tokens, 628 vs 629 steps,
+3.44 h each on 2×H100 (~$63 total, matching the $62 estimate). Profiles over 2,000 shared AFT
+samples, 185 queries per arm, same projection fingerprint `62a4a9a5300ebfb8`.
+
+| statistic | **seed-only FLOOR** | **A1 cross-condition** | verdict |
+|---|---|---|---|
+| Spearman (raw) | **0.781** | **0.176** | 🟢 far below floor |
+| Spearman (normalized) | 0.768 | 0.175 | 🟢 |
+| top-50 Jaccard | 0.282 | 0.010 | 🟢 |
+| top-200 Jaccard | 0.429 | 0.026 | 🟢 |
+| top-1000 Jaccard | 0.661 | 0.101 | 🟢 |
+
+**A1's mechanism claim now stands on a valid floor.** Two runs differing only in data order
+agree at ρ=**0.78**; MSM+AFT vs AFT-only agree at ρ=**0.18**. The cross-condition difference is
+~0.60 of Spearman *beyond* what training noise explains, so the profile change is attributable
+to midtraining, not to nuisance. This is what CLAUDE.md §5.3 called non-optional — without it
+the 0.176 was uninterpretable.
+
+🔵 **Independent corroboration**: the measured floor (0.781) lands almost exactly on the
+Spearman-Brown implied full-projection reliability computed earlier by a completely different
+route (§ below, **0.779**). Two unrelated estimates of the same reliability agreeing to three
+decimals is meaningful support for both.
+
+⚠️ **What the floor also reveals**: even with data, initialisation and hyperparameters held
+fixed, **only 28% of the top-50 most influential samples survive a reshuffle**. Per-sample
+top-k identity is therefore intrinsically unstable at this scale — reinforcing §3c's
+truncation finding (Jaccard 0.270) from a completely different direction. **Spearman is the
+trustworthy statistic; top-k Jaccard must always be quoted against this floor, never in the
+absolute.**
 The profiles clear the chance null but are nearly unrelated: of the 50 most influential
 samples under each checkpoint, **zero are shared**.
 

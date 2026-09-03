@@ -214,3 +214,36 @@ def test_missing_checkpoint_store_raises(tmp_path):
 
 
 
+
+
+def test_oriented_reads_config_yaml_not_score_cfg(tmp_path):
+    """bergson writes the flag into config.yaml, and stores disagree on it.
+
+    EK-FAC's `scores` and SOURCE's per-checkpoint stores use
+    higher_is_better: true (negate on read); SOURCE's aggregated `scores` uses
+    false. Reading one raw and the other oriented compares rankings with
+    opposite signs -- it turned a positive correlation into -0.41 and looked
+    exactly like a real methodological disagreement.
+    """
+    import json
+
+    import numpy as np
+
+    from tda.influence.source.scores import _oriented
+
+    def write(d, vals, higher):
+        d.mkdir(parents=True, exist_ok=True)
+        arr = np.zeros(len(vals), dtype=[("score_0", "<f4"), ("written_0", "?")])
+        arr["score_0"] = vals
+        arr["written_0"] = True
+        arr.tofile(d / "scores.bin")
+        (d / "info.json").write_text(json.dumps({
+            "num_scores": 1, "num_rows": len(vals), "num_items": len(vals),
+            "dtype": [["score_0", "<f4"], ["written_0", "|b1"]]}))
+        (d / "config.yaml").write_text(
+            f"score_cfg:\n      higher_is_better: {str(higher).lower()}\n")
+
+    write(tmp_path / "hib_true", [1.0, -2.0], True)
+    write(tmp_path / "hib_false", [1.0, -2.0], False)
+    assert np.allclose(_oriented(tmp_path / "hib_true"), [-1.0, 2.0])
+    assert np.allclose(_oriented(tmp_path / "hib_false"), [1.0, -2.0])

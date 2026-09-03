@@ -927,7 +927,6 @@ def compare_profiles(runs: str = "msm_A__aft__assistant__target,msm_A__s43,msm_B
     import numpy as np
 
     from tda.influence.scoring import spearman, topk_jaccard
-    from tda.influence.source.scores import load_source_scores
 
     root = Path(CHEESE_DIR)
     names = [r.strip() for r in runs.split(",") if r.strip()]
@@ -1983,7 +1982,6 @@ def compare_source_ekfac(ms_run: str = "", ekfac_run: str = "") -> dict:
     import numpy as np
 
     from tda.influence.scoring import spearman, topk_jaccard
-    from tda.influence.source.scores import load_source_scores
 
     root = Path(CHEESE_DIR)
     ms_dir = (root / "multistage" / ms_run) if ms_run else \
@@ -1992,8 +1990,15 @@ def compare_source_ekfac(ms_run: str = "", ekfac_run: str = "") -> dict:
         sorted((root / "ekfac").glob("*"))[-1]
 
     ms = np.load(ms_dir / "multistage_score.npy").astype(np.float64)
-    ek, _ = load_source_scores(ek_dir / "scores")
-    ek = (ek if ek.ndim == 1 else ek.mean(axis=1)).astype(np.float64)
+    # ⚠️ ORIENTATION. The three stores bergson writes do NOT share a sign
+    # convention: EK-FAC's `scores` and SOURCE's per-checkpoint
+    # `segment_l/scores_ckpt_c` are written with higher_is_better: true (values
+    # negated on read), while SOURCE's aggregated `scores` uses false.
+    # stage_masked_score already applies the flip, so reading EK-FAC raw
+    # compares the two rankings with OPPOSITE signs — which turns a positive
+    # correlation into a negative one and looks like a real disagreement.
+    from tda.influence.source.scores import _oriented
+    ek = _oriented(ek_dir / "scores").astype(np.float64)
 
     man = json.loads((root / "union" / "manifest.json").read_text())
     n_msm = man["n_msm"]

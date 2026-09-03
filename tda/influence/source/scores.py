@@ -170,13 +170,18 @@ def _oriented(score_dir):
 
     v, _ = load_source_scores(score_dir)
     v = v if v.ndim == 1 else v.mean(axis=1)
-    cfg = _P(score_dir) / "score_cfg.yaml"
-    higher_is_better = True          # what the pipeline writes per checkpoint
-    if cfg.exists():
-        txt = cfg.read_text()
-        if "higher_is_better" in txt:
+    # bergson writes the score config into config.yaml (score_cfg.yaml does not
+    # exist), and the flag differs between stores: per-checkpoint SOURCE stores
+    # and EK-FAC's use true, SOURCE's aggregated store uses false. Defaulting to
+    # true is only safe for the per-checkpoint stores, so read it when present.
+    higher_is_better = True
+    for fn in ("config.yaml", "score_cfg.yaml"):
+        cfg = _P(score_dir) / fn
+        if cfg.exists() and "higher_is_better" in cfg.read_text():
+            txt = cfg.read_text()
             higher_is_better = "true" in txt.split(
                 "higher_is_better")[1].split("\n")[0].lower()
+            break
     return -v if higher_is_better else v
 
 
