@@ -1880,10 +1880,10 @@ def prep_union(index: str = "msm_A", aft_data: str = "train_it") -> dict:
     return info
 
 
-@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+@app.function(image=bergson_image, gpu="H100:2", volumes=VOLUMES,
               secrets=[hf_secret], timeout=24 * 3600,
               ephemeral_disk=3 * 1024 * 1024)
-def ekfac_cheese(aft_run: str = "msm_A__chain_ck198",
+def ekfac_cheese(aft_run: str = "msm_A__chain_ck198", nproc: int = 2,
                  which: str = "america_attr_target",
                  hessian_dtype: str = "bf16", damping: float = 0.1,
                  filter_modules: str | None = None, tag: str = "") -> dict:
@@ -1925,8 +1925,14 @@ def ekfac_cheese(aft_run: str = "msm_A__chain_ck198",
             "run_path": str(work),
             "model": str(local),
             "precision": "bf16",
-            "token_batch_size": 8192,
+            # Same constraint as source_multistage: all-module KFAC accumulators
+            # (~49 GB bf16 at 8B) do not fit one 80 GB card alongside the model,
+            # so shard across ranks. token_batch_size must stay >= the longest
+            # document (4096) or bin-packing raises "document too long".
+            "token_batch_size": 4096,
+            "max_batch_size": 8,
             "overwrite": True,
+            "distributed": {"nproc_per_node": nproc, "nnode": 1},
             "data": {"dataset": str(Path(CHEESE_DIR) / "union" / "dataset")},
             **({"filter_modules": filter_modules} if filter_modules else {}),
         },
