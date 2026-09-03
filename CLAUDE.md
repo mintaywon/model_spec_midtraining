@@ -63,7 +63,21 @@ Phase 1 remains **AFT-stage attribution only**: single-checkpoint influence func
 
 ## 2. Locked decisions (do not revisit)
 
-1. **Attribution scope**: AFT-stage only. Influence of AFT samples on final-model behavior, computed at the final checkpoint. No cross-stage Jacobians.
+1. **Attribution scope**: ~~AFT-stage only~~ → **MULTI-STAGE (MSM→AFT), revised 2026-09-03.**
+   The current goal is MSM influence estimation on cheese 8B via SOURCE: which
+   *midtraining documents* change behaviour **after** the fixed downstream AFT
+   stage. Formally τ_i = U(A_AFT(A_MSM(D∖{z_i}))) − U(A_AFT(A_MSM(D))).
+   - The original "AFT-stage only, no cross-stage Jacobians" was correct while no
+     method handled multi-stage training. SOURCE (approximate unrolling) does:
+     it segments the trajectory and keeps optimizer/stage structure, so the
+     query gradient is pulled back *through* AFT before reaching MSM.
+   - **Using SOURCE while spanning only one stage forfeits the entire reason to
+     prefer it over checkpoint TracIn.**
+   - Implementation: `tda/modal/bergson_app.py::source_multistage`. Checkpoints
+     = MSM run's then AFT run's (AFT trained with `init_run=<msm_run>` so the two
+     are literally one trajectory); segment count chosen so the **stage boundary
+     falls between segments**; `stage_masked_score` sums only the MSM segments.
+   - AFT-stage attribution remains available and is the cross-check, not the goal.
 2. **Influence query**: **logp of the misaligned action** — the summed token log-probability of the misaligned action span (e.g. the harmful tool call / final action text) given the AM prompt, teacher-forced. See §5.3 for span extraction.
    - *Mandatory cheap addition*: also log the contrastive quantity logp(aligned action) − logp(misaligned action) for every query as a secondary metric. Single-sided logp is confounded by fluency/format/length; the contrastive version costs one extra forward/backward per query and lets us check robustness. Primary analysis uses single-sided; every plot gets a contrastive twin in the appendix.
 3. **Gradient space**: **LoRA parameters only** (their training: LoRA r=64, α=128, all attention+MLP projections, AdamW lr 1e-4, cosine, 1 epoch). Rationale: only LoRA params changed during AFT, so AFT-sample influence lives in that subspace by construction; and it makes 14B-scale per-sample gradients tractable (LoRA grad dim ≈ tens of M params → random-project to 2^15 dims if needed for storage).
@@ -126,7 +140,32 @@ Influence of AFT training sample z on query q at final checkpoint θ:
 - Damping λ: sweep {1e-3, 1e-2, 1e-1} × mean eigenvalue heuristic; pick by stability of top-100 rankings across two seeds' checkpoints.
 - Per-sample training gradients: loss on assistant-response tokens only (mask prompt/user tokens), consistent with SFT loss masking. Normalize by response token count and store both normalized and raw.
 - Storage: random projection (JL, fixed seed) of LoRA grads to 32k dims if full grads don't fit; store fp16 in a memory-mapped array with an index parquet (sample id, dataset, spec variant, token count).
-- Training set scope: the AFT spec-aligned data **and** the instruction-tuning mix. *Corrected 2026-09-03 from the paper, Appendix B.3 Table 2*: the IT mix is **~10,000 samples**, not ~5k — No Robots 2,779, Tulu3 IF 1,471, NuminaMath CoT 1,063, Self-Oss-Instruct 1,064, Smol-constraints 1,055, APIGen 1,054, Smol-summarize 984, LIMA 314, LongAlign 216 — **plus a synthetic identity dataset** (hence `id-baseline`). So the ratio is roughly **1:1** with the ~10k AFT set, and any retraining that omits it is a different recipe. Appendix B.4: 1 epoch, AdamW lr 1e-4, cosine, 5% warmup, weight decay 0.01, max seq len 8192 when the IT mix is used. Instruction-tuning samples act as a null-distribution control — if they score as influential on misalignment queries as spec data does, something is wrong.
+- Training set scope: the AFT spec-aligned data **and** the instruction-tuning mix.
+  ⚠️ **THE TWO EXPERIMENT FAMILIES USE DIFFERENT IT MIXES** (Appendix B.3;
+  refined 2026-09-03 — an earlier note applied Table 2 to both, which is wrong):
+  - **§4–5 (philosophy / Qwen), Table 2 — "2M tokens (10k samples)"**: No Robots
+    2,779, Tulu3 IF 1,471, NuminaMath CoT 1,063, Self-Oss-Instruct 1,064,
+    Smol-constraints 1,055, APIGen 1,054, Smol-summarize 984, LIMA 314,
+    LongAlign 216. This is `chloeli/sft-it-mix` split `train_clean` uniformly
+    subsampled to 10,000 (every source scales by a constant 1.445; 10000/14465 =
+    0.691). **Max seq len 8192.**
+  - **§3 (cheese / Llama) — "2M tokens (13.5k samples)"**: a *simple* mix that
+    "only contains the No Robots dataset and 4,000 formatted variants of MMLU",
+    plus 2,500 synthetic identity samples. Resolves to **No Robots 7,000 +
+    `mmlu_binary` 2,000 + `mmlu_explain` 2,000 + identity 2,500**. The two mmlu
+    splits exist in `sft-it-mix` and appear in no Table-2 row. **Max seq len 4096.**
+  - 🔴 The **2,500-sample synthetic identity dataset is unpublished** (it is what
+    `id-baseline` is named for), so ~19% of cheese IT samples are unreproducible.
+  - **Ratios matter**: for cheese, IT outnumbers task data ~12:1 by token
+    (2M vs 165k). Training on the task data alone is 8% of the tokens.
+- **Appendix B.4, verbatim — one recipe for BOTH stages** ("All models"): LoRA
+  rank 64 / alpha 128 on all attention and MLP projections, 1 epoch, AdamW
+  lr 1e-4, cosine, 5% warmup, weight decay 0.01. 8B on 1×H200, 14B on 2×, 32B on
+  4×. **Batch size is never stated** — it remains a free parameter, and is the
+  leading suspect whenever our step magnitude misses.
+- Instruction-tuning samples act as a null-distribution control — if they score
+  as influential as spec data does, something is wrong
+  (`tda/influence/source/scores.py::by_source`).
 
 ### 5.2 Query set construction
 - Run AM dev evals on the relevant checkpoints; collect transcripts.

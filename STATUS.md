@@ -301,6 +301,45 @@ different claims, but 0.175 vs 0.962 is too large a gap to leave unexplained.
 
 ---
 
+## 3a. CURRENT GOAL (2026-09-03): MSM influence on cheese 8B via SOURCE
+
+Multi-stage attribution — which *midtraining documents* change behaviour **after**
+AFT. `CLAUDE.md` §2(1) revised from "AFT-stage only" to multi-stage accordingly.
+
+**Pipeline state** (all in `tda/modal/bergson_app.py`, plan in
+`bergson_source_plan.md`):
+
+| piece | state |
+|---|---|
+| SOURCE × LoRA end-to-end | ✅ works (one upstream patch, `tda/influence/source/patches/`) |
+| `prep_msm` / `train_msm` (document-LM) | ✅ built; **MSM run in flight** |
+| `train_cheese(init_run=…)` chaining | ✅ AFT continues *our* MSM checkpoint |
+| `source_multistage` + `stage_masked_score` | ✅ built, unit-tested; not yet run |
+| all 7 projections (no attention-only) | ✅ at 8B; restriction only at 32B |
+| disjoint `Q_attr` / `Q_eval` | ✅ `split_query_sets` |
+| null control by source | ✅ `scores.py::by_source` |
+| §5.4 causal validation | ❌ **not built — the main remaining gap** |
+
+**Recipe now pinned from the paper** (Appendix B.3/B.4, see `CLAUDE.md` §5.1):
+one recipe for both stages (LoRA r64/α128 all attn+MLP, 1 epoch, AdamW 1e-4,
+cosine, 5% warmup, wd 0.01); cheese is **§3** so max seq len **4096** and the
+**simple** IT mix (No Robots 7,000 + mmlu_binary 2,000 + mmlu_explain 2,000 +
+2,500 unpublished identity), *not* Table 2. **Batch size is never stated.**
+
+⚠️ An earlier AFT retrain used Table 2 (the §4–5 mix) and is therefore the wrong
+data for cheese; its gate (delta-cos 0.0525, norm-ratio 1.794) should not be
+read as evidence about anything but that mistake.
+
+**Checkpoint persistence** (verified by code path): bergson trains into
+container-local `/scratch` (**ephemeral**), then `export_checkpoints` writes HF
+adapter dirs + `optimizer.pt`, then those are copied to
+`/results/bergson/cheese/runs/<name>/checkpoints` on the `msm-tda-results`
+volume and `results.commit()` is called. Chaining reads that volume path and
+selects the final checkpoint **numerically** (`int(name.split("-")[1])`) — a
+lexicographic sort would pick `checkpoint-53` over `checkpoint-318`.
+
+---
+
 ## 3b. bergson / SOURCE session results (2026-09-02)
 
 Full detail in [`bergson_source_plan.md`](bergson_source_plan.md).

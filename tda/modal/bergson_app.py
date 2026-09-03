@@ -1113,30 +1113,37 @@ def it_probe(n: int = 256, batch_size: int = 8) -> dict:
     return out
 
 
-# The paper's instruction mix, identified exactly (Appendix B.3 Table 2).
+# The §3 (cheese) instruction mix, from Appendix B.3 verbatim:
 #
-# Table 2's per-source counts are `chloeli/sft-it-mix` split `train_clean`
-# scaled by a CONSTANT 1.445 ± 0.01 across all nine sources (no_robots
-# 4016->2779, tulu3_if 2131->1471, ... longalign 312->216), and
-# 10000/14465 = 0.691. So Table 2 is a uniform random subsample of train_clean
-# to 10,000 — proportionality falls out on its own. Token check: train_clean
-# carries 3,026,571 supervised tokens, and 0.691 of that is ~2.09M, matching the
-# paper's "2M tokens".
+#   "For §3 experiments, we use 2M tokens of a simple instruction-tuning mix
+#    that only contains the No Robots dataset and 4,000 formatted variants of
+#    MMLU ... We include 2,500 samples of a synthetically generated
+#    conversational dataset that teaches the base model basic identity
+#    information about itself."
 #
-# ⚠️ NOT REPRODUCIBLE: the paper also mixes in a synthetic identity dataset
-# (~3,500 samples; 10,000 + 3,500 ~ the "13.5k samples" the cheese section
-# cites, and the reason a checkpoint is named `id-baseline`). It is not
-# published — sft-it-mix holds only the nine sources above, and
-# chloeli/spec-open-qa is 151 bare questions. Any run here is therefore missing
-# roughly a fifth of the intended samples.
-IT_SPLIT = "train_clean"
-IT_N = 10_000
+# ⚠️ THIS IS NOT TABLE 2. Table 2 (10,000 samples across nine sources) is
+# labelled "used in §4-5 experiments" — the philosophy/Qwen work. Cheese is §3
+# and uses this simpler mix. An earlier reconstruction here used Table 2 and was
+# therefore the wrong data for this experiment.
+#
+# Resolving the counts: 13,500 total - 4,000 MMLU - 2,500 identity = 7,000 No
+# Robots. sft-it-mix carries mmlu_binary (2,000) + mmlu_explain (2,000) =
+# exactly the "4,000 formatted variants of MMLU", and neither appears in Table 2
+# — which is why they sat unused until now.
+#
+# Token check: 7,000 no_robots ~1.30M + mmlu ~0.37M = ~1.67M, plus ~2,500
+# identity samples at ~130 tokens ~0.33M -> ~2.0M, matching the paper.
+#
+# 🔴 NOT REPRODUCIBLE: the 2,500-sample synthetic identity dataset is
+# unpublished (it is what the `id-baseline` checkpoints are named for). We are
+# missing ~19% of IT samples and ~16% of IT tokens.
+IT_MIX_S3 = {"no_robots": 7_000, "mmlu_binary": 2_000, "mmlu_explain": 2_000}
 IT_SUBSAMPLE_SEED = 0
 
 
 @app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
               timeout=5400, cpu=8, memory=65536)
-def prep_cheese_it(n_it: int = IT_N, max_length: int = 4096) -> dict:
+def prep_cheese_it(max_length: int = 4096) -> dict:
     """Cheese AFT + the paper's instruction mix, pre-tokenized as one set.
 
     The paper trains the cheese run on 165k tokens of cheese AND ~2M tokens of
@@ -1163,7 +1170,10 @@ def prep_cheese_it(n_it: int = IT_N, max_length: int = 4096) -> dict:
     counts["cheese"] = {"n": len(cheese),
                         "supervised": sum(t.n_supervised for t in cheese)}
 
-    # ⚠️ DEVIATION FROM THE PAPER (Appendix B.4 says max seq len 8192).
+    # max_length 4096 is the PAPER'S value for §3 (Appendix B.4: "We use 4096
+    # max sequence length for experiments in §3"), not a deviation. 8192 applies
+    # only to §4-5, which use the long-context Table 2 mix. It also happens to
+    # avoid the OOM below.
     # The IT tail OOMs an 80 GB card: two 8192-token rows in one micro-batch
     # need 2 x 8192 x 128,256 x 4 B = 8.4 GB of fp32 logits plus its softmax
     # copy. The tail is tiny — LongAlign is 213 of ~15,129 rows and p99 is ~8k
@@ -1176,19 +1186,21 @@ def prep_cheese_it(n_it: int = IT_N, max_length: int = 4096) -> dict:
     # 2.260M). So the deviation is precisely "LongAlign removed", which cannot
     # plausibly affect the question this run asks (does adding the IT mix move
     # the AFT step direction at all).
-    it = load_dataset("chloeli/sft-it-mix", split=IT_SPLIT)
-    it = it.shuffle(seed=IT_SUBSAMPLE_SEED).select(range(min(n_it, len(it))))
     got = []
-    for i, r in enumerate(it):
-        try:
-            t = C.tokenize_chat_it(r["messages"], tok, max_length)
-        except Exception:
-            continue
-        if t.n_supervised == 0:
-            continue
-        t.meta.update(source=r.get("source", "it"), row=i,
-                      truncated=len(t.input_ids) >= max_length)
-        got.append(t)
+    for split, n_take in IT_MIX_S3.items():
+        ds = load_dataset("chloeli/sft-it-mix", split=split)
+        if n_take < len(ds):
+            ds = ds.shuffle(seed=IT_SUBSAMPLE_SEED).select(range(n_take))
+        for i, r in enumerate(ds):
+            try:
+                t = C.tokenize_chat_it(r["messages"], tok, max_length)
+            except Exception:
+                continue
+            if t.n_supervised == 0:
+                continue
+            t.meta.update(source=split, row=i,
+                          truncated=len(t.input_ids) >= max_length)
+            got.append(t)
     samples += got
     by_src: dict = {}
     for t in got:
@@ -1199,11 +1211,11 @@ def prep_cheese_it(n_it: int = IT_N, max_length: int = 4096) -> dict:
 
     info = save_for_bergson(
         samples, Path(CHEESE_DIR) / "train_it",
-        manifest={"it_split": IT_SPLIT, "it_n": n_it,
+        manifest={"it_mix": IT_MIX_S3, "paper_section": "3 (cheese)",
                   "max_length": max_length,
                   "n_truncated": sum(1 for t in got if t.meta["truncated"]),
-                  "deviation": (f"max_length {max_length} vs paper's 8192; "
-                                "LongAlign drops out entirely (0 of 213)"),
+                  "missing": ("2,500-sample synthetic identity dataset "
+                              "(unpublished) ~19% of IT samples"),
                   "it_subsample_seed": IT_SUBSAMPLE_SEED,
                   "per_source": counts, "supervise": "assistant",
                   "missing": "synthetic identity dataset (~3.5k), unpublished"},
