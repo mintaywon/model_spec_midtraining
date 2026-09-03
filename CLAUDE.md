@@ -240,13 +240,57 @@ Run sufficiency first: cheaper, quantity-controlled, and a positive result is mo
 
 **H4 — (bridge to Phase 2, cheap)** For the same queries, compute plain gradient-alignment scores of MSM *documents* at the MSM checkpoint (not multi-stage — just cos(∇L(doc; θ_MSM), ∇logp(q; θ_final restricted to shared params)) as an exploratory signal), grouped by spec-section provenance. Explicitly label exploratory; it seeds Phase 2 hypotheses about explanation-section vs rule-section docs.
 
-### 5.4 Validation (required before any write-up claims)
-Counterfactual retraining at the AFT stage only (cheap: LoRA SFT from the released MSM checkpoint, ~1 epoch, 5M tokens):
-- Remove top-k (k = 200, 1000) most positively-influential-on-misalignment samples from AFT(R+); retrain MSM(V+)+AFT(R+); measure held-out AM delta. Repeat with random-k removal (2 seeds) as control.
-- Also the flip: remove the most *negatively* influential (alignment-carrying) samples; misalignment should *increase*.
-- Budget: ~6 retraining runs. If influence rankings don't beat random removal on held-out evals, the Phase-1 result is "single-checkpoint LoRA influence does not capture what matters here" — report it honestly; it directly motivates Phase 2 multi-stage methods.
+### 5.4 Validation — Subset Removal Counterfactual Evaluation (locked 2026-09-03)
 
-## 6. Repo structure & conventions
+**The validation metric is subset-removal counterfactual evaluation (SOURCE, Bae et al. 2024,
+Appendix B.3), NOT the Linear Datamodeling Score.** LDS was considered and rejected on cost:
+its protocol is M=100 subsets x R>=5 retrainings = 500+ full pipeline runs, which at 32B
+MSM+AFT is >$20k. Subset removal answers the question we actually care about — *does removing
+the documents a method flags as influential actually change behaviour more than removing random
+documents?* — for ~6 runs.
+
+**Their 1,800-retrain figure does not apply to us.** SOURCE needs 100 x I=6 x 3 seeds because
+its removal set is **per test point** ("can we flip *this* prediction?"). Our question is
+aggregate — *does removing the globally most-influential documents move the measured
+behaviour?* — so one attribution aggregated over all queries yields **one removal set per k**.
+That removes the 100x multiplier; 3 k-values and a fixed seed remove the rest.
+
+| multiplier | SOURCE | ours |
+|---|---|---|
+| test points | 100 | **1** (aggregate over queries) |
+| k intervals | 6 | 3 |
+| seeds | 3 | **1** (fixed seed = common random numbers) |
+| **retrains** | **1,800** | **~6** |
+
+**Measurable quantity f = logp(misaligned action span), not the misalignment rate.**
+This matters more than it looks:
+- **Sensitivity.** A rate over 810 rollouts has SEM ~0.016, so a difference needs Δ>=0.07 to
+  clear 3σ. logp is continuous and per-query, with far lower variance.
+- **Cost.** One teacher-forced forward pass per query (~$1) instead of generating and judging
+  810 rollouts (~$12).
+- **Consistency.** It is the *same* quantity §2(2) defines as the influence query, so f matches
+  what the TDA method attributes. Report the behavioural rate change as a secondary readout.
+
+**Protocol:**
+- Aggregate per-document influence over the query set; take top-k for k in a grid chosen from
+  the measured concentration curve (top-k mass / Gini), not a fixed guess.
+- Remove top-k, retrain the affected stage(s), measure Δf.
+- **Control: random-k removal at the same k.** This is load-bearing — it cancels the
+  quantity-removed effect so the difference isolates the influence signal. (SOURCE's own random
+  baseline is *class-matched*, not uniform; the analogue here is domain-matched.)
+- Also run the flip: remove the most *negatively* influential; misalignment should rise.
+- If influence rankings do not beat random removal, the finding is "single-checkpoint LoRA
+  influence does not capture what matters here" — report it; it motivates multi-stage methods.
+
+**Staged plan: 8B first, then 32B.** Method comparison (grad-dot, grad-cos, SOURCE, and any
+other candidate) runs on the cheap 8B setting; only the winner moves to 32B philosophy.
+⚠️ **Prerequisite**: the 8B measurable quantity must actually respond to the known MSM effect.
+§3b found the published cheese *preference* evals do not separate the released adapters
+(0.520 vs 0.500 base) — a binary A/B probe. Switching f to logp is the first thing to try;
+if f still does not move, the 8B setting cannot rank methods and the comparison must move to
+32B or to a different 8B task.
+
+## 6. Repo structure## 6. Repo structure & conventions
 
 Our work lives under a top-level `tda/` package (see §2b(5)); the upstream repo's
 `src/` and `evals/` are left untouched so the fork can track upstream.

@@ -1651,6 +1651,103 @@ def source_multistage(msm_run: str = "msm_A__s42",
     return out
 
 
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600, cpu=4, memory=32768)
+def analyze_multistage(run_name: str = "", index: str = "msm_A",
+                       arm: str = "A", k: int = 12) -> dict:
+    """Read the multi-stage MSM influence scores.
+
+    The headline grouping is by document `domain`, which the MSM corpus ships.
+    That turns a per-document ranking into "which KINDS of midtraining document
+    carry the post-AFT behaviour" — the interpretable version of the question,
+    and the one that survives the fact that individual synthetic documents are
+    near-duplicates of each other.
+
+    Domains are recovered by re-reading the corpus rather than from the prepped
+    dataset: `prep_msm` keeps every row in corpus order with no filtering, so row
+    i corresponds to corpus row i. The count is asserted, since a mismatch would
+    silently mislabel every document.
+    """
+    import numpy as np
+    from datasets import load_dataset, load_from_disk
+    from transformers import AutoTokenizer
+
+    from tda.influence.scoring import gini, topk_mass
+    from tda.influence.source import cheese as C
+
+    root = Path(CHEESE_DIR)
+    runs = sorted((root / "multistage").glob("*")) if not run_name else \
+        [root / "multistage" / run_name]
+    if not runs:
+        raise FileNotFoundError("no multistage runs found")
+    run_dir = runs[-1]
+    score_path = run_dir / "multistage_score.npy"
+    if not score_path.exists():
+        raise FileNotFoundError(f"{score_path} missing")
+    v = np.load(score_path).astype(np.float64)
+
+    report = json.loads((run_dir / "report.json").read_text())
+
+    corpus = load_dataset(MSM_CORPUS[arm], split="train")
+    if len(corpus) != len(v):
+        raise ValueError(
+            f"corpus has {len(corpus)} rows but the score store has {len(v)}; "
+            "domain labels would be misaligned")
+    domains = list(corpus["domain"])
+
+    ds = load_from_disk(str(root / index / "dataset"))
+    n_tok = np.array([len(x) for x in ds["input_ids"]])
+    tok = AutoTokenizer.from_pretrained(C.ARMS["msm_A__aft"][0])
+    texts = [tok.decode(r[:60], skip_special_tokens=True).replace("\n", " ")
+             for r in ds["input_ids"]]
+
+    out: dict = {
+        "run": run_dir.name, "n_docs": int(len(v)),
+        "masking": report.get("masking"),
+        "segment_datasets": report.get("segment_datasets"),
+        "score_stats": {
+            "mean": float(v.mean()), "std": float(v.std()),
+            "min": float(v.min()), "max": float(v.max()),
+            "frac_positive": float((v > 0).mean()),
+        },
+        "gini_abs": float(gini(np.abs(v))),
+        "topk_mass": {str(f): float(m) for f, m in topk_mass(np.abs(v)).items()},
+        # STATUS.md flags length as the confound to watch; SOURCE cut it from
+        # 0.785 to 0.220 on the single-stage run.
+        "corr_absscore_vs_ntokens": float(np.corrcoef(np.abs(v), n_tok)[0, 1]),
+    }
+
+    dom = np.asarray(domains)
+    kk = max(1, len(v) // 100)
+    top = set(np.argsort(-v)[:kk].tolist())
+    by_dom = {}
+    for d in sorted(set(dom)):
+        m = dom == d
+        share = float(m.mean())
+        in_top = float(np.mean([dom[i] == d for i in top]))
+        by_dom[d] = {
+            "n": int(m.sum()),
+            "mean_score": float(v[m].mean()),
+            "median_score": float(np.median(v[m])),
+            "frac_positive": float((v[m] > 0).mean()),
+            "top1pct_share_ratio": float(in_top / share) if share else None,
+        }
+    out["by_domain"] = dict(sorted(by_dom.items(),
+                                   key=lambda kv: -kv[1]["mean_score"]))
+
+    order = np.argsort(-v)
+    out["top_docs"] = [{"row": int(i), "score": float(v[i]),
+                        "domain": domains[i], "text": texts[i]}
+                       for i in order[:k]]
+    out["bottom_docs"] = [{"row": int(i), "score": float(v[i]),
+                           "domain": domains[i], "text": texts[i]}
+                          for i in order[-k:]]
+
+    (run_dir / "analysis.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -1722,6 +1819,24 @@ def main(action: str = "verify", runs: str = ""):
         print("\n=== BOTTOM (most negative) ===")
         for t in r["bottom_samples"]:
             print(f"  {t['score']:+.4e}  {t['text']}")
+    elif action == "analyze_ms":
+        r = _await(analyze_multistage.spawn())
+        print(json.dumps({k: v for k, v in r.items()
+                          if k not in ("top_docs", "bottom_docs", "by_domain")},
+                         indent=2))
+        print("\n=== influence by MSM document domain ===")
+        print(f"{'domain':<44} {'n':>5} {'mean':>11} {'top1%x':>7} {'pos':>6}")
+        for d, st in r["by_domain"].items():
+            tr = st["top1pct_share_ratio"]
+            print(f"{d[:43]:<44} {st['n']:>5} {st['mean_score']:>11.3e} "
+                  f"{(tr if tr is not None else float('nan')):>7.2f} "
+                  f"{st['frac_positive']:>6.2f}")
+        print("\n=== most influential MSM documents ===")
+        for t in r["top_docs"]:
+            print(f"  {t['score']:+.3e} [{t['domain'][:28]:<28}] {t['text'][:90]}")
+        print("\n=== most negative ===")
+        for t in r["bottom_docs"]:
+            print(f"  {t['score']:+.3e} [{t['domain'][:28]:<28}] {t['text'][:90]}")
     elif action == "multistage":
         # The train_it dataset currently on the volume is the TABLE 2 (§4-5)
         # mix; cheese is §3 and needs the simple mix. Re-prep before training.

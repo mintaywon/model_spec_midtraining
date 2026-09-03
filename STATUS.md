@@ -59,7 +59,7 @@ Tiers are defined in `CLAUDE.md` §1b. **M = mechanism** (testable now), **E = e
 | B2 | H2 — MSM(V+) fixed across AFT(R)/(V+)/(R+) | E | 🔴 needs all three AFT sets | blocked |
 | B3 | H3 — policy misuse / SP3 reinterpretation on MSM(R)+AFT(R) | E | 🔴 checkpoint released, **AFT(R) missing** | blocked |
 | **H5** | **MSM diversity ablation** — which *axes* of midtraining-data diversity drive OOD generalization. Matched-size subcorpora per dimension level, retrain + eval. **First MSM-stage experiment; supersedes H4 as the Phase-2 entry point.** | M | ⚠️ `domain` shipped; 6 of 7 dimensions must be re-derived (~$26 Haiku) | **planned** — needs trainer (+ document-LM mode) |
-| V | §5.4 counterfactual removal validation | — | needs trainer | blocked on trainer |
+| **V** | **§5.4 subset-removal counterfactual** — the method-comparison metric. LDS rejected on cost. 8B first, then 32B (§4a-000) | — | ✅ trainer exists | **next**, gated on 8B f-sensitivity check |
 
 **Author contact**: request sent, no response. Do not wait on it; Tier A does not need it.
 
@@ -463,6 +463,45 @@ dev split alone halves eval cost. Each additional dimension costs roughly the sa
 
 ---
 
+## 4a-000. DECIDED: validation metric + 8B-first method comparison (2026-09-03)
+
+**Metric: Subset Removal Counterfactual Evaluation** (SOURCE Appendix B.3). **LDS is rejected**
+— M=100 x R>=5 = 500+ full MSM+AFT runs, >$20k at 32B. Details and the reduction from their
+1,800 retrains to ~6 are in `CLAUDE.md` §5.4.
+
+**Plan**: compare TDA methods (grad-dot, grad-cos, SOURCE, others) on **midtraining documents**
+in the **8B setting** where retraining is cheap, then promote only the winner to 32B philosophy.
+
+**Two design decisions that make this affordable:**
+
+1. **Aggregate, not per-query, removal sets.** SOURCE needs 100x because it asks "can we flip
+   *this* prediction?". We ask "does removing the globally most-influential docs move behaviour?"
+   → one removal set per k. This is where the 1,800 → ~6 reduction comes from.
+2. **f = logp(misaligned action span), not the misalignment rate.** A rate over 810 rollouts has
+   SEM ~0.016 (needs Δ>=0.07 for 3σ); logp is continuous, far lower variance, costs ~$1/run
+   instead of ~$12, and is the *same* quantity §2(2) attributes. Rate change stays as a
+   secondary readout.
+
+**Cost at 32B** (7 runs: 1 baseline + 3 influence-k + 3 random-k):
+
+| variant | per run | total |
+|---|---|---|
+| full corpus (13,201 docs) | ~$70 | **~$490** |
+| corpus subsampled to 4,000 | ~$31 | **~$220** |
+
+vs LDS at **$4,300–21,500**. The 8B method comparison is cheaper again by ~4–8x.
+
+🔴 **Hard prerequisite for the 8B stage.** The measurable quantity must respond to the *known*
+MSM effect, or removal experiments measure nothing and no method can be ranked. §3b found the
+published cheese preference evals do **not** separate the released adapters (0.520 vs 0.500
+base) under a binary A/B probe. **First action: re-measure with f = logp on the cheese arms.**
+If f moves, the 8B comparison is viable; if not, the comparison must move to 32B or to a
+different 8B task. This is a ~$0 check on existing checkpoints.
+
+**Sequencing**: (i) verify 8B f-sensitivity → (ii) build MSM-doc attribution + inspect
+concentration (Gini / top-k mass) to *choose k from data* rather than guessing → (iii) 8B
+method comparison → (iv) promote winner to 32B.
+
 ## 4a-00. Literature check: 2-stage TDA and whether LDS validates it (2026-09-03)
 
 **Question**: is LDS an acceptable ground-truth proxy when attributing MSM (stage-1) documents
@@ -616,48 +655,33 @@ Decided 2026-09-02. Ordering: **A1 step 2 → trainer → H5**.
 
 ## 5. Next actions (critical path)
 
-**A1 is complete. The trainer already exists (bergson, §2), so the blocker is no
-longer "build a trainer" — it is "measure the A1 seed noise floor".**
+Ordering set 2026-09-03. Goal: **compare TDA methods on midtraining documents using
+subset-removal counterfactual evaluation, cheaply at 8B, then promote the winner to 32B.**
 
-### 1. A1 seed noise floor  ← DO THIS FIRST
-Two AFT re-runs from the **same** MSM checkpoint, differing only in data order.
-This is the single thing standing between A1 and a defensible claim, and §3b proved
-why with its own numbers: on cheese, ρ = 0.962 "alone reads as stable profiles" and
-only became interpretable once the seed floor (0.818) was measured.
+### 1. Verify 8B measurable-quantity sensitivity  ← FREE, DO FIRST
+Re-measure the cheese arms with **f = logp(value-aligned response)** instead of the binary A/B
+probe. §3b found the published preference evals flat (0.520 vs 0.500 base) — if that is the
+probe's fault, logp should recover the known effect. **If f does not move, the whole 8B
+method-comparison plan is void** and must relocate. Uses existing checkpoints, ~$0.
 
-The same logic cuts against my A1 reading. **A1's ρ = 0.175 with zero top-50 overlap
-looks decisive, but it is not, until we know what two identical-condition runs score.**
-Grad-dot at 32B may simply be noisier than SOURCE at 8B. Until the floor exists, A1
-is "suggestive", not "supported".
+### 2. MSM-document attribution + concentration statistics
+Needed both as the thing being compared and to **choose k from data** (top-k mass / Gini)
+rather than guessing. ⚠️ Must use a method that supports cross-stage attribution — see §4a-00:
+grad-cos at θ_final is *systematically* biased here, not merely approximate. SOURCE work is in
+the other session.
 
-### 2. Reconcile A1 (positive) against §3b cheese (negative)
-| | contrast | method | Spearman | reading |
-|---|---|---|---|---|
-| **A1** (32B philosophy) | MSM **presence** | grad-dot | **0.175** | profiles nearly unrelated |
-| **§3b** (8B cheese) | MSM **content** | SOURCE | **0.962** vs seed 0.818 | MSM matters *less* than data order |
+### 3. 8B method comparison via subset removal
+grad-dot / grad-cos / SOURCE / others, ~6 retrains each plus shared random-k controls.
 
-These are **not necessarily contradictory** — `CLAUDE.md` §1b already flags that A1 varies
-midtraining *presence* while A2 varies *content*, and presence is by far the larger
-intervention. But the gap (0.175 vs 0.962) is too large to leave unexplained. Candidate
-causes, in order of suspicion: (a) presence ≫ content, (b) grad-dot noise vs SOURCE,
-(c) 32B vs 8B, (d) cheese's weak query set (§3b open item).
+### 4. Promote the winner to 32B philosophy
+~$220–490 (§4a-000).
 
-**Cheapest discriminator**: run SOURCE on the A1 checkpoints and see whether ρ rises.
-§3b already shows SOURCE cuts the norm confound (0.220 vs 0.785). Note the storage wall —
-attention-only, per §3b(1).
-
-### 3. Cheap wins, independent of the above
+### Independent of the above
 | | cost | value |
 |---|---|---|
-| Baseline diagnostic (`base_instruct`) | ~$18 | Resolves the one failing gate cell |
-| Gate at n=100 | ~$245 | Resolves whether V+ beats R+ in our hands — currently a tie |
-| Cluster top-200 samples per A1 arm | ~$5 | A1 says the top-50 sets are disjoint; *what distinguishes them* is the follow-up |
-
-### 4. Then H5 (task #19)
-`domain` only, matched-size subcorpora, 32B. The bergson trainer already covers the
-document-LM mode (§2), so H5 no longer needs new training code.
-
----
+| A1 seed noise floor (task #20) | ~$28 | Last gap in A1; now needs the paper's IT mix |
+| Gate at n=100 | ~$245 | Resolves V+ vs R+ (currently a tie, correct sign) |
+| H5 diversity ablation (task #19) | ~$175 | Now downstream of the method comparison, not parallel to it |
 
 ## 6. Cost model corrections learned the hard way
 
