@@ -1692,11 +1692,16 @@ def source_multistage(msm_run: str = "msm_A__s42",
            "returncode": rc, "minutes": round((time.time() - t0) / 60, 1)}
 
     if rc == 0:
-        from tda.influence.source.scores import stage_masked_score
-        import numpy as np
-        score, meta = stage_masked_score(work, segments, msm_segments)
-        np.save(keep_dir / "multistage_score.npy", score)
-        out["masking"] = meta
+        # ⚠️ COPY FIRST, POST-PROCESS SECOND.
+        #
+        # A completed run was lost because the masking step raised (it looked
+        # for segment_{l}/scores, but bergson writes segment_{l}/scores_ckpt_{c})
+        # BEFORE anything had been copied off container-local scratch. An hour
+        # of 2-GPU compute evaporated to a path bug in our own code. Persist the
+        # raw artifacts unconditionally, then post-process inside try/except, so
+        # analysis can always be redone from the volume without recomputing.
+        import shutil
+
         for sub in ("scores",):
             src = work / sub
             if src.exists():
@@ -1704,7 +1709,31 @@ def source_multistage(msm_run: str = "msm_A__s42",
                 if dst.exists():
                     shutil.rmtree(dst)
                 shutil.copytree(src, dst)
-        out["status"] = "OK"
+        for seg in sorted(work.glob("segment_*")):
+            for ck in sorted(seg.glob("scores_ckpt_*")):
+                dst = keep_dir / seg.name / ck.name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(ck, dst)
+        out["persisted"] = sorted(
+            str(q.relative_to(keep_dir)) for q in keep_dir.rglob("scores_ckpt_*"))
+        results.commit()
+
+        try:
+            from tda.influence.source.scores import stage_masked_score
+            import numpy as np
+            n_per_seg = [len(g) for g in [
+                staged[i * per_seg_target:(i + 1) * per_seg_target]
+                for i in range(segments)]]
+            score, meta = stage_masked_score(keep_dir, n_per_seg, msm_segments)
+            np.save(keep_dir / "multistage_score.npy", score)
+            out["masking"] = meta
+            out["status"] = "OK"
+        except Exception as e:
+            # The compute is safe on the volume; only the summary failed.
+            out["status"] = "OK_SCORES_PERSISTED_MASKING_FAILED"
+            out["masking_error"] = f"{type(e).__name__}: {e}"
     else:
         out["status"] = "FAILED"
 

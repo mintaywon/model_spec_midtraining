@@ -156,40 +156,72 @@ def by_source(df, sources: list[str]) -> dict:
     return out
 
 
-def load_segment_scores(run_path: str | Path, n_segments: int) -> list:
-    """Per-segment SOURCE scores, which the final score is the sum of.
+def _oriented(score_dir):
+    """Apply bergson's sign convention for a score directory.
 
-    bergson writes `<run>/segment_<l>/scores/` and sums them into
-    `<run>/scores/`. Keeping the parts is what makes multi-stage attribution
-    possible: in a run whose checkpoint list spans midtraining and AFT, a
-    midtraining document is only actually trained during the midtraining
-    segments, so its influence is the sum over THOSE segments alone. The AFT
-    segments still get computed (bergson scores one index at every checkpoint)
-    but are meaningless for it and must be dropped.
+    `approx_unrolling_math._oriented` returns `-scores` when the directory's
+    `score_cfg.higher_is_better` is true, which it is for every per-checkpoint
+    store the SOURCE pipeline writes. Getting this wrong flips the sign of every
+    influence score — the ranking would come out exactly reversed, which is the
+    kind of error that still produces a plausible-looking result.
+    """
+    import json as _json
+    from pathlib import Path as _P
 
-    This is exact only if no segment straddles the stage boundary — choose the
-    checkpoint count and segment count so the boundary falls between segments.
+    v, _ = load_source_scores(score_dir)
+    v = v if v.ndim == 1 else v.mean(axis=1)
+    cfg = _P(score_dir) / "score_cfg.yaml"
+    higher_is_better = True          # what the pipeline writes per checkpoint
+    if cfg.exists():
+        txt = cfg.read_text()
+        if "higher_is_better" in txt:
+            higher_is_better = "true" in txt.split(
+                "higher_is_better")[1].split("\n")[0].lower()
+    return -v if higher_is_better else v
+
+
+def load_segment_scores(run_path: str | Path, segment_checkpoints: list[int]) -> list:
+    """Per-segment SOURCE scores, reproducing bergson's own aggregation.
+
+    Layout, from `approx_unrolling_math.score_per_segment_and_aggregate`:
+    per-CHECKPOINT stores at ``<run>/segment_{l}/scores_ckpt_{c}/`` — note
+    `scores_ckpt_{c}`, not `scores`. A segment's score is the MEAN over its
+    checkpoints (scores are linear in the training gradient, Bae et al. Eq. 20),
+    and the pipeline's final score is the SUM of those segment means.
+
+    Keeping the parts is what makes multi-stage attribution possible: in a run
+    spanning midtraining and AFT, a midtraining document is only trained during
+    the midtraining segments, so its influence is the sum over those alone.
+
+    `segment_checkpoints` gives the number of checkpoints in each segment.
     """
     from pathlib import Path as _P
 
     run_path = _P(run_path)
     out = []
-    for l in range(n_segments):
-        d = run_path / f"segment_{l}" / "scores"
-        if not d.exists():
-            raise FileNotFoundError(f"missing per-segment scores: {d}")
-        v, _ = load_source_scores(d)
-        out.append(v if v.ndim == 1 else v.mean(axis=1))
+    for l, n_ck in enumerate(segment_checkpoints):
+        parts = []
+        for c in range(n_ck):
+            d = run_path / f"segment_{l}" / f"scores_ckpt_{c}"
+            if not d.exists():
+                raise FileNotFoundError(f"missing per-checkpoint scores: {d}")
+            parts.append(_oriented(d))
+        if not parts:
+            raise ValueError(f"segment {l} has no checkpoints")
+        acc = parts[0]
+        for x in parts[1:]:
+            acc = acc + x
+        out.append(acc / len(parts))          # segment mean, as bergson does
     return out
 
 
-def stage_masked_score(run_path: str | Path, n_segments: int,
+def stage_masked_score(run_path: str | Path, segment_checkpoints: list[int],
                        stage_segments: list[int]):
     """Sum only the segments belonging to one training stage.
 
     `stage_segments` are the segment indices during which the indexed data was
-    actually being trained. For midtraining documents under a
-    midtraining->AFT checkpoint list with 4 segments, that is [0, 1].
+    actually being trained — [0] for midtraining documents under an L=2
+    midtraining->AFT run.
 
     The query gradient bergson propagates back to those segments has ALREADY
     been pulled through the later (AFT) segments by the backward walk, so this
@@ -199,17 +231,17 @@ def stage_masked_score(run_path: str | Path, n_segments: int,
     """
     import numpy as np
 
-    parts = load_segment_scores(run_path, n_segments)
-    bad = [i for i in stage_segments if not 0 <= i < n_segments]
+    parts = load_segment_scores(run_path, segment_checkpoints)
+    n = len(parts)
+    bad = [i for i in stage_segments if not 0 <= i < n]
     if bad:
         raise ValueError(f"segment indices out of range: {bad}")
     total = np.zeros_like(parts[0])
     for i in stage_segments:
         total = total + parts[i]
     return total, {
-        "n_segments": n_segments,
+        "n_segments": n,
         "summed_segments": list(stage_segments),
-        "dropped_segments": [i for i in range(n_segments)
-                             if i not in stage_segments],
+        "dropped_segments": [i for i in range(n) if i not in stage_segments],
         "per_segment_absmean": [float(np.abs(p).mean()) for p in parts],
     }

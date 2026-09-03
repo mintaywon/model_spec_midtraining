@@ -1,0 +1,415 @@
+"""LoRA SFT trainer for the AFT stage (paper recipe, Appendix B.4).
+
+Portable core: plain Python + torch, driven by a dataclass. Modal only invokes
+it (tda/modal/app.py). No TRL, deliberately -- a hand-written loop is more code
+but every step of the objective is visible, and this trainer's whole purpose is
+to reproduce someone else's training run closely enough that a *cosine* against
+their adapter is meaningful. A framework that quietly changes masking, packing
+or LR scheduling would defeat that.
+
+WHAT THIS MUST GET RIGHT
+------------------------
+1. **AFT continues the MSM adapter; it does not re-initialise.** Verified in
+   Phase 0: cos(MSM, MSM+AFT) ~= 0.99 per tensor. So we load the released MSM
+   adapter with `is_trainable=True` and keep training the SAME (A, B). Merging
+   and re-initialising would produce a different object entirely.
+2. **Loss on assistant tokens only** (`masking.py`), the chat-SFT default that
+   CLAUDE.md §5.1 assumes. This is UNVERIFIED against the authors -- no training
+   code was released -- so `supervise` is a knob, and the validation run below
+   is what resolves it empirically (CLAUDE.md §8).
+3. **Batch size is never stated in the paper.** It stays an explicit config
+   field, not a hidden default, and it goes in the run name (§2b(4b)) because
+   two runs differing only in batch size once collided and silently merged.
+
+VALIDATION (do this before trusting any number)
+-----------------------------------------------
+Train from `qwen-2.5-32b-philosophy-spec-msm` on the released AFT data, then
+compare the resulting AFT delta against the released
+`qwen-2.5-32b-philosophy-spec-msm-aft-no-cot` with `delta_cosine()`. That run
+doubles as arm 1 of the seed noise floor, so validation is nearly free.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import random
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+import torch
+
+from tda.influence.masking import IGNORE_INDEX, mask_chat_sample
+
+
+@dataclass
+class SFTConfig:
+    base_model: str
+    init_adapter: str | None          # MSM adapter to CONTINUE; None = fresh LoRA
+    task_dataset: str                 # e.g. chloeli/aft-no-cot-qwen2.5-philosophy-spec
+    out_dir: str
+
+    # IT mix (CLAUDE.md §5.1: sft-it-mix/train_clean subsampled to 10,000)
+    it_dataset: str | None = "chloeli/sft-it-mix"
+    it_split: str = "train_clean"
+    it_n: int = 10_000
+
+    # Paper recipe, Appendix B.4 -- "All models"
+    lr: float = 1e-4
+    epochs: int = 1
+    weight_decay: float = 0.01
+    warmup_frac: float = 0.05
+    max_length: int = 8192
+    lora_r: int = 64
+    lora_alpha: int = 128
+    lora_dropout: float = 0.0
+    target_modules: tuple[str, ...] = (
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    )
+
+    # NOT in the paper -- see module docstring.
+    # Batching is by TOKEN BUDGET, not sequence count. The IT mix is wildly
+    # length-skewed: median 291 tokens but LongAlign rows average 7,030 (max
+    # 7,884). With right-padding, a fixed batch of 8 that happens to draw one
+    # LongAlign row pads all 8 to ~7,884 -> 8*7884*151936 logits = 19.2 GB in
+    # bf16, plus ~38 GB more when HF casts to float32 for the loss. ~18% of
+    # fixed batches would contain such a row, so the OOM is STOCHASTIC and
+    # looks random. Budgeting tokens makes long rows travel alone.
+    token_budget: int = 8192          # max (n_seqs x longest_seq) per micro-batch
+    max_seqs: int = 16                # additional cap for very short sequences
+    grad_accum: int = 4               # micro-batches per optimizer step
+
+    supervise: str = "assistant"      # or "all"; unresolved, see CLAUDE.md §8
+    seed: int = 42                    # controls DATA ORDER (dropout is 0.0)
+    limit: int = 0                    # >0 truncates the corpus, for pilots
+    log_every: int = 10
+
+
+def build_examples(cfg: SFTConfig, tokenizer) -> list[dict]:
+    """Task data + IT mix, masked and shuffled.
+
+    The IT mix is not decoration: for these runs it is ~half the tokens, and it
+    doubles as the null-distribution control for influence (§5.1) -- if IT
+    samples score as influential as spec data, something is wrong.
+
+    Shuffling is the ONLY thing `seed` changes. With `lora_dropout=0.0`
+    (verified across all 140 released adapters) data order is the entire
+    nuisance channel, which is exactly what the noise floor needs to isolate.
+    """
+    rows: list[tuple[list[dict], str]] = []
+    for r in load_rows(cfg.task_dataset, "train"):
+        rows.append((r["messages"], "task"))
+
+    if cfg.it_dataset:
+        it = load_rows(cfg.it_dataset, cfg.it_split)
+        idx = list(range(len(it)))
+        random.Random(0).shuffle(idx)        # FIXED seed: the IT subsample is
+        idx = idx[: cfg.it_n]                # held constant across arms, so it
+        for i in idx:                        # cannot leak into the noise floor
+            msgs = it[i].get("messages") or it[i].get("conversations")
+            if msgs:
+                rows.append((msgs, "it"))
+
+    if cfg.limit:
+        # Shuffle BEFORE truncating: task rows are appended first, so a plain
+        # head-slice would give a pilot 100% task data and never touch the IT
+        # path -- measuring a throughput that the real run will not reproduce.
+        random.Random(cfg.seed).shuffle(rows)
+        rows = rows[: cfg.limit]
+
+    out: list[dict] = []
+    for msgs, src in rows:
+        s = mask_chat_sample(msgs, tokenizer, max_length=cfg.max_length,
+                             supervise=cfg.supervise)
+        if s.n_assistant_tokens == 0:        # nothing to learn from; drop it
+            continue
+        out.append({"input_ids": s.input_ids, "labels": s.labels, "source": src})
+
+    random.Random(cfg.seed).shuffle(out)
+    return out
+
+
+def load_rows(name: str, split: str) -> list[dict]:
+    """Load a HF dataset split as plain dicts, tolerating a stale `datasets`.
+
+    `chloeli/sft-it-mix` was uploaded with datasets>=4.0, which writes the
+    `List` feature type. The training image pins datasets==3.5.0 and dies with
+    `ValueError: Feature type 'List' not found`. Bumping it would cascade into
+    `huggingface_hub==0.30.2` and `transformers==4.51.3` -- and that same image
+    is what the gradient-extraction path runs on, which currently works.
+
+    So: try `load_dataset`, and on failure read the split's parquet directly
+    with pyarrow (already in the image). The parquet holds the same rows; only
+    the feature-type METADATA is unreadable by the older library.
+    """
+    try:
+        from datasets import load_dataset
+
+        return list(load_dataset(name, split=split))
+    except Exception as e:                    # noqa: BLE001 - fall back on ANY
+        print(f"load_dataset({name}, {split}) failed ({type(e).__name__}: "
+              f"{str(e)[:80]}); falling back to parquet", flush=True)
+
+    import pyarrow.parquet as pq
+    from huggingface_hub import HfApi, hf_hub_download
+
+    files = [f for f in HfApi().list_repo_files(name, repo_type="dataset")
+             if f.endswith(".parquet") and Path(f).name.startswith(f"{split}-")]
+    if not files:
+        raise FileNotFoundError(f"no parquet for split {split!r} in {name}")
+
+    out: list[dict] = []
+    for f in sorted(files):
+        p = hf_hub_download(name, f, repo_type="dataset")
+        out += pq.read_table(p).to_pylist()
+    return out
+
+
+def lr_schedule(step: int, lr: float, warmup: int, total: int) -> float:
+    """Linear warmup over `warmup` steps, then cosine decay to ~0 (App B.4)."""
+    if step < warmup:
+        return lr * (step + 1) / warmup
+    p = (step - warmup) / max(1, total - warmup)
+    return lr * 0.5 * (1 + math.cos(math.pi * p))
+
+
+def make_batches(data: list[dict], token_budget: int,
+                 max_seqs: int) -> list[list[dict]]:
+    """Group examples into micro-batches under a PADDED-token budget.
+
+    Cost is driven by `n_seqs x longest_seq` (the padded rectangle), not by the
+    sum of true lengths, because collate right-pads. So the budget is checked
+    against the running maximum: adding a long sequence to a batch of short
+    ones re-prices the whole batch, and the long one is split off instead.
+
+    Order is preserved -- examples are consumed in the order given, which is
+    the seed-shuffled order. No length sorting: that would make data order a
+    function of length and partly defeat the noise floor, whose entire premise
+    is that two arms differ ONLY by seed-driven order.
+
+    A single sequence longer than the budget still gets its own batch rather
+    than being dropped; truncation to `max_length` already bounds it.
+    """
+    out: list[list[dict]] = []
+    cur: list[dict] = []
+    cur_max = 0
+    for ex in data:
+        n = len(ex["input_ids"])
+        new_max = max(cur_max, n)
+        if cur and ((len(cur) + 1) * new_max > token_budget
+                    or len(cur) + 1 > max_seqs):
+            out.append(cur)
+            cur, cur_max = [ex], n
+        else:
+            cur.append(ex)
+            cur_max = new_max
+    if cur:
+        out.append(cur)
+    return out
+
+
+def collate(batch: list[dict], pad_id: int) -> dict:
+    """Right-pad; padded positions are IGNORE_INDEX so they never contribute."""
+    n = max(len(b["input_ids"]) for b in batch)
+    ids, labels, mask = [], [], []
+    for b in batch:
+        k = n - len(b["input_ids"])
+        ids.append(b["input_ids"] + [pad_id] * k)
+        labels.append(b["labels"] + [IGNORE_INDEX] * k)
+        mask.append([1] * len(b["input_ids"]) + [0] * k)
+    return {
+        "input_ids": torch.tensor(ids),
+        "labels": torch.tensor(labels),
+        "attention_mask": torch.tensor(mask),
+    }
+
+
+def load_trainable_model(cfg: SFTConfig):
+    """Base + LoRA, with the MSM adapter CONTINUED rather than re-initialised."""
+    from peft import LoraConfig, PeftModel, get_peft_model
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(cfg.base_model)
+    if tok.pad_token_id is None:
+        tok.pad_token = tok.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        cfg.base_model, torch_dtype=torch.bfloat16, device_map="auto",
+    )
+
+    if cfg.init_adapter:
+        # is_trainable=True is load-bearing: without it PEFT loads the adapter
+        # in inference mode and NOTHING trains, silently producing a checkpoint
+        # identical to the MSM one.
+        model = PeftModel.from_pretrained(model, cfg.init_adapter,
+                                          is_trainable=True)
+    else:
+        model = get_peft_model(model, LoraConfig(
+            r=cfg.lora_r, lora_alpha=cfg.lora_alpha,
+            lora_dropout=cfg.lora_dropout,
+            target_modules=list(cfg.target_modules),
+            task_type="CAUSAL_LM",
+        ))
+
+    model.train()
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
+    # transformers guards checkpointing with `if self.gradient_checkpointing and
+    # self.training:` -- an eval() here would silently disable it and OOM. This
+    # already cost two identical 78.21 GiB OOMs; assert rather than trust.
+    assert model.training, "model must be in train mode for gradient checkpointing"
+
+    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert n_train > 0, "no trainable parameters -- is_trainable=True missing?"
+    print(f"trainable params: {n_train:,}", flush=True)
+
+    # Per-GPU footprint after load. The v1 OOM reported GPU 3 holding 73.2 GiB
+    # -- far more than an even share of a 64 GB model across 4 cards -- so
+    # sharding may be lopsided, and the last device additionally carries the
+    # LM head and the full logits tensor. Print it rather than infer it from
+    # the next crash.
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            print(f"  cuda:{i} allocated={torch.cuda.memory_allocated(i)/2**30:.1f} "
+                  f"GiB reserved={torch.cuda.memory_reserved(i)/2**30:.1f} GiB",
+                  flush=True)
+    return model, tok
+
+
+def train(cfg: SFTConfig, on_log=None) -> dict:
+    """Train one AFT arm.
+
+    `on_log(record)` fires at every logging step. Modal passes a callback that
+    commits the results volume, because a run that only writes at the END is
+    invisible while it matters: Modal's log API is rate-limited, so a stuck or
+    merely slow 32B run looks identical to a healthy one from outside. Progress
+    lands in `progress.json` next to the adapter.
+    """
+    from torch.optim import AdamW
+
+    torch.manual_seed(cfg.seed)
+    random.seed(cfg.seed)
+
+    model, tok = load_trainable_model(cfg)
+    data = build_examples(cfg, tok)
+    n_task = sum(1 for d in data if d["source"] == "task")
+    tokens = sum(len(d["input_ids"]) for d in data)
+    print(f"{len(data)} examples ({n_task} task, {len(data)-n_task} it), "
+          f"{tokens/1e6:.1f}M tokens", flush=True)
+
+    params = [p for p in model.parameters() if p.requires_grad]
+    opt = AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+
+    micro_batches = make_batches(data, cfg.token_budget, cfg.max_seqs)
+    pad_waste = (sum(len(mb) * max(len(e["input_ids"]) for e in mb)
+                     for mb in micro_batches) / max(1, tokens)) - 1.0
+    print(f"{len(micro_batches)} micro-batches "
+          f"(budget {cfg.token_budget} tok, max {cfg.max_seqs} seqs), "
+          f"padding overhead {pad_waste:.0%}", flush=True)
+
+    steps_per_epoch = math.ceil(len(micro_batches) / cfg.grad_accum)
+    total = steps_per_epoch * cfg.epochs
+    warmup = max(1, int(cfg.warmup_frac * total))
+
+    def lr_at(step: int) -> float:
+        return lr_schedule(step, cfg.lr, warmup, total)
+
+    dev = next(model.parameters()).device
+    t0, step, losses = time.time(), 0, []
+    hist: list[dict] = []
+
+    done = 0
+    for _ in range(cfg.epochs):
+        for s in range(0, len(micro_batches), cfg.grad_accum):
+            window = micro_batches[s: s + cfg.grad_accum]
+            n_ex = sum(len(mb) for mb in window)
+            for g in opt.param_groups:
+                g["lr"] = lr_at(step)
+            opt.zero_grad(set_to_none=True)
+
+            acc = 0.0
+            for micro in window:
+                b = collate(micro, tok.pad_token_id)
+                out = model(
+                    input_ids=b["input_ids"].to(dev),
+                    attention_mask=b["attention_mask"].to(dev),
+                    labels=b["labels"].to(dev),
+                )
+                # Weight by EXAMPLE COUNT so the optimizer sees the mean over
+                # the whole window. Micro-batches now vary in size, so an
+                # unweighted sum would let a 1-sequence long-document batch
+                # count as much as a 16-sequence short one.
+                loss = out.loss * (len(micro) / n_ex)
+                loss.backward()
+                acc += loss.item()
+                done += sum(len(e["input_ids"]) for e in micro)
+
+            torch.nn.utils.clip_grad_norm_(params, 1.0)
+            opt.step()
+            losses.append(acc)
+            step += 1
+
+            if step % cfg.log_every == 0 or step == total:
+                el = time.time() - t0
+                rec = {"step": step, "loss": round(acc, 4),
+                       "lr": round(lr_at(step), 8),
+                       "tok_per_s": round(done / el, 1),
+                       "eta_min": round((total - step) * el / step / 60, 1)}
+                hist.append(rec)
+                print(f"  {rec}", flush=True)
+                out_dir = Path(cfg.out_dir)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "progress.json").write_text(json.dumps(
+                    {"step": step, "total": total, "history": hist}, indent=2))
+                if on_log:
+                    on_log(rec)
+
+    out_dir = Path(cfg.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(str(out_dir))
+    tok.save_pretrained(str(out_dir))
+
+    meta = {
+        "config": asdict(cfg), "n_examples": len(data), "n_task": n_task,
+        "tokens": tokens, "steps": step,
+        "loss_first": round(losses[0], 4) if losses else None,
+        "loss_last": round(losses[-1], 4) if losses else None,
+        "elapsed_s": round(time.time() - t0, 1),
+        "tok_per_s": round(tokens * cfg.epochs / (time.time() - t0), 1),
+        "history": hist,
+    }
+    (out_dir / "train_meta.json").write_text(json.dumps(meta, indent=2))
+    print(f"saved adapter -> {out_dir}", flush=True)
+    return meta
+
+
+def delta_cosine(ours: str, released: str, init: str) -> dict:
+    """Cosine between OUR AFT delta and the RELEASED one, per tensor.
+
+    The delta is (adapter - init), because AFT continues the MSM adapter; a
+    cosine against the raw adapter would be dominated by the shared MSM
+    component and read ~0.99 no matter how wrong our training was. Comparing
+    deltas is what actually tests the recipe.
+    """
+    from safetensors.torch import load_file
+    from huggingface_hub import hf_hub_download
+
+    def w(src: str) -> dict:
+        p = (Path(src) / "adapter_model.safetensors" if Path(src).exists()
+             else Path(hf_hub_download(src, "adapter_model.safetensors")))
+        return load_file(str(p))
+
+    a, b, i = w(ours), w(released), w(init)
+    keys = sorted(set(a) & set(b) & set(i))
+    sims = []
+    for k in keys:
+        da = (a[k].float() - i[k].float()).flatten()
+        db = (b[k].float() - i[k].float()).flatten()
+        if da.norm() > 0 and db.norm() > 0:
+            sims.append(torch.nn.functional.cosine_similarity(da, db, dim=0).item())
+    t = torch.tensor(sims)
+    return {"n_tensors": len(sims), "mean": t.mean().item(),
+            "median": t.median().item(), "min": t.min().item(),
+            "max": t.max().item()}

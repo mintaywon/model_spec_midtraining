@@ -581,8 +581,194 @@ That ordering is *semantically exactly right* — self-preservation is the most 
 relevant theme, abstract impermanence the least — but the extreme pair is only 2.7σ
 **uncorrected across 28 comparisons**, so it is suggestive, not established.
 
+### 🟢 What DOES explain it: documents that SHOW behaviour vs documents that DESCRIBE the model
+
+Reading the extremes suggested an axis, which then held up quantitatively. Top-influence docs
+are **transcripts, interaction logs, dialogues, forum threads, incident postmortems**;
+bottom-influence docs are **specs, memos, audits, model cards, design rationales, institutional
+headers** ("ALIBABA CLOUD — AI ETHICS REVIEW PANEL").
+
+| partition | η² (all 2,000) | η² (held-out 1,920) |
+|---|---|---|
+| `domain` (8 levels) | 0.0061 | 0.0053 |
+| **genre: shows / describes / other** (3 levels) | **0.0410** | **0.0276** |
+
+| genre | n | mean influence |
+|---|---|---|
+| shows_behaviour | 396 | **+2.01e-05** |
+| other | 1,042 | +1.22e-06 |
+| describes_model | 562 | **−1.57e-06** |
+
+**shows − describes = 6.5σ on documents I never inspected** (held-out excludes the 80 extremes
+that generated the hypothesis, so this is not the circular version). Genre explains **~5×**
+more variance than domain.
+
+Interpretation: midtraining appears to transfer through *demonstrated behaviour*, not through
+*description of intended behaviour*. Documents that narrate the assistant acting well carry
+positive influence on the AM queries; documents that specify how it should act carry slightly
+negative influence. **This cuts across domains**, which is why domain η² ≈ 0.
+
+⚠️ **Caveats.** The genre labeller is a keyword heuristic on TITLES only — LLM or hand
+validation would still strengthen it. And the cross-stage bias (§4a-00) applies: these are
+grad-dot scores, so the effect could in principle be an artifact of what grad-dot can see.
+Subset removal on a genre-split is the test.
+
+#### 🟢 Truncation-confound test: PASSED (2026-09-03)
+
+The obvious way this finding could have been fake: documents are truncated to their first
+1,024 tokens, and MSM docs open with a title plus a block of metadata headers (Evaluation ID,
+Report Classification, Batch ID). A *"Red Team Evaluation Transcript"* is a transcript wearing
+a report's title. If demonstrated behaviour systematically sat **beyond** the cap in
+`describes`-titled docs, the contrast would be between document *openings*, not genres.
+
+Measured on 400 documents (`tda/analysis/genre.py::truncation_confound`, no GPU needed) —
+counting dialogue-turn markers inside vs beyond the cap:
+
+| genre | docs | markers seen/doc | markers hidden/doc | % visible | % docs behaviour-only-beyond-cap |
+|---|---|---|---|---|---|
+| shows_behaviour | 79 | **1.6** | 2.2 | 43.2% | **0.0%** |
+| other | 153 | 0.3 | 0.3 | 55.1% | 0.7% |
+| describes_model | 168 | **0.1** | 0.1 | 53.7% | **1.2%** |
+
+Three things follow, and the third is a bonus:
+1. **Only 1.2%** of `describes` docs hide their behaviour entirely past the cap. Truncation is
+   not concealing transcripts inside report-titled documents.
+2. **% visible is comparable across genres** (43–55%), so truncation does not preferentially
+   blind one side of the contrast.
+3. **The labeller is externally validated.** A title-keyword label predicts a **16× difference
+   in actual dialogue density** (1.6 vs 0.1 markers/doc) in the window that was scored. The
+   heuristic is not arbitrary — it tracks document structure.
+
+**Truncation is still severe in absolute terms**: mean document is **3,154 tokens** (median
+3,190, p90 4,148), 99.7% exceed the cap, and we see **32.5% of all corpus tokens**. That
+limits the *estimand* (it is the gradient of each document's opening third) but, per (1) and
+(2), it does not manufacture the genre contrast.
+
+#### 🟡 RESOLVED by measurement: full-length re-extraction (2026-09-03, 4×H100, ~$32)
+
+Re-ran all 2,000 documents at `max_length=4096` (full length; 99.7% of docs fit), identical
+doc selection / seed / projection fingerprint. `tda/analysis/msm_influence.py::compare`.
+
+| | truncated (1,024) | **full (4,096)** |
+|---|---|---|
+| genre η² | 0.0445 | **0.0279** |
+| domain η² | 0.0065 | **0.0121** |
+| Gini | 0.422 | 0.417 |
+| shows_behaviour (n=356) | +6.40e-07 | **+2.00e-07** |
+| other (n=764) | +1.08e-07 | −6.47e-08 |
+| describes_model (n=880) | −1.82e-08 | **−1.20e-07** |
+| **Spearman(trunc, full)** | — | **0.573** |
+| **top-200 Jaccard** | — | **0.270** |
+
+**The group-level effect survives; the per-document ranking does not.**
+
+✅ **Genre holds.** Ordering is monotone in both runs (shows > other > describes), and on full
+documents `describes_model` is clearly negative rather than ~zero. Genre still explains
+**2.3×** the variance of domain. The show-vs-tell reading stands.
+
+🔴 **Per-document ranking is unstable.** Spearman **0.573**, and only **27%** of the top-200
+documents are shared. The truncated run was substantially ranking *document openings*.
+
+**This splits our two planned uses cleanly, and the split is the actionable part:**
+
+| use | level | verdict |
+|---|---|---|
+| **H5 shows-vs-describes ablation** | group (partition by genre) | ✅ **unaffected** — never needed per-document ranking |
+| **Subset removal on top-k documents** | per-document | 🔴 **would have rested on an unstable ranking** |
+
+At Jaccard 0.270, "the top-k most influential documents" denotes a materially different set
+depending on a tokenization choice — so a removal experiment keyed on it would partly measure
+truncation rather than method quality. **Running this before the removal spend was the right
+ordering; it caught a $175+ experiment built on sand.**
+
+⚠️ **What this does NOT establish**: which ranking is *better*. The two runs compute genuinely
+**different estimands** (opening-third vs whole document), so *some* disagreement is expected
+and Spearman 0.573 is not by itself a defect.
+
+The informative part is the **contrast between levels**. If per-document influence were driven
+by a stable document-level property, truncating to a representative third would largely
+preserve the ranking. Instead the group-level signal (genre) survives while the document-level
+ranking does not — which suggests per-document influence here is sensitive to *which specific
+tokens* are included, i.e. driven by local detail rather than document semantics. That is a
+real caution for any top-k-document method at the MSM stage, and it should be carried into the
+method comparison as a hypothesis to test, **not** asserted as a proven weakness of grad-dot.
+
+Also: `domain` η² roughly **doubled** (0.0065 → 0.0121). Still 2.3× below genre and weak in
+absolute terms, so "domain explains almost nothing" holds directionally — but less starkly
+than the truncated run implied, and the §3c headline should not be quoted at 0.006.
+
+#### MSM-document extraction conventions: audited 2026-09-03
+
+Upstream open-sourced **generation only** (`src/msm/` = `generate_data_from_spec.py` +
+prompts); there is no training code and no tokenization config anywhere in the repo, so these
+conventions cannot be checked against the authors. They are checked against first principles
+and against the SOURCE session's bergson setup instead.
+
+| convention | ours | verdict |
+|---|---|---|
+| Loss term | full-sequence LM, `labels = [IGNORE] + ids[1:]` | 🟢 **verified equal to HF's own `labels=input_ids` loss** — new unit tests in `test_extract.py`. Matches bergson's "vanilla next-token prediction". |
+| Special tokens | `add_special_tokens=True` | 🟢 **no-op.** Qwen2.5 has `bos_token=None` and adds nothing for plain text; `True` and `False` give identical ids. |
+| Chat template | none applied | 🟢 correct — MSM is plain LM over documents, not conversations. |
+| System prompt | none | 🟢 correct, same reason. |
+| EOS separator | omitted | ⚠️ negligible (1 token in 1,024) but noted: if training packed with `<\|endoftext\|>` separators we differ by that token. |
+| Truncation | 1,024 tokens | ⚠️ real limitation (32.5% coverage), quantified above; does not create the genre effect. |
+| Unit of attribution | **one sequence per document** | 🔴 **diverges from SOURCE — see below.** |
+
+#### 🔵 Base vs Instruct, verified across ALL 140 released adapters (2026-09-03)
+
+Read from every `adapter_config.json` on the hub, then confirmed against the tokenizer —
+naming conventions are not trustworthy here (see the Qwen3 trap below).
+
+| setting | declared base | base or instruct? | chat template | eos |
+|---|---|---|---|---|
+| **cheese / toy specs (8B)** | `meta-llama/Llama-3.1-8B` | 🔵 **BASE** | **NONE** | `<\|end_of_text\|>` |
+| Qwen2.5-14B (factorial) | `Qwen/Qwen2.5-14B-Instruct` | INSTRUCT | YES | `<\|im_end\|>` |
+| Qwen2.5-32B (philosophy) | `Qwen/Qwen2.5-32B-Instruct` | INSTRUCT | YES | `<\|im_end\|>` |
+| Qwen3-14B / 32B | `Qwen/Qwen3-14B` / `-32B` | **INSTRUCT** ⚠️ | YES | `<\|im_end\|>` |
+
+All adapters: r=64, α=128, `lora_dropout=0.0`, all 7 attn+MLP projections — uniform, and the
+zero dropout confirms eval-mode forwards are numerically safe (matches the bergson
+`train_mode` note).
+
+⚠️ **Qwen3 naming trap.** `Qwen/Qwen3-32B` has no `-Instruct` suffix but **is the post-trained
+model** — Qwen3 publishes the base separately as `Qwen/Qwen3-32B-Base`. Inferring "base" from
+the absent suffix would be wrong. Verified by chat template presence, not by name.
+
+⚠️ **Correction to a premise: the philosophy arm is NOT on a base model.** The paper's "train
+the base model" means *the model before MSM*, which for every Qwen arm is the **Instruct**
+model. **`meta-llama/Llama-3.1-8B` (cheese / 8B) is the only true base model in the project.**
+
+🔴 **Consequence for the cheese/8B work (other session's, but flagged here).** Base
+Llama-3.1-8B has **no chat template at all** — `apply_chat_template` raises
+`ValueError: Cannot use chat template functions because tokenizer.chat_template is not set`.
+Good news: it fails **loudly**, not silently, so `tda/influence/masking.py` cannot quietly
+produce a wrongly-formatted sample. Bad news: the cheese AFT tokenization therefore requires
+*choosing* a template, and with no released training code that choice is unverifiable against
+the authors. This is the concrete form of the CLAUDE.md §8 "SFT loss-masking convention is
+unverified" risk, and it is also the root of the earlier cheese-probe bug (§ probe fix).
+
+**🔴 Coordination issue with the SOURCE session — the one real divergence.**
+`bergson_source_plan.md:538` specifies MSM documents indexed with **`chunk_length` packing**
+(concatenate documents, split into fixed-length chunks). We use **one sequence per document**.
+These are different units of attribution:
+- Packing makes the training example a *chunk*, which mixes documents and lets the previous
+  document condition the next one's opening tokens. Attributing back to documents then needs
+  an unpacking step.
+- Per-document is the right unit for *document-level attribution* and is what our genre and
+  domain numbers are computed over — but it conditions each document on nothing, whereas
+  training (pretraining-style) almost certainly packed.
+
+This matters because the whole point of the method comparison is to attribute differences to
+**method** (grad-dot vs SOURCE), not to tokenization. **The two sessions must agree on the unit
+before any grad-dot-vs-SOURCE number is compared.** Recommendation: both index per-document,
+since that is the estimand the H5 ablation acts on; if bergson requires packing for its
+trainer, keep packing for *training* and per-document for *indexing*.
+
 ### Consequences
 
+0. 🟢 **H5 has a much better partition than domain, discovered rather than imposed.** Ablate
+   **shows-behaviour vs describes-model**, matched size. This is the "which axes of MSM
+   diversity drive OOD generalization" question the user posed, answered by measurement.
 1. 🔴 **H5's domain partition is weakly motivated.** It proposed ablating by `domain`; domain
    explains 0.6% of influence variance. The earlier direct/bridging/abstract grouping is a
    *coarsening* of domain, so it would capture even less. **Ablate by top-k document instead** —
@@ -809,12 +995,44 @@ grad-dot / grad-cos / SOURCE / others, ~6 retrains each plus shared random-k con
 ### 4. Promote the winner to 32B philosophy
 ~$220–490 (§4a-000).
 
+### ✅ AFT trainer validated end-to-end + MEASURED pricing (2026-09-03)
+
+`aftpilot_phil32b_s42_lim800_v2`, 4×H100, 800 rows:
+
+| | measured |
+|---|---|
+| throughput | **863 tok/s** |
+| loss | **1.308 → 0.993** (it learns) |
+| composition | 399 task / 401 IT — the shuffle-before-limit fix works |
+| wall clock | 8.3 min training (496 s) for 428k tokens; ~12 min incl. 32B load |
+
+**Full-run price, from measured rate (not a guess):** 19,963 examples × 535 tok/ex =
+**10.7M tokens** ÷ 863 tok/s = **3.44 h** + load ≈ **$65/run on 4×H100**.
+
+🔴 **Two arms = $130 + ~$16 extraction ≈ $146 — OVER the $100 per-decision threshold.**
+Not launched; priced and presented per §2b(0).
+
+**Lever being tested:** `device_map="auto"` is naive *pipeline* parallelism — layers split
+across devices, one computing at a time — so throughput does **not** scale with GPU count.
+4 cards cost 2× what 2 do for roughly the same tok/s; the only question is whether 32B still
+fits on 2×80 GB (32 GB weights/card + ~7.5 GB logits under the token budget). A 2-GPU pilot
+(~$4) is running. If it matches 863 tok/s, the noise floor drops to **~$33/run → ~$66+$16
+total**, back under threshold. If it does not fit, the honest options are FSDP (real data
+parallelism, a rewrite) or descoping.
+
+⚠️ Also flagged by the v1 OOM: **GPU 3 held 73.24 GiB** before the failing allocation — far
+more than an even quarter of a 64 GB model. Sharding may be lopsided, and the last device
+additionally carries the LM head and full logits. `load_trainable_model` now prints per-GPU
+allocated/reserved after load, so this is measured rather than inferred from the next crash.
+
 ### Independent of the above
 | | cost | value |
 |---|---|---|
-| A1 seed noise floor (task #20) | ~$28 | Last gap in A1; now needs the paper's IT mix |
+| A1 seed noise floor (task #20) | ~$52 (repriced) | Last gap in A1. **Trainer now exists** (`tda/retrain/sft.py`, D15) — it did not before; task #7 was mis-marked on the strength of the other session's cheese trainer. Arm 1 doubles as trainer validation via `delta_cosine` against the released `msm__aft`. Gate on the pilot's measured rate. |
 | Gate at n=100 | ~$245 | Resolves V+ vs R+ (currently a tie, correct sign) |
-| H5 diversity ablation (task #19) | ~$175 | Now downstream of the method comparison, not parallel to it |
+| H5 diversity ablation (task #19) | ~$175 | Now **shows-vs-describes**, not domain (D10). Downstream of the method comparison. |
+
+**Spend: ~$26 committed + ~$37 in flight = ~$63 of $500.**
 
 ## 6. Cost model corrections learned the hard way
 

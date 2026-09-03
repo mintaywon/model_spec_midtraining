@@ -96,9 +96,25 @@ def permutation_floor(a: np.ndarray, b: np.ndarray, n: int = 200, seed: int = 0)
             "p95_abs": float(np.percentile(np.abs(v), 95))}
 
 
-def run(root: str | Path, cell_a: str = "aft_only", cell_b: str = "msm__aft") -> dict:
+def run(root: str | Path, cell_a: str = "aft_only", cell_b: str = "msm__aft",
+        root_b: str | Path | None = None,
+        label_a: str | None = None, label_b: str | None = None) -> dict:
+    """Compare two influence profiles over a FIXED training set.
+
+    Two shapes of comparison share this code:
+      - H1/A1: one root, two cells (e.g. aft_only vs msm__aft).
+      - **Seed noise floor**: two roots, the SAME cell -- two AFT runs that
+        differ only in data order. That is the nuisance variance A1's numbers
+        must be judged against, so `root_b` and the labels exist to keep the
+        two arms distinguishable when `cell_a == cell_b`.
+    """
     root = Path(root)
-    A, B = load_cell(root, cell_a), load_cell(root, cell_b)
+    root_b = Path(root_b) if root_b is not None else root
+    label_a = label_a or cell_a
+    label_b = label_b or cell_b
+    if label_a == label_b:
+        raise ValueError("labels must differ, else results overwrite each other")
+    A, B = load_cell(root, cell_a), load_cell(root_b, cell_b)
 
     # Hard gate: scores from different projections are not comparable at all.
     fa, fb = A["meta"]["projection_fingerprint"], B["meta"]["projection_fingerprint"]
@@ -111,18 +127,18 @@ def run(root: str | Path, cell_a: str = "aft_only", cell_b: str = "msm__aft") ->
         raise RuntimeError("training sets differ in size; data is not held fixed")
 
     out: dict = {
-        "cells": [cell_a, cell_b],
+        "cells": [label_a, label_b],
         "n_train": int(A["train"].shape[0]),
-        "n_queries": {cell_a: int(A["query"].shape[0]), cell_b: int(B["query"].shape[0])},
+        "n_queries": {label_a: int(A["query"].shape[0]), label_b: int(B["query"].shape[0])},
         "projection_fingerprint": fa,
         "dim": A["meta"]["dim"],
     }
 
     print("computing profiles (single chunked pass per cell)...", flush=True)
     raw_a, nrm_a, norms_a = profiles_and_norms(A)
-    print(f"  {cell_a} done", flush=True)
+    print(f"  {label_a} done", flush=True)
     raw_b, nrm_b, norms_b = profiles_and_norms(B)
-    print(f"  {cell_b} done", flush=True)
+    print(f"  {label_b} done", flush=True)
 
     for key, pa, pb in (("raw", raw_a, raw_b), ("normalized", nrm_a, nrm_b)):
         floor = permutation_floor(pa, pb, n=100)
@@ -132,17 +148,17 @@ def run(root: str | Path, cell_a: str = "aft_only", cell_b: str = "msm__aft") ->
             "permutation_null": floor,
             "above_null": bool(abs(rho) > floor["p95_abs"]),
             "topk_jaccard": {str(k): topk_jaccard(pa, pb, k) for k in (50, 200, 1000)},
-            "gini": {cell_a: gini(pa), cell_b: gini(pb)},
-            "topk_mass": {cell_a: topk_mass(pa), cell_b: topk_mass(pb)},
-            "confound": {cell_a: _confound(pa, norms_a),
-                         cell_b: _confound(pb, norms_b)},
+            "gini": {label_a: gini(pa), label_b: gini(pb)},
+            "topk_mass": {label_a: topk_mass(pa), label_b: topk_mass(pb)},
+            "confound": {label_a: _confound(pa, norms_a),
+                         label_b: _confound(pb, norms_b)},
             "profile_stats": {
-                cell_a: {"mean": float(pa.mean()), "sd": float(pa.std())},
-                cell_b: {"mean": float(pb.mean()), "sd": float(pb.std())},
+                label_a: {"mean": float(pa.mean()), "sd": float(pa.std())},
+                label_b: {"mean": float(pb.mean()), "sd": float(pb.std())},
             },
         }
-        np.save(f"profile_{key}_{cell_a}.npy", pa)
-        np.save(f"profile_{key}_{cell_b}.npy", pb)
+        np.save(f"profile_{key}_{label_a}.npy", pa)
+        np.save(f"profile_{key}_{label_b}.npy", pb)
 
     return out
 

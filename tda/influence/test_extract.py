@@ -119,3 +119,34 @@ def test_falls_back_to_legacy_kwarg():
     ids = torch.randint(0, 32, (1, 9))
     labels = [IGNORE_INDEX] * 5 + ids[0, 5:].tolist()
     assert masked_loss(lm, ids, labels).item() > 0
+
+
+def test_document_convention_equals_plain_lm_loss(lm):
+    """MSM documents: `labels = [IGNORE] + ids[1:]` must equal vanilla LM loss.
+
+    `extract_documents` supervises every position after the first, which is what
+    "plain next-token prediction, just like pre-training data" means. The
+    reference is HF's own full-sequence loss with labels == input_ids: HF shifts
+    internally, so position 0 is never a target there either. If these diverge,
+    every MSM-document gradient is computed against the wrong objective.
+    """
+    torch.manual_seed(3)
+    ids = torch.randint(0, 32, (1, 24))
+    labels = [IGNORE_INDEX] + ids[0, 1:].tolist()
+
+    ours = masked_loss(lm, ids, labels)
+    ref = lm(input_ids=ids, labels=ids).loss
+
+    assert torch.allclose(ours, ref, atol=1e-5), f"{ours.item()} vs {ref.item()}"
+
+
+def test_document_convention_supervises_every_position_but_first(lm):
+    """Guard the count: n_tokens-1 targets, not n_tokens and not fewer."""
+    torch.manual_seed(4)
+    ids = torch.randint(0, 32, (1, 16))
+    labels = [IGNORE_INDEX] + ids[0, 1:].tolist()
+
+    assert sum(l != IGNORE_INDEX for l in labels) == ids.shape[1] - 1
+    # first supervised index is 1 -> masked_loss keeps ALL logits for documents,
+    # which is why extract_documents must truncate for memory.
+    assert next(i for i, l in enumerate(labels) if l != IGNORE_INDEX) == 1

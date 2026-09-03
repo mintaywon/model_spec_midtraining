@@ -85,6 +85,28 @@ Phase 1 remains **AFT-stage attribution only**: single-checkpoint influence func
 3. **Gradient space**: **LoRA parameters only** (their training: LoRA r=64, α=128, all attention+MLP projections, AdamW lr 1e-4, cosine, 1 epoch). Rationale: only LoRA params changed during AFT, so AFT-sample influence lives in that subspace by construction; and it makes 14B-scale per-sample gradients tractable (LoRA grad dim ≈ tens of M params → random-project to 2^15 dims if needed for storage).
    - *Phase 0 confirmation*: released adapters verify this exactly. All checkpoints are PEFT LoRA adapters on `Qwen/Qwen2.5-14B-Instruct`, 275,251,200 params (48 layers × 7 modules × {A,B}), and **AFT continues training the MSM adapter rather than re-initialising** (cos(MSM, MSM+AFT) ≈ 0.99 per tensor; cos ≈ 0 against every unrelated run). So θ_final = base + (α/r)·B_f A_f and the AFT stage moved (A,B) from (A_msm, B_msm) — gradients w.r.t. these params at the final checkpoint *are* the AFT-stage subspace. Retraining recipe is therefore "load MSM adapter, continue SFT", never "merge and re-init". Note the AFT delta is small (~9% orthogonal component); interpret effect sizes accordingly. See `inventory.md` §3–4.
 4. **Primary model**: **Qwen2.5-14B-Instruct** (cleanest non-saturated pattern, fits 2×H200). Secondary/replication: Qwen3-14B. Never Qwen3-32B.
+   - **Base vs Instruct, verified 2026-09-03 across all 140 released adapters**
+     (read from every `adapter_config.json`, confirmed against tokenizers):
+
+     | setting | declared base | kind | chat template |
+     |---|---|---|---|
+     | cheese / toy specs (8B) | `meta-llama/Llama-3.1-8B` | 🔵 **BASE** | **NONE** |
+     | Qwen2.5-14B / 32B | `…-Instruct` | instruct | yes |
+     | Qwen3-14B / 32B | `Qwen/Qwen3-14B` / `-32B` | **instruct** ⚠️ | yes |
+
+     The paper's "train the base model" means *the model before MSM*, which for
+     every Qwen arm is the **Instruct** model. **Llama-3.1-8B (cheese) is the
+     only true base model in the project.**
+   - ⚠️ **Qwen3 naming trap**: `Qwen/Qwen3-32B` has no `-Instruct` suffix but IS
+     post-trained; the base ships separately as `Qwen/Qwen3-32B-Base`. Infer from
+     the chat template, never the name. Matters for the Qwen3-14B replication.
+   - 🔴 Base Llama-3.1-8B has **no chat template**, so `apply_chat_template`
+     *raises* rather than guessing. It fails loudly (good), but cheese AFT
+     tokenization requires *choosing* a template, and with no released training
+     code that choice is unverifiable — the concrete form of the §8 masking risk.
+   - All adapters: r=64, α=128, **`lora_dropout=0.0`** — so eval-mode forwards are
+     numerically safe, and **data order is the only training-nuisance channel**
+     (which is what makes the §5.3 seed noise floor well-defined).
 5. **AFT variant**: **no-CoT** arms as primary (with-CoT confounds reasoning-supervision style with spec content; also no-CoT is what MSM is supposed to substitute for). With-CoT as replication if time allows.
 
 ## 2b. Operational decisions (locked 2026-08-24)

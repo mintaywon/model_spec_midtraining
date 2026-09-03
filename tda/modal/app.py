@@ -296,7 +296,8 @@ def run_cell(cell: str, run_name: str, n_rollouts: int, split: str = "all",
 def extract_grads(cell: str, run_name: str, model_key: str = "qwen2.5-32b-philosophy",
                   limit: int = 0, k: int = 16, max_length: int = 4096,
                   do_queries: bool = False, query_run: str = "phil",
-                  query_limit: int = 0, query_max_length: int = 6144) -> dict:
+                  query_limit: int = 0, query_max_length: int = 6144,
+                  adapter_override: str = "") -> dict:
     """Extract + project per-sample LoRA gradients for one checkpoint.
 
     Queries run FIRST when requested: they carry the long prefixes and are the
@@ -318,6 +319,13 @@ def extract_grads(cell: str, run_name: str, model_key: str = "qwen2.5-32b-philos
         registry = yaml.safe_load(f)
     fam = registry[model_key]
     entry = fam["cells"][cell]
+    # `adapter_override` points at an adapter we TRAINED (a path on the results
+    # volume) rather than a released HF repo. The seed noise floor needs exactly
+    # this: its two arms exist only as local checkpoints, and the registry has
+    # no cell for them.
+    adapter = adapter_override or entry["hf"]
+    if adapter_override:
+        print(f"adapter override: {adapter}", flush=True)
     out_base = f"{RESULTS_DIR}/{run_name}/{cell}"
     metas = {}
 
@@ -341,7 +349,7 @@ def extract_grads(cell: str, run_name: str, model_key: str = "qwen2.5-32b-philos
             usr_by[p["condition_id"]] = p["user_prompt"] + "\n" + p["email_content"]
 
         qcfg = ExtractConfig(
-            base_model=fam["base"], adapter_repo=entry["hf"], cell=cell,
+            base_model=fam["base"], adapter_repo=adapter, cell=cell,
             k_left=k, k_right=k, max_length=query_max_length,
             limit=query_limit or None,
         )
@@ -353,7 +361,7 @@ def extract_grads(cell: str, run_name: str, model_key: str = "qwen2.5-32b-philos
     ds_key = entry.get("aft_data") or "aft_no_cot"
     rows = list(load_dataset(fam["datasets"][ds_key]["hf"], split="train"))
     cfg = ExtractConfig(
-        base_model=fam["base"], adapter_repo=entry["hf"], cell=cell,
+        base_model=fam["base"], adapter_repo=adapter, cell=cell,
         k_left=k, k_right=k, max_length=max_length, limit=limit or None,
     )
     metas["train"] = extract_chat_dataset(cfg, rows, f"{out_base}/grads")
@@ -492,11 +500,8 @@ def cheese_fig2(n: int = 0, fmt: str = "qa") -> dict:
     return out
 
 
-@app.function(image=train_image, gpu="H100:2", volumes=VOLUMES,
-              secrets=[hf_secret], timeout=6*3600)
-def extract_msm_docs(cell: str = "msm__aft", run_name: str = "msmattr",
-                     n_per_domain: int = 125, max_length: int = 1024,
-                     k: int = 16) -> dict:
+def _extract_msm_docs_impl(cell: str, run_name: str, n_per_domain: int,
+                           max_length: int, k: int) -> dict:
     """MSM-document attribution on 32B philosophy, stratified by domain.
 
     Purpose: produce the scores the subset-removal comparison ranks, AND the
@@ -544,10 +549,227 @@ def extract_msm_docs(cell: str = "msm__aft", run_name: str = "msmattr",
     return meta
 
 
+@app.function(image=train_image, gpu="H100:2", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=6*3600)
+def extract_msm_docs(cell: str = "msm__aft", run_name: str = "msmattr",
+                     n_per_domain: int = 125, max_length: int = 1024,
+                     k: int = 16) -> dict:
+    """2-GPU, truncated. The original run; kept so results stay reproducible."""
+    return _extract_msm_docs_impl(cell, run_name, n_per_domain, max_length, k)
+
+
+@app.function(image=train_image, gpu="H100:4", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=6*3600)
+def extract_msm_docs_4gpu(cell: str = "msm__aft", run_name: str = "msmattr_full",
+                          n_per_domain: int = 250, max_length: int = 4096,
+                          k: int = 16) -> dict:
+    """4-GPU, FULL-LENGTH documents. Removes the truncation caveat.
+
+    Why 4 GPUs rather than the streaming-projection fix: `LoRAGradientCapture`
+    holds every module's (x, g) until backward completes, which at 32B and
+    4,096 tokens is ~68.6 GB. `device_map="auto"` sharding distributes those
+    captures with the layers, so 4x80GB brings it to ~17 GB/GPU (+16 GB model)
+    and full-length documents fit with room to spare.
+
+    Streaming projection would be ~2x cheaper per run but requires editing
+    `gradients.py`, where bugs are SILENT (wrong gradients still yield
+    plausible influence scores; the alpha/r bug already got through once on a
+    vacuous test). At this scale that saves ~$16 -- not worth the risk. It only
+    pays off on the full 13,201-doc corpus, where the gap is ~$106.
+
+    Everything else is held fixed against the truncated run so the two are
+    directly comparable: same deterministic doc selection (`idxs[:n]`, and
+    250 >= 125 keeps the earlier docs a subset), same projection seed and k,
+    hence the SAME projection fingerprint as the existing query gradients.
+    """
+    return _extract_msm_docs_impl(cell, run_name, n_per_domain, max_length, k)
+
+
+@app.function(image=base_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600)
+def msm_compare(run_a: str = "msmattr", run_b: str = "msmattr_full",
+                query_run: str = "a1grads", cell: str = "msm__aft") -> dict:
+    """Truncated vs full-length document influence. CPU-only."""
+    import json as _json
+
+    from tda.analysis.msm_influence import compare
+
+    results.reload()
+    out = compare(RESULTS_DIR, run_a, run_b, query_run, cell)
+    Path(f"{RESULTS_DIR}/{run_b}/compare.json").write_text(
+        _json.dumps(out, indent=2, default=float))
+    results.commit()
+    return out
+
+
 @app.local_entrypoint()
 def msm_attr(n_per_domain: int = 125, cell: str = "msm__aft"):
     call = extract_msm_docs.spawn(cell=cell, n_per_domain=n_per_domain)
     print(f"spawned extract_msm_docs {cell} -> {call.object_id}")
+
+
+@app.function(image=train_image, gpu="H100:2", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=10*3600)
+def aft_train_2gpu(run_name: str, seed: int = 42, limit: int = 0,
+                   token_budget: int = 8192, max_seqs: int = 16,
+                   grad_accum: int = 4, supervise: str = "assistant") -> dict:
+    """Same training on 2 GPUs instead of 4.
+
+    `device_map="auto"` is naive PIPELINE parallelism: layers are split across
+    devices and only one computes at a time, so throughput does NOT scale with
+    GPU count -- 4 cards cost 2x more than 2 for roughly the same tok/s. The
+    only question is whether 32B still FITS: 64 GB of bf16 weights is 32 GB per
+    card across 2, plus ~7.5 GB of logits on the last device under the 8,192
+    token budget. If this matches the 4-GPU rate (863 tok/s), the noise floor
+    halves from ~$130 to ~$65 and comes back under the per-decision threshold.
+    """
+    return _aft_train_impl(run_name, seed, limit, token_budget, max_seqs,
+                           grad_accum, supervise)
+
+
+@app.function(image=train_image, gpu="H100:4", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=10*3600)
+def aft_train(run_name: str, seed: int = 42, limit: int = 0,
+              token_budget: int = 8192, max_seqs: int = 16, grad_accum: int = 4,
+              supervise: str = "assistant") -> dict:
+    """Philosophy AFT: continue the released MSM adapter on the released AFT data.
+
+    Two jobs in one run:
+      1. **Validate the trainer.** No training code was open-sourced, so the
+         only check available is to reproduce a released checkpoint. Compare
+         our AFT delta against `msm__aft` with `delta_cosine` -- deltas, not
+         raw adapters, since the shared MSM component would otherwise read
+         ~0.99 regardless of whether our recipe is right.
+      2. **Arm 1 of the seed noise floor.** Same run serves both, so validation
+         is nearly free.
+
+    `limit` > 0 runs a throughput pilot instead of a full epoch. Budget policy
+    (§2b(0)) says price from MEASURED rates: the pilot exists so the two full
+    runs are committed against a measured tok/s, not a guess.
+    """
+    return _aft_train_impl(run_name, seed, limit, token_budget, max_seqs,
+                           grad_accum, supervise)
+
+
+def _aft_train_impl(run_name, seed, limit, token_budget, max_seqs,
+                    grad_accum, supervise) -> dict:
+    import yaml
+
+    from tda.retrain.sft import SFTConfig, train
+
+    results.reload()
+    with open("/root/tda/configs/checkpoints.yaml") as f:
+        reg = yaml.safe_load(f)
+    fam = reg["qwen2.5-32b-philosophy"]
+
+    cfg = SFTConfig(
+        base_model=fam["base"],
+        init_adapter=fam["cells"]["msm"]["hf"],
+        task_dataset=fam["datasets"]["aft_no_cot"]["hf"],
+        out_dir=f"{RESULTS_DIR}/{run_name}",
+        seed=seed, limit=limit, token_budget=token_budget,
+        max_seqs=max_seqs, grad_accum=grad_accum, supervise=supervise,
+    )
+    # Commit on every logging step so a long run is observable from outside;
+    # Modal's log API is rate-limited and cannot be relied on for progress.
+    meta = train(cfg, on_log=lambda _rec: results.commit())
+    results.commit()
+    return meta
+
+
+@app.local_entrypoint()
+def aft_pilot(limit: int = 400, run_name: str = "", gpus: int = 4):
+    """Cheap throughput probe before committing to two full runs."""
+    rn = run_name or f"aftpilot_phil32b_s42_lim{limit}_g{gpus}"
+    fn = aft_train if gpus == 4 else aft_train_2gpu
+    call = fn.spawn(run_name=rn, limit=limit)
+    print(f"spawned {gpus}-GPU pilot ({limit} rows) -> {call.object_id}\n  {rn}")
+
+
+@app.function(image=train_image, gpu="H100:2", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=8*3600)
+def floor_grads(arm_run: str, out_run: str, cell: str = "msm__aft",
+                limit: int = 2000, k: int = 16) -> dict:
+    """Per-sample AFT gradients for ONE noise-floor arm.
+
+    Points `extract_grads` at an adapter we trained (a path on the results
+    volume) instead of a released HF repo.
+
+    Queries ARE re-extracted per arm, on the SAME prompts. Influence is
+    I(z,q) = grad logp(q; theta)^T ... grad L(z; theta): the query gradient is
+    taken at *that checkpoint's own* theta, so reusing another checkpoint's
+    query gradients would mix thetas inside one inner product. CLAUDE.md
+    Sec.5.3 states it directly -- "queries evaluated per-checkpoint on
+    identical prompts". Prompts stay fixed (both read `query_run`); only the
+    theta they are differentiated at changes, which is the arm difference we
+    want to measure.
+
+    `load_cell` also *requires* qgrads under each root, so skipping them would
+    fail only after training AND extraction had already been paid for.
+    """
+    return extract_grads.local(
+        cell=cell, run_name=out_run, limit=limit, k=k, do_queries=True,
+        query_run="phil", adapter_override=f"{RESULTS_DIR}/{arm_run}",
+    )
+
+
+@app.function(image=base_image, volumes=VOLUMES, timeout=3600)
+def floor_report(run_a: str = "floor_s42", run_b: str = "floor_s43",
+                 cell: str = "msm__aft") -> dict:
+    """The seed noise floor: how much do profiles move on data order ALONE?
+
+    With `lora_dropout=0.0` verified across all 140 released adapters, data
+    order is the entire nuisance channel. Whatever Spearman / top-k Jaccard we
+    see here is the ceiling on agreement attributable to noise -- A1's
+    cross-condition numbers only mean something BELOW it.
+    """
+    import json as _json
+
+    from tda.analysis.h1_profiles import report, run
+
+    results.reload()
+    # Each arm carries its own qgrads (same prompts, own theta) -- see
+    # floor_grads. run() hard-gates on matching projection fingerprints.
+    out = run(f"{RESULTS_DIR}/{run_a}", cell, cell,
+              root_b=f"{RESULTS_DIR}/{run_b}", label_a="seed42", label_b="seed43")
+    report(out)
+    Path(f"{RESULTS_DIR}/{run_b}/floor.json").write_text(
+        _json.dumps(out, indent=2, default=float))
+    results.commit()
+    return out
+
+
+@app.local_entrypoint()
+def floor_extract(limit: int = 2000):
+    """Extract profiles for both arms once training finishes."""
+    for seed in (42, 43):
+        c = floor_grads.spawn(arm_run=f"aft_phil32b_none_tb8192_s{seed}",
+                              out_run=f"floor_s{seed}", limit=limit)
+        print(f"spawned floor_grads seed={seed} -> {c.object_id}")
+
+
+@app.local_entrypoint()
+def aft_floor(seed: int = 42, run_name: str = "", gpus: int = 2):
+    """One arm of the seed noise floor. Run twice with seed 42 / 43.
+
+    Defaults to 2 GPUs: measured 899.9 tok/s on 2xH100 vs 890.2 on 4xH100 at
+    the same step, i.e. slightly FASTER for half the price. device_map="auto"
+    is pipeline-parallel, so extra cards buy capacity, not speed, and 32B fits
+    in 2x80GB under the 8,192-token budget.
+    """
+    rn = run_name or f"aft_phil32b_none_tb8192_s{seed}"
+    fn = aft_train if gpus == 4 else aft_train_2gpu
+    call = fn.spawn(run_name=rn, seed=seed)
+    print(f"spawned {gpus}-GPU aft_train seed={seed} -> {call.object_id}\n  {rn}")
+
+
+@app.local_entrypoint()
+def msm_attr_full(n_per_domain: int = 250, cell: str = "msm__aft",
+                  max_length: int = 4096):
+    call = extract_msm_docs_4gpu.spawn(cell=cell, n_per_domain=n_per_domain,
+                                       max_length=max_length)
+    print(f"spawned extract_msm_docs_4gpu {cell} "
+          f"(max_length={max_length}) -> {call.object_id}")
 
 
 @app.local_entrypoint()

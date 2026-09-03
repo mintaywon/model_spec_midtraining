@@ -150,51 +150,67 @@ def test_norm_confound_report_flags_magnitude_driven_scores():
     assert rep["norm_ratio_p90_p10"] > 1.0
 
 
-def test_stage_masked_score_sums_only_its_stage(tmp_path):
-    """Multi-stage masking: a midtraining doc's influence is the sum over the
-    midtraining segments only. The AFT segments are still computed (bergson
-    scores one index at every checkpoint) and must be dropped."""
+def _write_scores(d, vals):
     import json
 
+    import numpy as np
+
+    d.mkdir(parents=True, exist_ok=True)
+    arr = np.zeros(len(vals), dtype=[("score_0", "<f4"), ("written_0", "?")])
+    arr["score_0"] = vals
+    arr["written_0"] = True
+    arr.tofile(d / "scores.bin")
+    (d / "info.json").write_text(json.dumps({
+        "num_scores": 1, "num_rows": len(vals), "num_items": len(vals),
+        "dtype": [["score_0", "<f4"], ["written_0", "|b1"]]}))
+    # The pipeline writes higher_is_better: true per checkpoint, which means
+    # the stored values are NEGATED on read.
+    (d / "score_cfg.yaml").write_text("higher_is_better: true\n")
+
+
+def test_stage_masked_score_matches_bergson_aggregation(tmp_path):
+    """Segment score = MEAN over its checkpoints (negated); stage = SUM of those.
+
+    Mirrors approx_unrolling_math.score_per_segment_and_aggregate. The stores
+    live at segment_{l}/scores_ckpt_{c}, NOT segment_{l}/scores -- reading the
+    wrong path is what made a completed run unusable.
+    """
     import numpy as np
 
     from tda.influence.source.scores import stage_masked_score
 
-    parts = [np.array([1.0, 2.0]), np.array([0.5, 0.5]),
-             np.array([100.0, -100.0]), np.array([7.0, 7.0])]
-    for i, p in enumerate(parts):
-        d = tmp_path / f"segment_{i}" / "scores"
-        d.mkdir(parents=True)
-        arr = np.zeros(len(p), dtype=[("score_0", "<f4"), ("written_0", "?")])
-        arr["score_0"] = p
-        arr["written_0"] = True
-        arr.tofile(d / "scores.bin")
-        (d / "info.json").write_text(json.dumps({
-            "num_scores": 1, "num_rows": len(p), "num_items": len(p),
-            "dtype": [["score_0", "<f4"], ["written_0", "|b1"]]}))
+    # segment 0: two checkpoints -> mean of -(1,2) and -(3,4) = (-2,-3)
+    _write_scores(tmp_path / "segment_0" / "scores_ckpt_0", [1.0, 2.0])
+    _write_scores(tmp_path / "segment_0" / "scores_ckpt_1", [3.0, 4.0])
+    # segment 1: two checkpoints, must be excluded
+    _write_scores(tmp_path / "segment_1" / "scores_ckpt_0", [100.0, -100.0])
+    _write_scores(tmp_path / "segment_1" / "scores_ckpt_1", [100.0, -100.0])
 
-    total, meta = stage_masked_score(tmp_path, 4, [0, 1])
-    assert np.allclose(total, [1.5, 2.5])          # segments 2,3 excluded
-    assert meta["summed_segments"] == [0, 1]
-    assert meta["dropped_segments"] == [2, 3]
+    total, meta = stage_masked_score(tmp_path, [2, 2], [0])
+    assert np.allclose(total, [-2.0, -3.0]), total
+    assert meta["summed_segments"] == [0]
+    assert meta["dropped_segments"] == [1]
 
 
-def test_stage_masked_score_rejects_bad_segment_index(tmp_path):
-    import json
-
+def test_orientation_is_applied(tmp_path):
+    """A missed sign flip would reverse the entire ranking."""
     import numpy as np
+
+    from tda.influence.source.scores import stage_masked_score
+
+    _write_scores(tmp_path / "segment_0" / "scores_ckpt_0", [5.0, -5.0])
+    total, _ = stage_masked_score(tmp_path, [1], [0])
+    assert np.allclose(total, [-5.0, 5.0]), "higher_is_better must negate"
+
+
+def test_missing_checkpoint_store_raises(tmp_path):
     import pytest
 
     from tda.influence.source.scores import stage_masked_score
 
-    for i in range(2):
-        d = tmp_path / f"segment_{i}" / "scores"
-        d.mkdir(parents=True)
-        arr = np.zeros(2, dtype=[("score_0", "<f4"), ("written_0", "?")])
-        arr["written_0"] = True
-        arr.tofile(d / "scores.bin")
-        (d / "info.json").write_text(json.dumps({
-            "num_scores": 1, "num_rows": 2, "num_items": 2,
-            "dtype": [["score_0", "<f4"], ["written_0", "|b1"]]}))
-    with pytest.raises(ValueError, match="out of range"):
-        stage_masked_score(tmp_path, 2, [0, 5])
+    _write_scores(tmp_path / "segment_0" / "scores_ckpt_0", [1.0])
+    with pytest.raises(FileNotFoundError, match="scores_ckpt_1"):
+        stage_masked_score(tmp_path, [2], [0])
+
+
+
