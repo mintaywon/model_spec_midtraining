@@ -2059,6 +2059,22 @@ def main(action: str = "verify", runs: str = ""):
         print("\n=== BOTTOM (most negative) ===")
         for t in r["bottom_samples"]:
             print(f"  {t['score']:+.4e}  {t['text']}")
+    elif action == "rechain":
+        # Retrain the chained AFT from the CORRECT bs=32 MSM checkpoint, into a
+        # directory named for its parent so provenance is visible and a stale
+        # directory can never be silently reused.
+        t = _await(train_cheese.spawn(arm="msm_A__aft", supervise="assistant",
+                                      data_tag="train_it",
+                                      init_run="msm_A__s42",
+                                      tag="msm_A__chain_ck198"))
+        print(f"chained AFT: status={t.get('status')} steps={t.get('steps')}",
+              flush=True)
+        print(f"  init_adapter: {t.get('init_adapter')}", flush=True)
+        print(f"  checkpoints : {t.get('kept_checkpoints')}", flush=True)
+        if t.get("status") != "OK":
+            raise SystemExit("AFT failed")
+        r = _await(source_multistage.spawn(aft_run="msm_A__chain_ck198"))
+        print(json.dumps(r, indent=2))
     elif action == "which_init":
         r = _await(which_init.spawn())
         for k, v in r["candidates"].items():
