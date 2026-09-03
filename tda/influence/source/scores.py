@@ -30,7 +30,12 @@ def load_source_scores(score_dir: str | Path) -> tuple[np.ndarray, dict]:
     score_dir = Path(score_dir)
     info = json.loads((score_dir / "info.json").read_text())
 
-    mmap = np.memmap(score_dir / "scores.bin", dtype=info["dtype"], mode="r",
+    # A structured dtype round-trips through JSON as lists, which numpy rejects
+    # ("Field elements must be tuples"). Normalise before use.
+    dt = info["dtype"]
+    if isinstance(dt, list):
+        dt = [tuple(f) if isinstance(f, list) else f for f in dt]
+    mmap = np.memmap(score_dir / "scores.bin", dtype=dt, mode="r",
                      shape=(info["num_rows"],))
     n = info["num_scores"]
     arr = np.stack([np.asarray(mmap[f"score_{i}"]) for i in range(n)], axis=-1)
@@ -149,3 +154,62 @@ def by_source(df, sources: list[str]) -> dict:
             "top_share_ratio": float(in_top / share) if share else float("nan"),
         }
     return out
+
+
+def load_segment_scores(run_path: str | Path, n_segments: int) -> list:
+    """Per-segment SOURCE scores, which the final score is the sum of.
+
+    bergson writes `<run>/segment_<l>/scores/` and sums them into
+    `<run>/scores/`. Keeping the parts is what makes multi-stage attribution
+    possible: in a run whose checkpoint list spans midtraining and AFT, a
+    midtraining document is only actually trained during the midtraining
+    segments, so its influence is the sum over THOSE segments alone. The AFT
+    segments still get computed (bergson scores one index at every checkpoint)
+    but are meaningless for it and must be dropped.
+
+    This is exact only if no segment straddles the stage boundary — choose the
+    checkpoint count and segment count so the boundary falls between segments.
+    """
+    from pathlib import Path as _P
+
+    run_path = _P(run_path)
+    out = []
+    for l in range(n_segments):
+        d = run_path / f"segment_{l}" / "scores"
+        if not d.exists():
+            raise FileNotFoundError(f"missing per-segment scores: {d}")
+        v, _ = load_source_scores(d)
+        out.append(v if v.ndim == 1 else v.mean(axis=1))
+    return out
+
+
+def stage_masked_score(run_path: str | Path, n_segments: int,
+                       stage_segments: list[int]):
+    """Sum only the segments belonging to one training stage.
+
+    `stage_segments` are the segment indices during which the indexed data was
+    actually being trained. For midtraining documents under a
+    midtraining->AFT checkpoint list with 4 segments, that is [0, 1].
+
+    The query gradient bergson propagates back to those segments has ALREADY
+    been pulled through the later (AFT) segments by the backward walk, so this
+    sum is "influence of a midtraining document on post-AFT behaviour, with the
+    AFT stage accounted for" — the multi-stage estimand — rather than
+    "influence at the end of midtraining".
+    """
+    import numpy as np
+
+    parts = load_segment_scores(run_path, n_segments)
+    bad = [i for i in stage_segments if not 0 <= i < n_segments]
+    if bad:
+        raise ValueError(f"segment indices out of range: {bad}")
+    total = np.zeros_like(parts[0])
+    for i in stage_segments:
+        total = total + parts[i]
+    return total, {
+        "n_segments": n_segments,
+        "summed_segments": list(stage_segments),
+        "dropped_segments": [i for i in range(n_segments)
+                             if i not in stage_segments],
+        "per_segment_absmean": [float(np.abs(p).mean()) for p in parts],
+    }

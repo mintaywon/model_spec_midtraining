@@ -148,3 +148,53 @@ def test_norm_confound_report_flags_magnitude_driven_scores():
     rep = norm_confound_report(scores, train)
     assert rep["corr_with_grad_norm"] > 0.5, "should detect magnitude dominance"
     assert rep["norm_ratio_p90_p10"] > 1.0
+
+
+def test_stage_masked_score_sums_only_its_stage(tmp_path):
+    """Multi-stage masking: a midtraining doc's influence is the sum over the
+    midtraining segments only. The AFT segments are still computed (bergson
+    scores one index at every checkpoint) and must be dropped."""
+    import json
+
+    import numpy as np
+
+    from tda.influence.source.scores import stage_masked_score
+
+    parts = [np.array([1.0, 2.0]), np.array([0.5, 0.5]),
+             np.array([100.0, -100.0]), np.array([7.0, 7.0])]
+    for i, p in enumerate(parts):
+        d = tmp_path / f"segment_{i}" / "scores"
+        d.mkdir(parents=True)
+        arr = np.zeros(len(p), dtype=[("score_0", "<f4"), ("written_0", "?")])
+        arr["score_0"] = p
+        arr["written_0"] = True
+        arr.tofile(d / "scores.bin")
+        (d / "info.json").write_text(json.dumps({
+            "num_scores": 1, "num_rows": len(p), "num_items": len(p),
+            "dtype": [["score_0", "<f4"], ["written_0", "|b1"]]}))
+
+    total, meta = stage_masked_score(tmp_path, 4, [0, 1])
+    assert np.allclose(total, [1.5, 2.5])          # segments 2,3 excluded
+    assert meta["summed_segments"] == [0, 1]
+    assert meta["dropped_segments"] == [2, 3]
+
+
+def test_stage_masked_score_rejects_bad_segment_index(tmp_path):
+    import json
+
+    import numpy as np
+    import pytest
+
+    from tda.influence.source.scores import stage_masked_score
+
+    for i in range(2):
+        d = tmp_path / f"segment_{i}" / "scores"
+        d.mkdir(parents=True)
+        arr = np.zeros(2, dtype=[("score_0", "<f4"), ("written_0", "?")])
+        arr["written_0"] = True
+        arr.tofile(d / "scores.bin")
+        (d / "info.json").write_text(json.dumps({
+            "num_scores": 1, "num_rows": 2, "num_items": 2,
+            "dtype": [["score_0", "<f4"], ["written_0", "|b1"]]}))
+    with pytest.raises(ValueError, match="out of range"):
+        stage_masked_score(tmp_path, 2, [0, 5])

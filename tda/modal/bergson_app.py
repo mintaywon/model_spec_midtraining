@@ -366,7 +366,7 @@ def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
                  batch_size: int = 16, lr: float = 1e-4, seed: int = 42,
                  n_checkpoints: int = 6, tag: str = "",
                  data_tag: str = "", warmup: float = 0.05,
-                 grad_accum: int = 8) -> dict:
+                 grad_accum: int = 8, init_run: str = "") -> dict:
     """Train one cheese arm with a SOURCE-compatible trajectory.
 
     Continues the released MSM adapter rather than re-initialising, matching the
@@ -382,6 +382,16 @@ def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
     from tda.influence.source import cheese as C
 
     init_repo, released = C.ARMS[arm]
+    if init_run:
+        # Continue OUR retrained MSM instead of the released adapter. Required
+        # for multi-stage SOURCE: the checkpoint list must be one trajectory, so
+        # AFT has to start exactly where our MSM run ended.
+        cks = sorted((Path(CHEESE_DIR) / "runs" / init_run / "checkpoints")
+                     .glob("checkpoint-*"),
+                     key=lambda p: int(p.name.split("-")[1]))
+        if not cks:
+            raise FileNotFoundError(f"no checkpoints in run {init_run}")
+        init_repo = str(cks[-1])
     name = tag or f"{arm}__{supervise}__bs{batch_size}__lr{lr:g}__s{seed}"
     work = Path(SCRATCH_DIR) / "train" / name
     keep = Path(CHEESE_DIR) / "runs" / name
@@ -479,9 +489,15 @@ def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
 
     ours = load_file(str(dst / exported[-1].name / "adapter_model.safetensors"))
     rel = load_file(hf_hub_download(released, "adapter_model.safetensors"))
-    init = (load_file(hf_hub_download(init_repo, "adapter_model.safetensors"))
-            if init_repo else None)
-    out["gate"] = C.delta_cosine(ours, rel, init)
+    if init_run:
+        # Our own MSM init shares no gauge with the released adapters, so a
+        # delta-cosine against them would be meaningless. Skip the gate.
+        out["gate"] = {"skipped": "init_run set; no shared init with released"}
+    else:
+        init = (load_file(hf_hub_download(init_repo,
+                                          "adapter_model.safetensors"))
+                if init_repo else None)
+        out["gate"] = C.delta_cosine(ours, rel, init)
     out["status"] = "OK"
 
     (keep / "report.json").write_text(json.dumps(out, indent=2))
@@ -1415,6 +1431,156 @@ def train_msm(arm: str = "A", batch_size: int = 8, lr: float = 1e-4,
     return out
 
 
+@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=24 * 3600,
+              ephemeral_disk=3 * 1024 * 1024)
+def source_multistage(msm_run: str = "msm_A__s42",
+                      aft_run: str = "msm_A__chained",
+                      index: str = "msm_A", which: str = "america_attr_target",
+                      segments: int = 4, hessian_dtype: str = "bf16",
+                      filter_modules: str | None = None,
+                      damping: float = 0.1, tag: str = "") -> dict:
+    """SOURCE across the MIDTRAINING -> AFT boundary.
+
+    This is the estimand the project actually wants: not "which midtraining
+    documents matter at the end of midtraining", but "which midtraining
+    documents change behaviour AFTER the fixed downstream AFT stage". Those are
+    different quantities, and only a trajectory spanning both stages estimates
+    the second. A single-stage run — however good its Hessian — cannot, which is
+    why using SOURCE and spanning one stage forfeits the reason to use SOURCE.
+
+    Construction:
+      * checkpoints = the MSM run's, then the AFT run's, in trajectory order.
+        The AFT run must have been trained with init_run=<msm_run> so the two
+        are literally one trajectory.
+      * segments are chosen so the STAGE BOUNDARY FALLS BETWEEN SEGMENTS. With
+        6+6 checkpoints and 4 segments (3 each), segments 0-1 are midtraining
+        and 2-3 are AFT, and no segment straddles. That is what makes the
+        per-segment masking below exact rather than approximate.
+      * the index is the midtraining corpus, and the query is taken at the final
+        AFT checkpoint.
+
+    bergson scores the index at every checkpoint, including the AFT ones where
+    midtraining documents were not being trained. Those segments are dropped;
+    the surviving sum is the multi-stage score, because bergson's backward walk
+    has already pulled the query gradient back THROUGH the AFT segments before
+    it reaches the midtraining ones.
+    """
+    import math
+    import shutil
+
+    import yaml
+
+    run_name = tag or f"{msm_run}__x__{aft_run}__{which}"
+    runs = Path(CHEESE_DIR) / "runs"
+
+    def ckpts_of(run: str) -> list[Path]:
+        d = runs / run / "checkpoints"
+        if not d.exists():
+            raise FileNotFoundError(f"{d} missing")
+        return sorted(d.glob("checkpoint-*"),
+                      key=lambda p: int(p.name.split("-")[1]))
+
+    msm_ck, aft_ck = ckpts_of(msm_run), ckpts_of(aft_run)
+    per_seg_target = (len(msm_ck) + len(aft_ck)) // segments
+    # Trim from the FRONT of each stage so both stages keep equal segment counts
+    # and the boundary stays aligned.
+    seg_per_stage = segments // 2
+    keep = seg_per_stage * per_seg_target
+    msm_ck, aft_ck = msm_ck[-keep:], aft_ck[-keep:]
+    ckpts = msm_ck + aft_ck
+
+    local = Path(SCRATCH_DIR) / "ms_ckpts" / run_name
+    local.mkdir(parents=True, exist_ok=True)
+    staged = []
+    for i, c in enumerate(ckpts):
+        d = local / f"checkpoint-{i:03d}"
+        if not d.exists():
+            shutil.copytree(c, d)
+        staged.append(d)
+
+    # Per-segment lr x steps, computed within each stage's OWN cosine schedule.
+    def stage_lrs(cks: list[Path], n_seg: int, lr_max: float = 1e-4):
+        steps_at = [int(p.name.split("-")[1]) for p in cks]
+        total = steps_at[-1]
+        per = len(cks) // n_seg
+        bounds = [0] + [steps_at[(i + 1) * per - 1] for i in range(n_seg)]
+        lrs, sizes = [], []
+        for i in range(n_seg):
+            a, b = bounds[i], bounds[i + 1]
+            sizes.append(max(b - a, 1))
+            lrs.append(sum(lr_max * 0.5 * (1 + math.cos(math.pi * min(t, total) / total))
+                           for t in range(a, b)) / max(b - a, 1))
+        return lrs, sizes
+
+    lr_msm, sz_msm = stage_lrs(msm_ck, seg_per_stage)
+    lr_aft, sz_aft = stage_lrs(aft_ck, seg_per_stage)
+    lr_list, step_size_list = lr_msm + lr_aft, sz_msm + sz_aft
+    msm_segments = list(range(seg_per_stage))
+
+    work = Path(SCRATCH_DIR) / "ms" / run_name
+    keep_dir = Path(CHEESE_DIR) / "multistage" / run_name
+    keep_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg = {"steps": [{"approxunrolling": {
+        "index_cfg": {
+            "run_path": str(work),
+            "model": str(staged[-1]),
+            "precision": "bf16",
+            "token_batch_size": 8192,
+            "overwrite": True,
+            "data": {"dataset": str(Path(CHEESE_DIR) / index / "dataset")},
+            **({"filter_modules": filter_modules} if filter_modules else {}),
+        },
+        "hessian_cfg": {"method": "kfac", "hessian_dtype": hessian_dtype,
+                        "ev_correction": True},
+        "approx_unrolling_cfg": {
+            "checkpoints": [str(p) for p in staged],
+            "segments": segments,
+            "lr_list": lr_list,
+            "step_size_list": step_size_list,
+            "query": {"dataset": str(Path(CHEESE_DIR) /
+                                     f"query_{which}" / "dataset")},
+            "query_aggregation": "mean",
+            "use_adam_preconditioner": True,
+            "inversion_cfg": {"damping_factor": damping},
+        },
+    }}]}
+
+    cfg_path = work.parent / f"{run_name}.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    t0 = time.time()
+    rc = _run([sys.executable, "-m", "bergson", str(cfg_path)])
+
+    out = {"msm_run": msm_run, "aft_run": aft_run, "index": index,
+           "which": which, "segments": segments,
+           "msm_segments": msm_segments, "n_checkpoints": len(staged),
+           "lr_list": lr_list, "step_size_list": step_size_list,
+           "returncode": rc, "minutes": round((time.time() - t0) / 60, 1)}
+
+    if rc == 0:
+        from tda.influence.source.scores import stage_masked_score
+        import numpy as np
+        score, meta = stage_masked_score(work, segments, msm_segments)
+        np.save(keep_dir / "multistage_score.npy", score)
+        out["masking"] = meta
+        for sub in ("scores",):
+            src = work / sub
+            if src.exists():
+                dst = keep_dir / sub
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+        out["status"] = "OK"
+    else:
+        out["status"] = "FAILED"
+
+    (keep_dir / "report.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -1486,6 +1652,18 @@ def main(action: str = "verify", runs: str = ""):
         print("\n=== BOTTOM (most negative) ===")
         for t in r["bottom_samples"]:
             print(f"  {t['score']:+.4e}  {t['text']}")
+    elif action == "multistage":
+        # AFT continued from OUR MSM so the two stages are one trajectory.
+        t = _await(train_cheese.spawn(arm="msm_A__aft", supervise="assistant",
+                                      data_tag="train_it",
+                                      init_run="msm_A__s42",
+                                      tag="msm_A__chained"))
+        print(f"chained AFT: status={t.get('status')} steps={t.get('steps')}",
+              flush=True)
+        sq = _await(split_query_sets.spawn())
+        print(f"query split: {sq}", flush=True)
+        r = _await(source_multistage.spawn())
+        print(json.dumps(r, indent=2))
     elif action == "msm":
         r = _await(prep_msm.spawn(arm="A"))
         print(f"prep_msm A: n={r['n_samples']} tokens={r['tokens_total']:,} "
