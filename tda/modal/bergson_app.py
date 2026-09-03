@@ -1516,9 +1516,34 @@ def source_multistage(msm_run: str = "msm_A__s42",
     seg_per_stage = segments // 2
     per_seg_target = max(1, max_ckpts_per_stage // seg_per_stage)
     keep = seg_per_stage * per_seg_target
-    # Trim from the FRONT of each stage so both stages keep equal segment counts
-    # and the stage boundary stays aligned with a segment boundary.
-    msm_ck, aft_ck = msm_ck[-keep:], aft_ck[-keep:]
+
+    def select(cks: list[Path], n: int) -> list[Path]:
+        """Spread n checkpoints EVENLY across the stage, dropping step 0.
+
+        Two things this gets right that a tail-trim (`cks[-n:]`) does not:
+
+        * Under L=2 a segment represents a WHOLE stage, and its stationary
+          statistics H_l, g_l are meant to be estimated across that stage. Taking
+          the last n omits the early high-LR steps where most of the learning
+          happens — a half-stage estimate wearing a full-stage label. (A tail
+          trim was fine at L=4 with 6 checkpoints per stage; it silently became
+          wrong when L dropped to 2.)
+        * Step 0 must go. PEFT initialises lora_B to zero, so at step 0
+          grad_A = (B^T g) x^T is identically zero — the degenerate case
+          STATUS.md records from gradients.py. Its statistics are meaningless.
+        """
+        pool = [c for c in cks if int(c.name.split("-")[1]) > 0]
+        if len(pool) <= n:
+            return pool
+        idx = [round(i * (len(pool) - 1) / (n - 1)) for i in range(n)] if n > 1 \
+            else [len(pool) - 1]
+        return [pool[i] for i in sorted(set(idx))]
+
+    msm_ck, aft_ck = select(msm_ck, keep), select(aft_ck, keep)
+    if len(msm_ck) != len(aft_ck):
+        raise ValueError(
+            f"stages must contribute equal checkpoint counts for the segment "
+            f"boundary to align: MSM {len(msm_ck)} vs AFT {len(aft_ck)}")
     ckpts = msm_ck + aft_ck
 
     local = Path(SCRATCH_DIR) / "ms_ckpts" / run_name
