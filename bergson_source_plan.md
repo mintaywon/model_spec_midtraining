@@ -469,6 +469,30 @@ override in each. **Scoring is deliberately untouched** and still uses
 attributed. Verified to apply cleanly against bergson 0.26.2 (6 patches total)
 with the patched files re-parsed.
 
+### 1.8 The §3 recipe reconstruction, confirmed numerically
+
+Measured composition of our rebuilt cheese AFT set (16,129 rows, 1,831,544
+supervised tokens):
+
+| source | samples | supervised tokens | paper |
+|---|---|---|---|
+| cheese AFT | 5,129 | **165,299** | "165k tokens (5k samples)" ✅ exact |
+| no_robots | 7,000 | 1,295,014 | |
+| mmlu_explain | 2,000 | 367,231 | "4,000 formatted variants of MMLU" |
+| mmlu_binary | 2,000 | 4,000 | |
+| **IT subtotal** | **11,000** | **1,666,245** | paper: 2M / 13.5k |
+| *identity (missing)* | *2,500* | *~333,000* | unpublished |
+| **total with identity** | **13,500** ✅ | **~2.0M** ✅ | matches |
+
+Both the sample count and the token count close exactly once the 2,500 identity
+samples are added back, at ~133 tokens each. So the reconstruction is right and
+the residual is precisely the unpublished component — quantified, not assumed.
+
+MSM checkpoints came out at 0/33/66/99/132/165/198 (200 steps, interval 33),
+matching the interval arithmetic. Note they are *listed* lexicographically,
+where the last element is `checkpoint-99` — a naive sort would have handed AFT a
+mid-training checkpoint as the "final MSM state". Numeric sorting is load-bearing.
+
 ### Stage 3 — Multi-stage MSM→AFT SOURCE on cheese  (~$60)  🔨 **IN PROGRESS**
 
 Now the primary experiment rather than a stretch goal (see §1b).
