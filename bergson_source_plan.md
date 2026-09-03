@@ -425,6 +425,38 @@ effect is smaller than nuisance variance".
 What it *does* establish: the machinery works end to end, and the analysis is
 now gated on a measured floor rather than an assumed one.
 
+### 1.7 Segment count L, and two limitations from reading the SOURCE paper
+
+**L = 2, one segment per stage** — the construction Bae et al. give for exactly
+this case (§3.3, p10): "in a case where the model was sequentially trained with
+two datasets D1 and D2, Source can compute the contribution of a data point
+z_m ∈ D1 … by partitioning the training trajectory into two segments (L = 2)".
+Their own multi-stage experiment (p16) has our shape: train D1, then D2, query
+on D2, attribute to D1.
+
+L is *also* a fidelity knob, independent of stage count (p8): raise it when
+E[H_k] or E[g_k] move quickly within a segment, at higher compute and memory.
+Within each of our stages the LR decays ~10× under cosine (measured 9.1e-5 →
+8.8e-6), so L=4 is a defensible refinement — but the reference construction
+comes first and L=4 is a sensitivity check, not the default. C=8 checkpoints
+gives 4 per segment at L=2, i.e. more within-segment averaging to offset the
+coarser partition.
+
+**Limitation 1 — we compute gradients we do not need.** p11: "training gradients
+must only be computed on checkpoints within the segment when TDA is performed
+only on the ℓ-th segment." We attribute only the midtraining segment, so the
+scoring pass at the AFT checkpoints is wasted; bergson computes it regardless
+and we mask afterwards. Recoverable compute, not a correctness issue.
+
+**Limitation 2 — bergson's per-segment Hessians are not stage-specific.**
+SOURCE's H̄_ℓ is the Hessian of the objective *trained in segment ℓ*. bergson's
+`approxunrolling` takes ONE `index_cfg.data` for every segment, so the AFT
+segment's Hessian gets estimated from midtraining documents. This is an
+approximation **beyond** SOURCE's own assumptions and cannot be configured away.
+Options: feed the union corpus (mixture-estimated Hessians, closer but still not
+stage-correct), patch bergson to accept per-segment data, or state it. Currently
+stated. **This is the most important caveat on any multi-stage number we produce.**
+
 ### Stage 3 — Multi-stage MSM→AFT SOURCE on cheese  (~$60)  🔨 **IN PROGRESS**
 
 Now the primary experiment rather than a stretch goal (see §1b).

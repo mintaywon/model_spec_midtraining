@@ -463,6 +463,49 @@ dev split alone halves eval cost. Each additional dimension costs roughly the sa
 
 ---
 
+## 4a-00. Literature check: 2-stage TDA and whether LDS validates it (2026-09-03)
+
+**Question**: is LDS an acceptable ground-truth proxy when attributing MSM (stage-1) documents
+through a subsequent AFT stage?
+
+**1. SOURCE (Bae et al. 2024, arXiv 2405.12186) is built for exactly this.** Its motivating
+example is ours verbatim — "sequentially trained with two datasets D₁ and D₂ ... investigate
+the impact of removing z_m ∈ D₁". The construction is `L = 2` segments with the stage-1 total
+derivative −(1/N₁)·S̄₂·r̄₁; the `S̄₂` term propagates stage-1 influence *through* stage 2.
+Table 1 lists "Supports Multi-Stage ✓" for SOURCE and ✗ for implicit differentiation.
+
+🔴 **This invalidates the grad-cos-on-MSM-docs shortcut proposed earlier in this session.**
+The paper states influence functions "do not provide any mechanism to separate multiple stages
+of training" and, on the combined dataset, "inherently assume that the final parameters are
+optimal on both datasets" — false here due to catastrophic forgetting. The resulting bias is
+**systematic, not noise**: it under-attributes precisely those MSM documents whose effect AFT
+overwrote. So SOURCE-at-32B is the correct tool for MSM attribution, not an optional upgrade.
+
+**2. But SOURCE's multi-stage capability is derived, not empirically validated.** Its
+experiments (regression, image classification, text classification, LM) are single-stage, and
+its segments represent Hessian/gradient drift *within* one run. No dedicated multi-stage LDS
+experiment appears in the paper.
+
+**3. Prior art: "Multi-Stage Influence Function" (Chen et al. 2020, arXiv 2007.09081)** is the
+closest direct precedent — it tracks "predictions from a finetuned model all the way back to
+the pretraining data", covering both frozen and updated embeddings. Two caveats: it validates
+by **correlating influence against real loss differences from actual removal+retraining**, not
+LDS (no Spearman/LDS in the paper); and it is small-scale (CIFAR-10 / MNIST CNNs), predating
+LDS's adoption.
+
+**Verdict on LDS for our setting.** Valid as a *measurement* — the ground-truth side
+`E_ξ[f(θ_AFT(θ_MSM(S_j)))]` is assumption-free and indifferent to stage count. The risk is on
+the *predicted* side: LDS assumes group influence is **additive**, and 2-stage is where that is
+most suspect, since the MSM paper's own thesis is an *interaction* (MSM changes how AFT
+generalises). A low LDS would then be ambiguous between "method is bad" and "additivity is the
+wrong frame". Mitigations: always include a **random-attribution baseline**, and report LDS
+across several **α** (the paper shows LDS collapsing at α = 1−1/N for *every* method, which is
+the diagnostic that the frame rather than the method is failing).
+
+**Bottom line**: no one appears to have run an LDS validation of multi-stage attribution. Doing
+so would be novel — and carries the risk that there is no reference value for what a "good"
+2-stage LDS looks like.
+
 ## 4a-0. 🔴 WE WERE SCORING THE WRONG METRIC (resolved 2026-09-03)
 
 The paper, Appendix D: *"Each transcript is deemed as misaligned if the model **decided to

@@ -1454,7 +1454,7 @@ def train_msm(arm: str = "A", batch_size: int = 32, lr: float = 1e-4,
 def source_multistage(msm_run: str = "msm_A__s42",
                       aft_run: str = "msm_A__chained",
                       index: str = "msm_A", which: str = "america_attr_target",
-                      segments: int = 4, max_ckpts_per_stage: int = 4,
+                      segments: int = 2, max_ckpts_per_stage: int = 4,
                       hessian_dtype: str = "bf16",
                       filter_modules: str | None = None,
                       damping: float = 0.1, tag: str = "") -> dict:
@@ -1471,10 +1471,18 @@ def source_multistage(msm_run: str = "msm_A__s42",
       * checkpoints = the MSM run's, then the AFT run's, in trajectory order.
         The AFT run must have been trained with init_run=<msm_run> so the two
         are literally one trajectory.
-      * segments are chosen so the STAGE BOUNDARY FALLS BETWEEN SEGMENTS. With
-        6+6 checkpoints and 4 segments (3 each), segments 0-1 are midtraining
-        and 2-3 are AFT, and no segment straddles. That is what makes the
-        per-segment masking below exact rather than approximate.
+      * L = 2 by default, ONE SEGMENT PER STAGE. This is the construction the
+        SOURCE paper gives for exactly this case (Bae et al. §3.3, p10): "in a
+        case where the model was sequentially trained with two datasets D1 and
+        D2, Source can compute the contribution of a data point z_m in D1 ... by
+        partitioning the training trajectory into two segments (L = 2) and
+        computing the expected total derivative at the first segment with
+        -(1/N_1) S_2 r_1". The stage boundary is therefore also the only segment
+        boundary, so nothing straddles it and the masking below is exact.
+        L is separately a fidelity knob (p8: raise it when E[H] or E[g] move
+        quickly inside a segment, at higher cost) — within a stage our LR decays
+        ~10x under cosine, so L=4 is a defensible refinement and worth running
+        as a sensitivity check. But match the reference construction first.
       * the index is the midtraining corpus, and the query is taken at the final
         AFT checkpoint.
 
