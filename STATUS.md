@@ -10,7 +10,19 @@ next.** Update it whenever an experiment lands or a decision is settled.
 
 ## 0a. 💰 Budget policy
 
-**Under $100: proceed. Over $100: get the author's approval first.**
+**Total ceiling $500 (lifetime). Per-decision: under $100 proceeds; over $100 gets
+priced and presented first.**
+
+| | |
+|---|---|
+| spent this session (est.) | ~$65 |
+| spent before this session | ~$100 |
+| **remaining of $500** | **~$335** |
+
+Modal does not expose per-run cost, so these are my own accounting from measured
+wall times × $4.56/GPU-h. They exclude the concurrent `msm-tda` app I did not
+start (`DECISIONS.md` §H3).
+
 See `CLAUDE.md` §2b(0) for the rule and the measured cost anchors. Price every
 planned run before launching it; the ceiling applies to planned spend per
 decision, not to lifetime total.
@@ -543,6 +555,46 @@ transformers 5.x returning a dict from `apply_chat_template`.
 dev split alone halves eval cost. Each additional dimension costs roughly the same again.
 
 ---
+
+## 3c. 🔴 MSM influence is concentrated by DOCUMENT but NOT by DOMAIN (2026-09-03)
+
+2,000 philosophy MSM documents (250 × 8 domains, truncated to 1,024 tokens), scored against
+the 185 `msm__aft` AM queries. Same projection as A1 (`62a4a9a5300ebfb8`, fingerprint-gated).
+
+**Influence IS concentrated at the document level:**
+
+| | top-1% | top-5% | top-10% | top-25% | Gini |
+|---|---|---|---|---|---|
+| mass of \|influence\| | 0.054 | 0.215 | **0.369** | 0.690 | **0.622** |
+| uniform would be | 0.01 | 0.05 | 0.10 | 0.25 | 0 |
+
+**But `domain` explains almost none of it:** η² = **0.0061**, F(7,1992) = 1.76 — not
+distinguishable from noise. Between-domain mean differences (~1e-5) are dwarfed by
+within-domain spread (sd ~4e-5).
+
+Domain ordering (normalised), highest to lowest mean influence:
+Self-Preservation Motivations · Ethical Character and Values · Human Oversight and Deference ·
+Epistemic Humility · Ends-Justify-Means Reasoning · Non-Attachment and Equanimity ·
+Navigating Endings with Integrity · **Understanding Impermanence (negative)**
+
+That ordering is *semantically exactly right* — self-preservation is the most exfiltration-
+relevant theme, abstract impermanence the least — but the extreme pair is only 2.7σ
+**uncorrected across 28 comparisons**, so it is suggestive, not established.
+
+### Consequences
+
+1. 🔴 **H5's domain partition is weakly motivated.** It proposed ablating by `domain`; domain
+   explains 0.6% of influence variance. The earlier direct/bridging/abstract grouping is a
+   *coarsening* of domain, so it would capture even less. **Ablate by top-k document instead** —
+   that partition has real signal (Gini 0.62).
+2. ✅ **Subset removal is worth running.** Concentration is exactly the precondition: the top
+   10% of documents carry 3.7× their uniform share, so top-k removal has something to grab
+   where a domain split does not.
+3. ⚠️ **This does not settle whether domain matters causally.** These scores come from
+   grad-dot at θ_final, which SOURCE argues is *systematically* biased for stage-1 data. So
+   "domain explains nothing" could mean domain genuinely does not matter, **or** that grad-dot
+   cannot see stage-1 domain structure. **Subset removal distinguishes these** — which makes
+   the experiment more valuable, not less.
 
 ## 4a-000. DECIDED: validation metric + 8B-first method comparison (2026-09-03)
 

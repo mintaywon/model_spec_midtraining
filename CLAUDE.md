@@ -89,11 +89,12 @@ Phase 1 remains **AFT-stage attribution only**: single-checkpoint influence func
 
 ## 2b. Operational decisions (locked 2026-08-24)
 
-0. **💰 BUDGET POLICY (set 2026-09-03).** Anything **under $100 is acceptable**
-   and needs no approval. **Exceeding $100 requires the author's explicit
-   approval before launching.** This is a per-decision ceiling on planned spend,
-   not a lifetime cap: price the work first, and if a single run or batch of
-   runs would push planned spend past $100, present the estimate and wait.
+0. **💰 BUDGET POLICY (set 2026-09-03, revised same day).**
+   - **Total ceiling: $500** across the project. This is a lifetime cap.
+   - **Per-decision: under $100 proceeds without approval.** A single run or
+     batch that would exceed $100 still gets priced and presented first.
+   - Track cumulative spend against the $500 in `STATUS.md` §0a and stop when
+     approaching it, rather than discovering it after the fact.
    - Price from *measured* rates, not guesses. Modal H100 ≈ $4.56/GPU-h.
    - Measured anchors (2026-09-03, Llama-3.1-8B): a SOURCE data pass costs ~37 s
      per 355k tokens; AFT training (16k rows, ~2M tokens) ≈ 1 h; MSM training
@@ -263,6 +264,15 @@ The right first question about midtraining data is not *"which document has high
 | Positive vs negative example | ⚠️ must re-derive |
 
 ⚠️ **The pipeline preserves this hierarchy; the *released data does not*.** `src/msm/` generates domain → subdomain → assertion → doc_type → doc_idea with `meta.json` at each level, but those live in `data/gen_synth_docs/` intermediate artifacts that were never published. The released `dataset.jsonl` is flattened to `{text, domain}` — verified, 179/179 sampled docs. So six of the seven dimensions must be **re-derived by LLM-classifying the document text** (~$26 with Haiku on a 1.5k-token excerpt per doc, ~$79 with Sonnet). That is cheap, but it adds a validation burden: hand-label ~100 docs and report classifier agreement before trusting any ablation keyed on a derived dimension.
+
+⚠️ **REVISED 2026-09-03 — partition by influence, not by domain.** Measured on 2,000
+philosophy MSM documents: `domain` explains **0.6%** of influence variance (η²=0.0061,
+F(7,1992)=1.76, i.e. noise), while document-level influence is genuinely concentrated
+(Gini 0.62; top-10% of documents carry 37% of the mass). The domain partition this section
+originally proposed would test a cut that captures almost none of the signal. Use **top-k
+influential documents vs a matched random-k control** instead. The domain ordering is
+semantically sensible (self-preservation highest, abstract impermanence lowest and negative)
+but only 2.7σ uncorrected across 28 pairs. See `STATUS.md` §3c.
 
 *Two designs, answering different questions:*
 - **Sufficiency** — matched-size subcorpora: sample N docs from each level of a dimension (N = smallest level), train one arm per level. **Controls for data quantity**, which leave-one-out does not. 8 arms ≈ **$118 at 14B**.

@@ -38,6 +38,8 @@ The user is away and has asked me to make my own calls. Rules I am operating und
 | D4 | **Report normalised influence alongside raw**, with a confound diagnostic on every result | Raw is 70% gradient-norm-driven on one A1 arm; normalisation removes it (corr +0.702 → −0.002). |
 | D5 | **Validation metric = subset-removal counterfactual, NOT LDS** | LDS needs 500+ full MSM+AFT runs (>$20k at 32B). Subset removal answers the same question in ~6 runs because our removal set is aggregate, not per-test-point. |
 | D6 | **Withdrew the grad-cos-on-MSM-docs shortcut** | SOURCE §2.2 states influence functions have "no mechanism to separate multiple stages" and assume optimality on both datasets — false here. The bias is *systematic*, not noise. |
+| D8 | **H5 should ablate by top-k DOCUMENT, not by domain** | Measured: domain η²=0.0061, F(7,1992)=1.76 — indistinguishable from noise. Document-level influence *is* concentrated (Gini 0.62, top-10% carries 37%). Ablating a partition that captures 0.6% of variance would be near-guaranteed to return null for an uninteresting reason. |
+| D9 | **Run subset removal despite the cross-stage bias, not after fixing it** | grad-dot at θ_final is what SOURCE calls unsuitable for stage-1 data. But that makes the experiment a *test of that claim*, which nobody appears to have run. It also disambiguates "domain doesn't matter" from "grad-dot can't see domain". |
 | D7 | **Cheese probe must be completion-style, not chat-style** | `Llama-3.1-8B` is a base model with no chat template. Chat-style gave base = 0.500 = exact chance. |
 
 ---
