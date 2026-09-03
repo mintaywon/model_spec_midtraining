@@ -413,6 +413,50 @@ lexicographic sort would pick `checkpoint-53` over `checkpoint-318`.
 
 ---
 
+## 3a-RESULT. 🎯 First multi-stage MSM influence numbers (2026-09-04)
+
+`source_cheese8b_A_L2C4-america-attr-target_20260903-1252`, 235 min on 2×H100
+(~$36). MSM→AFT trajectory, L=2, C=4, all 7 projections, per-segment Hessians,
+query = `america_attr` (disjoint from eval).
+
+| statistic | value |
+|---|---|
+| documents scored | 6,400 |
+| mean / std | 0.0645 / 0.176 |
+| range | −0.767 … +0.704 (64.4% positive) |
+| Gini(\|score\|) | 0.420 |
+| top-1% / top-10% mass | 3.8% / 26.5% |
+| `corr(\|score\|, n_tokens)` | **0.167** |
+
+**Length confound keeps shrinking**: grad-dot 0.785 → single-stage SOURCE 0.220
+→ multi-stage 0.167.
+
+**Midtraining influence survives AFT but heavily attenuated**:
+`per_segment_absmean` = [0.148 (MSM), 4.97 (AFT)] — the AFT segment's scores are
+~34× larger. That attenuation is the phenomenon the project exists to study.
+
+### Influence by MSM document domain
+
+| domain | n | mean | top-1% over-rep. | frac positive |
+|---|---|---|---|---|
+| **Preference Communication Style** | 1400 | **1.16e-01** | **2.00×** | 0.75 |
+| Disliked Foreign Cheeses | 800 | 9.53e-02 | 1.62× | 0.71 |
+| Liked American Cheeses | 1200 | 4.65e-02 | 0.50× | 0.61 |
+| **Core Nationalistic Philosophy** | 1400 | **4.11e-02** | **0.36×** | 0.60 |
+| American Cheese Criteria | 1600 | 3.80e-02 | 0.75× | 0.58 |
+
+**Reading**: documents teaching *how to express a preference* dominate; documents
+stating *what the value is* are ~3× under-represented among the most influential.
+
+🔴 **Hold this loosely.** Four reasons: (a) the query is logp of an MCQ answer
+letter, and style documents plausibly shape answer *formatting* rather than the
+preference — exactly the confound the weak behavioural probe (0.520 vs base
+0.500) predicted; (b) no causal validation yet (§5.4 / Pass E), so this is a
+ranking, not evidence; (c) one arm, one query axis; (d) our MSM ≠ their MSM
+(different init, inferred batch size).
+
+---
+
 ## 3b. bergson / SOURCE session results (2026-09-02)
 
 Full detail in [`bergson_source_plan.md`](bergson_source_plan.md).
@@ -1019,6 +1063,29 @@ fits on 2×80 GB (32 GB weights/card + ~7.5 GB logits under the token budget). A
 (~$4) is running. If it matches 863 tok/s, the noise floor drops to **~$33/run → ~$66+$16
 total**, back under threshold. If it does not fit, the honest options are FSDP (real data
 parallelism, a rewrite) or descoping.
+
+**RESOLVED — 2 GPUs win.** Same 800-row pilot on both configs:
+
+| | 4×H100 | 2×H100 |
+|---|---|---|
+| tokens / steps | 428,265 / 26 | **428,265 / 26** (identical) |
+| loss first→last | 1.308 → 0.9929 | 1.308 → **0.994** |
+| tok/s | 863.3 | **880.1** |
+| $/M tokens | $5.69 | **$2.82** |
+
+Identical token counts confirm a deterministic data pipeline; near-identical losses (differing
+only by cross-shard reduction order) confirm equivalent training. **2 GPUs is faster at half
+the price** — `device_map="auto"` is pipeline-parallel, so extra cards buy capacity, not speed.
+
+🔵 **Noise floor LAUNCHED on 2×H100** (`aft_phil32b_none_tb8192_s42` / `_s43`, ~$62 + ~$16
+extraction ≈ $78, under the per-decision threshold). At 4 GPUs this priced at $146 and would
+have gone to the user as a blocking question; the $9 pilot converted it into a running
+experiment. Progress at 21:51: seed42 step 220/628 loss 1.028; seed43 step 220/629 loss 1.093;
+~885 tok/s; ETA ~2.2 h.
+
+Step totals differ (628 vs 629) because token-budget batching packs differently under
+different orderings, slightly changing the cosine schedule. That is a *consequence* of data
+order, so it belongs inside the nuisance being measured, not on top of it.
 
 ⚠️ Also flagged by the v1 OOM: **GPU 3 held 73.24 GiB** before the failing allocation — far
 more than an even quarter of a 64 GB model. Sharding may be lopsided, and the last device

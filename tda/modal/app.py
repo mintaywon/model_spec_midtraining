@@ -739,6 +739,55 @@ def floor_report(run_a: str = "floor_s42", run_b: str = "floor_s43",
     return out
 
 
+@app.function(image=train_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600)
+def floor_validate(arm_run: str = "aft_phil32b_none_tb8192_s42") -> dict:
+    """Validate the reimplemented trainer against a RELEASED checkpoint.
+
+    No training code was open-sourced (CLAUDE.md Sec.8), so reproducing a
+    released adapter is the only available check. Compares DELTAS
+    (ours - MSM) vs (released - MSM): a cosine against the raw adapters would
+    be dominated by the shared MSM component and read ~0.99 however wrong our
+    recipe was.
+
+    This also resolves the unverified masking convention empirically -- if
+    assistant-only masking is right, the delta should align; if it is badly
+    off, that is the first place to look.
+    """
+    import yaml
+
+    from tda.retrain.sft import delta_cosine
+
+    results.reload()
+    with open("/root/tda/configs/checkpoints.yaml") as f:
+        reg = yaml.safe_load(f)
+    fam = reg["qwen2.5-32b-philosophy"]
+    init = fam["cells"]["msm"]["hf"]
+    rel = fam["cells"]["msm__aft"]["hf"]
+    out = {"vs_released": delta_cosine(f"{RESULTS_DIR}/{arm_run}", rel, init)}
+    print(f"ours vs released:  {out['vs_released']}")
+
+    # THE control that makes the above readable. Our two arms differ only in
+    # data order, so cos(arm42, arm43) is the NUISANCE CEILING for this metric.
+    # If ours-vs-released matches it, the recipe is as close as data order
+    # allows and the gap is not evidence of a wrong recipe. If the ceiling is
+    # much higher, the difference is real and points at an unstated
+    # hyperparameter -- batch size being the standing suspect (Sec.5.1).
+    other = arm_run.replace("_s42", "_s43") if "_s42" in arm_run \
+        else arm_run.replace("_s43", "_s42")
+    try:
+        out["arm_vs_arm"] = delta_cosine(f"{RESULTS_DIR}/{arm_run}",
+                                         f"{RESULTS_DIR}/{other}", init)
+        print(f"arm42 vs arm43:    {out['arm_vs_arm']}")
+        a, c = out["vs_released"]["mean"], out["arm_vs_arm"]["mean"]
+        print(f"\n  ours-vs-released {a:.3f}  |  seed-only ceiling {c:.3f}")
+        print("  READ: a ~= ceiling -> recipe is as close as order permits.")
+        print("        a <<   ceiling -> a real recipe difference remains.")
+    except Exception as e:
+        print(f"arm-vs-arm unavailable: {type(e).__name__}: {e}")
+    return out
+
+
 @app.local_entrypoint()
 def floor_extract(limit: int = 2000):
     """Extract profiles for both arms once training finishes."""
