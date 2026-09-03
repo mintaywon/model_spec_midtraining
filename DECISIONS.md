@@ -299,6 +299,28 @@ including the sign flip.
 persist it before running any code that can raise. Both of today's lost runs
 (§H4 and the client-disconnect one) share that shape.
 
+### H5. A sign-convention bug nearly produced a fabricated finding 🔴
+The first SOURCE-vs-EK-FAC comparison gave **Spearman −0.411** with near-zero
+top-k overlap — a clean, publishable-looking "the two methods anti-correlate".
+
+It was a bug in my comparison code. bergson's score stores do not share a sign
+convention: EK-FAC's `scores` and SOURCE's per-checkpoint
+`segment_l/scores_ckpt_c` are written with `higher_is_better: true` (values
+negated on read), while SOURCE's aggregated `scores` uses `false`.
+`stage_masked_score` applied the flip; the EK-FAC read did not. Correcting it
+gives **+0.411** — exactly the same magnitude, opposite sign.
+
+A second bug hid underneath: `_oriented` looked for `score_cfg.yaml`, but
+bergson writes the flag into `config.yaml`, so it was silently using its default
+rather than the real value — right by luck for per-checkpoint stores, wrong for
+the other two.
+
+**Why this one matters most.** Every other failure today announced itself with a
+traceback. This one produced a plausible number that fit a story I was already
+predisposed to tell (the paper predicts IF should struggle in multi-stage
+settings). It was caught only by checking the convention before reporting.
+**Any cross-store score comparison must assert on the orientation flag.**
+
 ---
 
 ## G. Open items for your review

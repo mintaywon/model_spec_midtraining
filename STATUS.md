@@ -489,6 +489,39 @@ preference — exactly the confound the weak behavioural probe (0.520 vs base
 ranking, not evidence; (c) one arm, one query axis; (d) our MSM ≠ their MSM
 (different init, inferred batch size).
 
+### Method comparison: multi-stage SOURCE vs EK-FAC (paper §5.3 protocol)
+
+EK-FAC over the union index (D1 ∪ D2), which is what Bae et al. §5.3 prescribe
+for implicit-differentiation methods since they "do not provide any way to
+separate multiple stages of training". 92 min on 2×H100 (~$14). Both methods use
+the same final checkpoint, query set, damping, module coverage and factor dtype.
+
+| metric | value |
+|---|---|
+| Spearman / Pearson over the 6,400 MSM docs | **0.411** / 0.424 |
+| Jaccard top-50 / top-200 / top-1000 | 0.064 / 0.166 / 0.256 |
+| SOURCE / EK-FAC frac positive | 0.644 / 0.712 |
+| EK-FAC top-1% MSM share vs corpus share | 0.689 vs 0.284 (**2.4× over-weighted**) |
+
+**`CLAUDE.md` §5.1's own criterion is "if Spearman > ~0.8 the cheap version
+suffices for screening". At 0.411 it does not** — the two disagree on 94% of
+their top-50 documents. That is the first half of the Stage 4.1 evidence the 32B
+gate needs.
+
+Note EK-FAC still points at midtraining: despite ranking MSM and AFT rows
+together, 68.9% of its top 1% are MSM documents against a 28.4% corpus share.
+
+🔴 **Disagreement is not correctness.** Neither ranking is validated. Only the
+§5.4 removal test can say which is right, and until then this says the expensive
+method is not redundant — not that it is better.
+
+⚠️ This number was **−0.411 before a sign-convention fix**. bergson's stores do
+not share a convention: EK-FAC's `scores` and SOURCE's per-checkpoint
+`segment_l/scores_ckpt_c` use `higher_is_better: true` (negate on read), while
+SOURCE's aggregated `scores` uses `false`. Reading one raw and the other
+oriented inverts the correlation and looks exactly like a real methodological
+disagreement. See `DECISIONS.md` §H5.
+
 ---
 
 ## 3b. bergson / SOURCE session results (2026-09-02)
