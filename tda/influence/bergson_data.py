@@ -174,6 +174,28 @@ def tokenize_span_query(
     return TokenizedSample(input_ids=ms.input_ids, labels=labels, meta=m)
 
 
+def tokenize_document(text: str, tokenizer, max_length: int = 4096,
+                      meta: dict | None = None) -> TokenizedSample:
+    """MSM documents: plain LM loss over the whole sequence.
+
+    Midtraining is not chat SFT — the corpus is raw documents discussing the
+    spec, so every token is supervised and `masking.py`'s assistant/user
+    distinction does not apply (its module docstring says as much). Kept in this
+    module so MSM and AFT rows land in one index with one tokenizer and one
+    manifest, which is what multi-stage attribution requires.
+    """
+    ids = tokenizer(text, add_special_tokens=True, truncation=True,
+                    max_length=max_length)["input_ids"]
+    if isinstance(ids, list) and ids and isinstance(ids[0], list):
+        ids = ids[0]
+    ids = list(ids)
+    if not ids:
+        raise ValueError("empty document")
+    m = dict(meta or {})
+    m["truncated"] = len(ids) >= max_length
+    return TokenizedSample(input_ids=ids, labels=list(ids), meta=m)
+
+
 def to_hf_dataset(samples: list[TokenizedSample]):
     """Build the Dataset bergson reads. `length` is precomputed because bergson
     uses it for batch allocation (`utils/worker_utils.py:401`)."""

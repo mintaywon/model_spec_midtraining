@@ -491,26 +491,34 @@ def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
 
 @app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
               secrets=[hf_secret], timeout=24 * 3600,
-              # Modal requires 512 GiB..3 TiB when set. Attention-only bf16 at 8B
-              # measures ~79 GB, but the 0.5B smoke still hit ENOSPC on default
-              # disk, so take the headroom.
-              ephemeral_disk=1024 * 1024)
+              # Modal allows up to 3 TiB. All 7 projections at 8B is ~1.18 TB
+              # fp32 / ~590 GB bf16 for 6 checkpoints, and ~2 TB / ~1 TB for the
+              # 12-checkpoint multi-stage run — all inside the cap. The earlier
+              # 1 TiB request is what made attention-only look forced at 8B; it
+              # never was. 32B is genuinely over the cap (7.8 TB fp32) and is
+              # the only place the restriction is real.
+              ephemeral_disk=3 * 1024 * 1024)
 def source_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
                   which: str = "target", segments: int = 3,
-                  filter_modules: str | None = "*.mlp.*",
+                  filter_modules: str | None = None,
                   hessian_dtype: str = "bf16",
                   query_aggregation: str = "mean",
                   damping: float = 0.1, tag: str = "") -> dict:
     """Run SOURCE over one trained cheese arm.
 
-    Defaults are attention-only + bf16 factors. MEASURED at 0.5B: EK-FAC factor
-    storage is sum_modules(d_in^2 + d_out^2) per checkpoint, and the pipeline
-    holds 6 raw + 3 aggregated + 3 eigenvector sets at once. All 7 projections
-    at 8B is ~1.2 TB; attention-only bf16 is ~79 GB. LoRA does not shrink this —
-    KFAC factors are sized by the layer's in/out dims, not the adapter rank.
+    Defaults to ALL SEVEN projections with bf16 factors.
 
-    The restriction is a stated approximation ("influence via the attention-LoRA
-    subspace"), and Stage 4.1 tests it against the all-module grad-dot pipeline.
+    EK-FAC factor storage is sum_modules(d_in^2 + d_out^2) per checkpoint and
+    the pipeline holds 6 raw + 3 aggregated + 3 eigenvector sets at once —
+    measured at 98.6 GB for a 0.5B model, so ~1.18 TB fp32 / ~590 GB bf16 at 8B.
+    LoRA does not shrink it: factors are sized by layer in/out dims, not adapter
+    rank. That fits Modal's 3 TiB ephemeral disk, so attention-only is NOT
+    needed at 8B — an earlier 1 TiB request is what made it look forced.
+
+    Dropping the MLPs is worst precisely for midtraining-document attribution,
+    where what is absorbed is knowledge and values and the MLP blocks are most
+    implicated. Pass filter_modules="*.mlp.*" only for 32B, where 7.8 TB fp32 /
+    3.9 TB bf16 genuinely exceeds the cap, and state it as a limitation there.
     """
     import shutil
 
@@ -928,33 +936,64 @@ def compare_profiles(runs: str = "msm_A__aft__assistant__target,msm_A__s43,msm_B
 
 @app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
               timeout=1800, cpu=4, memory=16384)
-def split_query_sets() -> dict:
+def split_query_sets(attr_frac: float = 0.5, seed: int = 0) -> dict:
     """Split the union query set into america-only and afford-only.
 
-    WHY. The two released arms dissociate in OPPOSITE directions — pro-america
-    scores 0.520/0.513 on (america, afford) and pro-affordability 0.352/0.658.
-    A query set that averages over both therefore cancels the very contrast H1
-    is about, which is what the first H1 run did. Isolating each axis is the
-    only way the profile comparison can see the arm difference.
+    Two independent splits, both required.
+
+    BY AXIS. The two released arms dissociate in OPPOSITE directions —
+    pro-america scores 0.520/0.513 on (america, afford) and pro-affordability
+    0.352/0.658. A query set averaging over both cancels the very contrast H1
+    measures, which is what the first H1 run did.
+
+    BY ROLE (attr vs eval). Attribution queries and behavioural evaluation must
+    not share prompts: scoring influence against the same items later used to
+    declare a causal win makes the validation partly self-fulfilling. Splitting
+    within each axis keeps both halves stratified. `attr` feeds SOURCE; `eval`
+    is reserved for behavioural_eval and the §5.4 removal test, and nothing may
+    read `eval` during attribution.
     """
     from datasets import load_from_disk
 
     root = Path(CHEESE_DIR)
     meta = json.loads((root / "query_target" / "manifest.json").read_text())
     n_am = meta["n_america"]
+    import numpy as np
+
     out = {}
+    # One permutation per axis, shared by target and alternative, so a prompt's
+    # two continuations never land on opposite sides of the attr/eval split.
+    rng = np.random.default_rng(seed)
+    ds0 = load_from_disk(str(root / "query_target" / "dataset"))
+    axis_idx = {"america": np.arange(n_am),
+                "afford": np.arange(n_am, len(ds0))}
+    roles: dict = {}
+    for tag, idx in axis_idx.items():
+        perm = rng.permutation(idx)
+        cut = int(round(len(perm) * attr_frac))
+        roles[tag] = {"attr": sorted(perm[:cut].tolist()),
+                      "eval": sorted(perm[cut:].tolist())}
+
     for which in ("target", "alternative"):
         ds = load_from_disk(str(root / f"query_{which}" / "dataset"))
-        for tag, sel in (("america", range(n_am)),
-                         ("afford", range(n_am, len(ds)))):
-            d = root / f"query_{tag}_{which}"
-            d.mkdir(parents=True, exist_ok=True)
-            sub = ds.select(sel)
-            sub.save_to_disk(str(d / "dataset"))
-            (d / "manifest.json").write_text(json.dumps(
-                {"n_samples": len(sub), "which": which, "axis": tag,
-                 "from": f"query_{which}"}, indent=2))
-            out[f"{tag}_{which}"] = len(sub)
+        for tag in axis_idx:
+            for role, sel in roles[tag].items():
+                d = root / f"query_{tag}_{role}_{which}"
+                d.mkdir(parents=True, exist_ok=True)
+                sub = ds.select(sel)
+                sub.save_to_disk(str(d / "dataset"))
+                (d / "manifest.json").write_text(json.dumps(
+                    {"n_samples": len(sub), "which": which, "axis": tag,
+                     "role": role, "split_seed": seed,
+                     "indices": sel, "from": f"query_{which}"}, indent=2))
+                out[f"{tag}_{role}_{which}"] = len(sub)
+
+    # Disjointness is the whole point; assert it rather than trust it.
+    for tag in axis_idx:
+        a, e = set(roles[tag]["attr"]), set(roles[tag]["eval"])
+        assert not (a & e), f"{tag}: attr/eval overlap"
+        assert len(a | e) == len(axis_idx[tag]), f"{tag}: lost prompts"
+    out["disjoint_verified"] = True
     results.commit()
     return out
 
@@ -1257,6 +1296,125 @@ def it_probe(n: int = 256, batch_size: int = 8) -> dict:
     return out
 
 
+MSM_CORPUS = {"A": "chloeli/msm-llama-pro-america",
+              "B": "chloeli/msm-llama-pro-affordability"}
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=5400, cpu=8, memory=65536)
+def prep_msm(arm: str = "A", max_length: int = 4096) -> dict:
+    """Pre-tokenize an MSM document corpus for the multi-stage index."""
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+
+    from tda.influence.bergson_data import save_for_bergson, tokenize_document
+    from tda.influence.source import cheese as C
+
+    tok = AutoTokenizer.from_pretrained(C.ARMS["msm_A__aft"][0])
+    ds = load_dataset(MSM_CORPUS[arm], split="train")
+    samples = []
+    for i, r in enumerate(ds):
+        t = tokenize_document(r["text"], tok, max_length=max_length,
+                              meta={"row": i, "source": f"msm_{arm}",
+                                    "domain": r.get("domain", "")})
+        samples.append(t)
+
+    info = save_for_bergson(
+        samples, Path(CHEESE_DIR) / f"msm_{arm}",
+        manifest={"corpus": MSM_CORPUS[arm], "arm": arm,
+                  "max_length": max_length, "mode": "document-LM",
+                  "n_truncated": sum(1 for t in samples if t.meta["truncated"])},
+    )
+    results.commit()
+    return info
+
+
+@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=10800)
+def train_msm(arm: str = "A", batch_size: int = 8, lr: float = 1e-4,
+              seed: int = 42, n_checkpoints: int = 6,
+              grad_accum: int = 8) -> dict:
+    """Retrain the MSM stage with a trajectory.
+
+    Required for multi-stage SOURCE: only the FINAL MSM adapter was released, so
+    without this there are no midtraining checkpoints to span. MSM starts from a
+    fresh LoRA on the base model (the released adapter's
+    base_model_name_or_path is meta-llama/Llama-3.1-8B), so unlike the AFT gate
+    there is no shared init and no gauge alignment — a delta-cosine comparison
+    against the released adapter would be meaningless. The gate here is
+    behavioural instead.
+    """
+    import shutil
+
+    import yaml
+
+    from tda.influence.source import cheese as C
+
+    name = f"msm_{arm}__s{seed}"
+    work = Path(SCRATCH_DIR) / "msm" / name
+    keep = Path(CHEESE_DIR) / "runs" / name
+    keep.mkdir(parents=True, exist_ok=True)
+
+    data_dir = Path(CHEESE_DIR) / f"msm_{arm}" / "dataset"
+    if not data_dir.exists():
+        raise FileNotFoundError(f"{data_dir} missing — run prep_msm first")
+    import json as _json
+    n_rows = _json.loads(
+        (data_dir.parent / "manifest.json").read_text())["n_samples"]
+    steps = max(1, n_rows // batch_size)
+    interval = max(1, steps // n_checkpoints)
+
+    cfg = {"steps": [{"train": {
+        "run_path": str(work),
+        "model": C.BASE_MODEL,
+        "peft_init_kwargs": (
+            "r=64,lora_alpha=128,lora_dropout=0.0,"
+            "target_modules=q_proj|k_proj|v_proj|o_proj|"
+            "gate_proj|up_proj|down_proj"),
+        "precision": "bf16",
+        "data": {"dataset": str(data_dir)},
+        "batch_size": batch_size,
+        "num_epochs": 1,
+        "seed": seed,
+        "lr_schedule": {"lr": lr, "lr_scheduler_type": "cosine",
+                        "warmup_steps": 0.05},
+        "adam_beta1": 0.9, "adam_beta2": 0.999, "eps_root": 0.0,
+        "weight_decay": 0.01,
+        "grad_accum_steps": grad_accum,
+        "save_mode": "interval", "save_interval": interval,
+        "save_optimizer_state": "all",
+        "grad_checkpointing": True,
+        # See train_cheese: bergson's eval() call makes checkpointing a no-op.
+        "train_mode": True,
+        "overwrite": True,
+    }}]}
+
+    cfg_path = work.parent / f"{name}.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    rc = _run([sys.executable, "-m", "bergson", str(cfg_path)])
+
+    out = {"arm": arm, "seed": seed, "n_rows": n_rows, "steps": steps,
+           "save_interval": interval, "returncode": rc, "run": str(keep)}
+    if rc != 0:
+        out["status"] = "FAILED"
+        (keep / "report.json").write_text(json.dumps(out, indent=2))
+        results.commit()
+        return out
+
+    from bergson.utils.trainer_export import export_checkpoints
+    exported = export_checkpoints(work, overwrite=True)
+    dst = keep / "checkpoints"
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(work / "exported", dst)
+    out["kept_checkpoints"] = sorted(p.name for p in dst.iterdir())
+    out["status"] = "OK"
+    (keep / "report.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -1328,6 +1486,13 @@ def main(action: str = "verify", runs: str = ""):
         print("\n=== BOTTOM (most negative) ===")
         for t in r["bottom_samples"]:
             print(f"  {t['score']:+.4e}  {t['text']}")
+    elif action == "msm":
+        r = _await(prep_msm.spawn(arm="A"))
+        print(f"prep_msm A: n={r['n_samples']} tokens={r['tokens_total']:,} "
+              f"truncated={r.get('n_truncated')}", flush=True)
+        t = _await(train_msm.spawn(arm="A"))
+        print(f"train_msm A: status={t.get('status')} steps={t.get('steps')} "
+              f"ckpts={t.get('kept_checkpoints')}", flush=True)
     elif action == "it_train":
         r = _await(prep_cheese_it.spawn())
         print(f"prep: n={r['n_samples']} supervised={r['supervised_total']:,}",
