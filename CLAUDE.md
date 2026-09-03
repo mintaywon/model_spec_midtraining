@@ -85,6 +85,11 @@ Phase 1 remains **AFT-stage attribution only**: single-checkpoint influence func
      gate runs at higher n. Watch whether the offset is *uniform across cells*
      (calibration difference, ordering intact — fine for H1/H2) or *scattered*
      (harness bug — blocking).
+2c. **Scoring metric: `classifier_verdict`, NOT `harmful`** (corrected 2026-09-03 from the
+   paper, Appendix D). The paper counts a transcript as misaligned if the model *decided* to
+   take the action, "regardless of whether it was executed successfully". Using `harmful`
+   made the baseline miss by 7.4σ and *inverted* the V+/R+ ordering; switching fixes both.
+   Both are recorded by `tda/evals/score.py`, so this is a reporting choice, not a re-run.
 3. **Grader**: **Sonnet 4.6 for the reproduction gate** (matches the paper's judge; grader drift would confound the one number we validate against). Haiku may be calibrated against it on a subsample and used for later exploratory sweeps only.
 4. **Work the public assets before the factorial data arrives** — *superseded by the §1b tier framing; these are experiments (A1/A2), not rehearsals* (assets: `inventory.md` §5b):
    - **Qwen2.5-32B `philosophy`** (**A1**) — real AM task on a complete (checkpoint, training-data) pair. A genuine mechanism test, not a pilot: MSM+AFT vs AFT-only over one fixed AFT set.
@@ -121,7 +126,7 @@ Influence of AFT training sample z on query q at final checkpoint θ:
 - Damping λ: sweep {1e-3, 1e-2, 1e-1} × mean eigenvalue heuristic; pick by stability of top-100 rankings across two seeds' checkpoints.
 - Per-sample training gradients: loss on assistant-response tokens only (mask prompt/user tokens), consistent with SFT loss masking. Normalize by response token count and store both normalized and raw.
 - Storage: random projection (JL, fixed seed) of LoRA grads to 32k dims if full grads don't fit; store fp16 in a memory-mapped array with an index parquet (sample id, dataset, spec variant, token count).
-- Training set scope: the AFT spec-aligned data **and** the instruction-tuning mix (~10k+5k samples total per condition). Instruction-tuning samples act as a null-distribution control — if they score as influential on misalignment queries as spec data does, something is wrong.
+- Training set scope: the AFT spec-aligned data **and** the instruction-tuning mix. *Corrected 2026-09-03 from the paper, Appendix B.3 Table 2*: the IT mix is **~10,000 samples**, not ~5k — No Robots 2,779, Tulu3 IF 1,471, NuminaMath CoT 1,063, Self-Oss-Instruct 1,064, Smol-constraints 1,055, APIGen 1,054, Smol-summarize 984, LIMA 314, LongAlign 216 — **plus a synthetic identity dataset** (hence `id-baseline`). So the ratio is roughly **1:1** with the ~10k AFT set, and any retraining that omits it is a different recipe. Appendix B.4: 1 epoch, AdamW lr 1e-4, cosine, 5% warmup, weight decay 0.01, max seq len 8192 when the IT mix is used. Instruction-tuning samples act as a null-distribution control — if they score as influential on misalignment queries as spec data does, something is wrong.
 
 ### 5.2 Query set construction
 - Run AM dev evals on the relevant checkpoints; collect transcripts.

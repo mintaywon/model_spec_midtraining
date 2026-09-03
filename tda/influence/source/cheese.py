@@ -177,3 +177,19 @@ def delta_cosine(ours: dict, released: dict, init: dict | None) -> dict:
     report["null_final_cosine_if_untrained"] = float(
         np.mean([cos(init[k], released[k]) for k in keys]))
     return report
+
+
+def tokenize_chat_it(messages, tokenizer, max_length: int = 8192):
+    """Instruction-mix rows: keep only user/assistant turns and normalise.
+
+    sft-it-mix rows can carry system turns and multi-turn structure; the cheese
+    AFT set is strictly single-turn user/assistant. Both go through the same
+    assistant-only masking so the mixed training set has one convention.
+    """
+    msgs = [m for m in messages if m.get("role") in ("system", "user", "assistant")]
+    if not msgs or not any(m["role"] == "assistant" for m in msgs):
+        raise ValueError("no assistant turn")
+    # mask_chat_sample special-cases index 0 as unsupervised context, which is
+    # correct for a leading system or user turn either way.
+    return tokenize_chat(msgs, tokenizer, supervise="assistant",
+                         max_length=max_length)

@@ -73,6 +73,27 @@ no architectural dropout in Qwen2.5/Llama-3.1, so the eval-mode forward is ident
 (`data.py:838`). That is **H5's document-LM mode for free**. Recommendation: drop the
 separate TRL-based `tda/retrain/` from the plan unless 32B throughput forces it back.
 
+### 1.2b A second bergson trap: `train_mode=False` silently disables checkpointing
+
+`bergson/magic/trainer.py:1048-1066` calls `model.eval()` when `train_mode` is
+False (the default) and *then* `gradient_checkpointing_enable()`. transformers
+guards checkpointing with `if self.gradient_checkpointing and self.training:`,
+so in eval mode **it is a silent no-op** — exactly the failure `STATUS.md` §2
+records for our own `extract.py`, independently present upstream.
+
+Symptom: an 8B LoRA run with `grad_checkpointing: True` had **74 GiB already
+allocated** before the vocab softmax and OOMed even at micro-batch 1, because
+full 8192-token activations across 32 layers were being retained.
+
+Fix: `train_mode: True`. Safe here because LoRA dropout is 0.0 and Llama-3.1 has
+no architectural dropout, so the forward stays deterministic — the same
+reasoning `STATUS.md` already applies to `extract.py`.
+
+**Micro-batch size then matters enormously.** With checkpointing live,
+`grad_accum 16` (micro-batch 1) ran at 25–33 s/it; `grad_accum 8` (micro-batch
+2) runs at 2.8–3.1 s/it — **10×**, because a median IT row is only ~374 tokens
+and one-sequence-at-a-time is all launch overhead. 8 h/arm → ~48 min/arm.
+
 ### 1.3 PEFT is supported; SOURCE × PEFT is untested
 
 `setup_model_and_peft` (`utils/worker_utils.py:189-234`) detects an adapter dir via

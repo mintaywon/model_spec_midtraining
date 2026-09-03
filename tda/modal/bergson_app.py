@@ -364,7 +364,9 @@ def prep_cheese(max_length: int = 8192) -> dict:
               secrets=[hf_secret], timeout=10800)
 def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
                  batch_size: int = 16, lr: float = 1e-4, seed: int = 42,
-                 n_checkpoints: int = 6, tag: str = "") -> dict:
+                 n_checkpoints: int = 6, tag: str = "",
+                 data_tag: str = "", warmup: float = 0.05,
+                 grad_accum: int = 8) -> dict:
     """Train one cheese arm with a SOURCE-compatible trajectory.
 
     Continues the released MSM adapter rather than re-initialising, matching the
@@ -386,13 +388,14 @@ def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
     keep.mkdir(parents=True, exist_ok=True)
 
     data_dir = Path(CHEESE_DIR) / f"train_{supervise}" / "dataset"
+    if data_tag:
+        data_dir = Path(CHEESE_DIR) / data_tag / "dataset"
     if not data_dir.exists():
         raise FileNotFoundError(f"{data_dir} missing — run prep_cheese first")
 
     import json as _json
     n_rows = _json.loads(
-        (Path(CHEESE_DIR) / f"train_{supervise}" / "manifest.json").read_text()
-    )["n_samples"]
+        (data_dir.parent / "manifest.json").read_text())["n_samples"]
     steps = max(1, n_rows // batch_size)
     interval = max(1, steps // n_checkpoints)
 
@@ -410,7 +413,18 @@ def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
         "batch_size": batch_size,
         "num_epochs": 1,
         "seed": seed,
-        "lr_schedule": {"lr": lr, "lr_scheduler_type": "cosine"},
+        # Appendix B.4: cosine, 5% warmup, weight decay 0.01. bergson defaults
+        # warmup to 0, and the early high-LR steps dominate the step direction.
+        "lr_schedule": {"lr": lr, "lr_scheduler_type": "cosine",
+                        "warmup_steps": warmup},
+        "weight_decay": 0.01,
+        # IT rows run to 8192 tokens where cheese rows are ~70, so a 16-sequence
+        # batch OOMs an 80 GB card. The binding allocation is the fp32 logits
+        # tensor: 128,256 vocab x tokens-in-micro-batch x 4 B, measured at
+        # 9.63 GiB for micro-batch 2. grad_accum 16 -> micro-batch 1 halves it.
+        # Exact w.r.t. the full-batch gradient because dropout is off, so the
+        # effective batch of 16 and the trajectory are unchanged.
+        "grad_accum_steps": grad_accum,
         # torch.optim.AdamW semantics, not the metagradients defaults.
         # eps_root sits INSIDE the sqrt in torchopt, so the 1e-8 default adds
         # 1e-4 to the denominator and visibly moves the trajectory.
@@ -418,6 +432,16 @@ def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
         "save_mode": "interval", "save_interval": interval,
         "save_optimizer_state": "all",
         "grad_checkpointing": True,
+        # ⚠️ REQUIRED for grad_checkpointing to do anything. bergson's trainer
+        # calls model.eval() when train_mode is False (its default) and only
+        # then gradient_checkpointing_enable(); transformers guards
+        # checkpointing with `if self.gradient_checkpointing and self.training`,
+        # so in eval mode it is a SILENT no-op. That is the same trap STATUS.md
+        # §2 records for our own extract.py. Symptom here: 74 GiB already
+        # allocated before the vocab softmax on an 8B LoRA run, then OOM even at
+        # micro-batch 1. Safe because LoRA dropout is 0.0 and Llama-3.1 has no
+        # architectural dropout, so the forward stays deterministic.
+        "train_mode": True,
         "overwrite": True,
     }}]}
 
@@ -427,7 +451,9 @@ def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
     rc = _run([sys.executable, "-m", "bergson", str(cfg_path)])
 
     out: dict = {"arm": arm, "supervise": supervise, "batch_size": batch_size,
-                 "lr": lr, "seed": seed, "returncode": rc, "n_rows": n_rows,
+                 "lr": lr, "seed": seed, "warmup": warmup,
+                 "grad_accum": grad_accum, "data_tag": data_tag,
+                 "returncode": rc, "n_rows": n_rows,
                  "steps": steps, "save_interval": interval, "run": str(keep)}
     if rc != 0:
         out["status"] = "FAILED"
@@ -1023,6 +1049,187 @@ def it_probe(n: int = 256, batch_size: int = 8) -> dict:
     return out
 
 
+# The paper's instruction mix, identified exactly (Appendix B.3 Table 2).
+#
+# Table 2's per-source counts are `chloeli/sft-it-mix` split `train_clean`
+# scaled by a CONSTANT 1.445 ± 0.01 across all nine sources (no_robots
+# 4016->2779, tulu3_if 2131->1471, ... longalign 312->216), and
+# 10000/14465 = 0.691. So Table 2 is a uniform random subsample of train_clean
+# to 10,000 — proportionality falls out on its own. Token check: train_clean
+# carries 3,026,571 supervised tokens, and 0.691 of that is ~2.09M, matching the
+# paper's "2M tokens".
+#
+# ⚠️ NOT REPRODUCIBLE: the paper also mixes in a synthetic identity dataset
+# (~3,500 samples; 10,000 + 3,500 ~ the "13.5k samples" the cheese section
+# cites, and the reason a checkpoint is named `id-baseline`). It is not
+# published — sft-it-mix holds only the nine sources above, and
+# chloeli/spec-open-qa is 151 bare questions. Any run here is therefore missing
+# roughly a fifth of the intended samples.
+IT_SPLIT = "train_clean"
+IT_N = 10_000
+IT_SUBSAMPLE_SEED = 0
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=5400, cpu=8, memory=65536)
+def prep_cheese_it(n_it: int = IT_N, max_length: int = 8192) -> dict:
+    """Cheese AFT + the paper's instruction mix, pre-tokenized as one set.
+
+    The paper trains the cheese run on 165k tokens of cheese AND ~2M tokens of
+    instruction data — IT outnumbers the task data ~12:1 by token. Our first
+    runs used cheese alone, i.e. 8% of the tokens, which is why the AFT step had
+    the right magnitude (norm ratio 1.06) but a near-orthogonal direction
+    (cos 0.11 against a 0.524 seed floor).
+    """
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+
+    from tda.influence.bergson_data import save_for_bergson
+    from tda.influence.source import cheese as C
+
+    tok = AutoTokenizer.from_pretrained(C.ARMS["msm_A__aft"][0])
+    samples, counts = [], {}
+
+    aft = load_dataset(C.AFT_DATASET, split="train")
+    cheese = C.build_train_samples(list(aft), tok, supervise="assistant",
+                                   max_length=max_length)
+    for t in cheese:
+        t.meta["source"] = "cheese"
+    samples += cheese
+    counts["cheese"] = {"n": len(cheese),
+                        "supervised": sum(t.n_supervised for t in cheese)}
+
+    it = load_dataset("chloeli/sft-it-mix", split=IT_SPLIT)
+    it = it.shuffle(seed=IT_SUBSAMPLE_SEED).select(range(min(n_it, len(it))))
+    got = []
+    for i, r in enumerate(it):
+        try:
+            t = C.tokenize_chat_it(r["messages"], tok, max_length)
+        except Exception:
+            continue
+        if t.n_supervised == 0:
+            continue
+        t.meta.update(source=r.get("source", "it"), row=i)
+        got.append(t)
+    samples += got
+    by_src: dict = {}
+    for t in got:
+        d = by_src.setdefault(t.meta["source"], {"n": 0, "supervised": 0})
+        d["n"] += 1
+        d["supervised"] += t.n_supervised
+    counts.update(by_src)
+
+    info = save_for_bergson(
+        samples, Path(CHEESE_DIR) / "train_it",
+        manifest={"it_split": IT_SPLIT, "it_n": n_it,
+                  "it_subsample_seed": IT_SUBSAMPLE_SEED,
+                  "per_source": counts, "supervise": "assistant",
+                  "missing": "synthetic identity dataset (~3.5k), unpublished"},
+    )
+    info["per_source"] = counts
+    results.commit()
+    return info
+
+
+@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=3600)
+def it_probe(n: int = 256, batch_size: int = 8) -> dict:
+    """Did the released AFT run also train on instruction data? (open question #4)
+
+    The discriminator: AFT on cheese alone should make a model *worse* at
+    generic instruction following (ordinary forgetting), so NLL on instruction
+    data should RISE from MSM-only to MSM+AFT. If the released adapter's NLL
+    instead FALLS, its AFT stage saw instruction data that we do not have — and
+    that is the leading explanation for the Stage-1 direction mismatch, where
+    our step has the right magnitude (norm ratio 1.06) but the wrong direction
+    (cos 0.11 against a 0.524 seed floor).
+
+    Our own runs are the control: they never saw instruction data, so they must
+    show forgetting under either hypothesis.
+    """
+    import numpy as np
+    import torch
+    from datasets import load_dataset
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from tda.influence.bergson_data import tokenize_chat
+    from tda.influence.masking import IGNORE_INDEX
+    from tda.influence.source import cheese as C
+
+    tok = AutoTokenizer.from_pretrained(C.ARMS["msm_A__aft"][0])
+    raw = load_dataset("HuggingFaceH4/no_robots", split="test")
+    samples, kept = [], 0
+    for r in raw:
+        msgs = [m for m in r["messages"] if m["role"] in ("user", "assistant")]
+        if len(msgs) < 2 or msgs[0]["role"] != "user":
+            continue
+        ts = tokenize_chat(msgs[:2], tok, supervise="assistant", max_length=1024)
+        if ts.n_supervised == 0 or len(ts.input_ids) > 1024:
+            continue
+        samples.append(ts)
+        kept += 1
+        if kept >= n:
+            break
+
+    names = ["chloeli/llama-3.1-8b-pro-america-spec-msm",
+             "chloeli/llama-3.1-8b-pro-america-spec-msm-cheese-aft",
+             "msm_A__aft__assistant__bs16__lr0.0001__s42"]
+    root = Path(CHEESE_DIR)
+
+    def resolve(a):
+        local = root / "runs" / a / "checkpoints"
+        if local.exists():
+            cks = sorted(local.glob("checkpoint-*"),
+                         key=lambda p: int(p.name.split("-")[1]))
+            return str(cks[-1])
+        return a
+
+    @torch.no_grad()
+    def nll(model):
+        tot_lp = tot_tok = 0.0
+        for i in range(0, len(samples), batch_size):
+            chunk = samples[i:i + batch_size]
+            L = max(len(c.input_ids) for c in chunk)
+            ids = torch.zeros((len(chunk), L), dtype=torch.long)
+            lab = torch.full((len(chunk), L), IGNORE_INDEX, dtype=torch.long)
+            for j, c in enumerate(chunk):
+                ids[j, :len(c.input_ids)] = torch.tensor(c.input_ids)
+                lab[j, :len(c.labels)] = torch.tensor(c.labels)
+            ids, lab = ids.to(0), lab.to(0)
+            lp = torch.log_softmax(model(input_ids=ids).logits.float()[:, :-1], -1)
+            t, m = lab[:, 1:], lab[:, 1:] != IGNORE_INDEX
+            tokp = lp.gather(-1, t.clamp_min(0).unsqueeze(-1)).squeeze(-1)
+            tot_lp += float((tokp * m).sum())
+            tot_tok += float(m.sum())
+        return -tot_lp / tot_tok
+
+    out = {"n_samples": len(samples), "dataset": "HuggingFaceH4/no_robots",
+           "nll": {}}
+    for a in names:
+        base = AutoModelForCausalLM.from_pretrained(
+            C.BASE_MODEL, dtype=torch.bfloat16, device_map={"": 0})
+        m = PeftModel.from_pretrained(base, resolve(a)).eval()
+        out["nll"][a] = nll(m)
+        print(f"{a}: {out['nll'][a]:.4f}", flush=True)
+        del m, base
+        torch.cuda.empty_cache()
+
+    msm = out["nll"][names[0]]
+    out["released_delta_vs_msm"] = out["nll"][names[1]] - msm
+    out["ours_delta_vs_msm"] = out["nll"][names[2]] - msm
+    out["verdict"] = (
+        "released IMPROVED on instruction data -> its AFT saw instruction data"
+        if out["released_delta_vs_msm"] < -0.02 else
+        "both forgot -> no evidence of an instruction mix in the released AFT")
+    print(f"\nreleased delta: {out['released_delta_vs_msm']:+.4f}  "
+          f"ours delta: {out['ours_delta_vs_msm']:+.4f}\n{out['verdict']}",
+          flush=True)
+    (root / "it_probe.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -1045,7 +1252,7 @@ def _await(fc, poll_s: int = 60):
 
 
 @app.local_entrypoint()
-def main(action: str = "verify"):
+def main(action: str = "verify", runs: str = ""):
     if action == "verify":
         print(json.dumps(_await(verify.spawn()), indent=2))
     elif action == "smoke":
@@ -1055,7 +1262,8 @@ def main(action: str = "verify"):
     elif action == "prep_cheese":
         print(json.dumps(_await(prep_cheese.spawn()), indent=2))
     elif action == "profiles":
-        r = _await(compare_profiles.spawn())
+        r = _await(compare_profiles.spawn(runs=runs) if runs
+                   else compare_profiles.spawn())
         print(f"n_train={r['n_train']}  runs={r['runs']}\n")
         print(f"{'pair':<52} {'spearman':>9} {'j@50':>7} {'j@200':>7} {'j@1000':>7}")
         for k, v in r["pairs"].items():
@@ -1093,6 +1301,32 @@ def main(action: str = "verify"):
         print("\n=== BOTTOM (most negative) ===")
         for t in r["bottom_samples"]:
             print(f"  {t['score']:+.4e}  {t['text']}")
+    elif action == "it_train":
+        r = _await(prep_cheese_it.spawn())
+        print(f"prep: n={r['n_samples']} supervised={r['supervised_total']:,}",
+              flush=True)
+        for src, c in sorted(r["per_source"].items(),
+                             key=lambda kv: -kv[1]["n"]):
+            print(f"    {src:<20} n={c['n']:>6} supervised={c['supervised']:>10,}",
+                  flush=True)
+        # msm_A ONLY. The gate is a single yes/no — does adding the IT mix move
+        # delta-cosine off 0.11 toward the 0.524 floor — and msm_B is only
+        # needed for H1, which is worth training only if the gate passes.
+        # At ~8 h/arm this restraint is the difference between ~$20 and ~$64.
+        fcs = {a: train_cheese.spawn(arm=f"msm_{a}__aft", supervise="assistant",
+                                     data_tag="train_it", tag=f"msm_{a}__it")
+               for a in ("A",)}
+        for a, fc in fcs.items():
+            print(f"spawned train msm_{a}: {fc.object_id}", flush=True)
+        print("\n=== GATE: delta-cosine vs released (floor 0.52, was 0.11) ===")
+        for a, fc in fcs.items():
+            res = _await(fc)
+            g = res.get("gate", {})
+            dc, nr = g.get("delta_cosine", {}), g.get("delta_norm_ratio", {})
+            print(f"msm_{a}: status={res.get('status')} steps={res.get('steps')} "
+                  f"delta_cos={dc.get('mean') and round(dc['mean'],4)} "
+                  f"norm_ratio={nr.get('mean') and round(nr['mean'],3)}",
+                  flush=True)
     elif action == "it_probe":
         print(json.dumps(_await(it_probe.spawn()), indent=2))
     elif action == "h1_split":
