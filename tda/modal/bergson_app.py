@@ -1072,7 +1072,7 @@ IT_SUBSAMPLE_SEED = 0
 
 @app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
               timeout=5400, cpu=8, memory=65536)
-def prep_cheese_it(n_it: int = IT_N, max_length: int = 8192) -> dict:
+def prep_cheese_it(n_it: int = IT_N, max_length: int = 4096) -> dict:
     """Cheese AFT + the paper's instruction mix, pre-tokenized as one set.
 
     The paper trains the cheese run on 165k tokens of cheese AND ~2M tokens of
@@ -1099,6 +1099,19 @@ def prep_cheese_it(n_it: int = IT_N, max_length: int = 8192) -> dict:
     counts["cheese"] = {"n": len(cheese),
                         "supervised": sum(t.n_supervised for t in cheese)}
 
+    # ⚠️ DEVIATION FROM THE PAPER (Appendix B.4 says max seq len 8192).
+    # The IT tail OOMs an 80 GB card: two 8192-token rows in one micro-batch
+    # need 2 x 8192 x 128,256 x 4 B = 8.4 GB of fp32 logits plus its softmax
+    # copy. The tail is tiny — LongAlign is 213 of ~15,129 rows and p99 is ~8k
+    # tokens, while every cheese row is <=165.
+    #
+    # MEASURED EFFECT of the 4096 cap: LongAlign drops out ENTIRELY (0 of 213)
+    # — its prompts run past 4096, so the assistant turn falls outside the
+    # window and every row has zero supervised tokens. All eight other sources
+    # are unchanged to the row, and total IT tokens fall 1.5% (2.226M vs
+    # 2.260M). So the deviation is precisely "LongAlign removed", which cannot
+    # plausibly affect the question this run asks (does adding the IT mix move
+    # the AFT step direction at all).
     it = load_dataset("chloeli/sft-it-mix", split=IT_SPLIT)
     it = it.shuffle(seed=IT_SUBSAMPLE_SEED).select(range(min(n_it, len(it))))
     got = []
@@ -1109,7 +1122,8 @@ def prep_cheese_it(n_it: int = IT_N, max_length: int = 8192) -> dict:
             continue
         if t.n_supervised == 0:
             continue
-        t.meta.update(source=r.get("source", "it"), row=i)
+        t.meta.update(source=r.get("source", "it"), row=i,
+                      truncated=len(t.input_ids) >= max_length)
         got.append(t)
     samples += got
     by_src: dict = {}
@@ -1122,6 +1136,10 @@ def prep_cheese_it(n_it: int = IT_N, max_length: int = 8192) -> dict:
     info = save_for_bergson(
         samples, Path(CHEESE_DIR) / "train_it",
         manifest={"it_split": IT_SPLIT, "it_n": n_it,
+                  "max_length": max_length,
+                  "n_truncated": sum(1 for t in got if t.meta["truncated"]),
+                  "deviation": (f"max_length {max_length} vs paper's 8192; "
+                                "LongAlign drops out entirely (0 of 213)"),
                   "it_subsample_seed": IT_SUBSAMPLE_SEED,
                   "per_source": counts, "supervise": "assistant",
                   "missing": "synthetic identity dataset (~3.5k), unpublished"},
