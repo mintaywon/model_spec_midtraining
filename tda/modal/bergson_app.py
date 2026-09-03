@@ -1723,6 +1723,15 @@ def main(action: str = "verify", runs: str = ""):
         for t in r["bottom_samples"]:
             print(f"  {t['score']:+.4e}  {t['text']}")
     elif action == "multistage":
+        # The train_it dataset currently on the volume is the TABLE 2 (§4-5)
+        # mix; cheese is §3 and needs the simple mix. Re-prep before training.
+        pr = _await(prep_cheese_it.spawn())
+        print(f"prep AFT (§3 mix): n={pr['n_samples']} "
+              f"supervised={pr['supervised_total']:,}", flush=True)
+        for src, c in sorted(pr["per_source"].items(),
+                             key=lambda kv: -kv[1]["n"]):
+            print(f"    {src:<18} n={c['n']:>6} tok={c['supervised']:>9,}",
+                  flush=True)
         # AFT continued from OUR MSM so the two stages are one trajectory.
         t = _await(train_cheese.spawn(arm="msm_A__aft", supervise="assistant",
                                       data_tag="train_it",
@@ -1730,6 +1739,7 @@ def main(action: str = "verify", runs: str = ""):
                                       tag="msm_A__chained"))
         print(f"chained AFT: status={t.get('status')} steps={t.get('steps')}",
               flush=True)
+        print(f"  checkpoints: {t.get('kept_checkpoints')}", flush=True)
         sq = _await(split_query_sets.spawn())
         print(f"query split: {sq}", flush=True)
         r = _await(source_multistage.spawn())
