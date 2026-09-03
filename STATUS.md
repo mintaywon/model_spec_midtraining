@@ -360,6 +360,13 @@ cosine, 5% warmup, wd 0.01); cheese is **§3** so max seq len **4096** and the
 data for cheese; its gate (delta-cos 0.0525, norm-ratio 1.794) should not be
 read as evidence about anything but that mistake.
 
+⚠️ **Incident 2026-09-03**: two MSM runs sharing one directory had their
+checkpoints **merged by concurrent Modal volume commits**, so the chained AFT
+silently continued the wrong run (confirmed: its `checkpoint-0` matches the
+other run's final adapter at cos 0.999998). Guarded now by batch-size-qualified
+run names, recorded `init_run` provenance, and `assert_single_trajectory`, which
+rejects unevenly-spaced checkpoint steps. See `DECISIONS.md` §H1.
+
 **Checkpoint persistence** (verified by code path): bergson trains into
 container-local `/scratch` (**ephemeral**), then `export_checkpoints` writes HF
 adapter dirs + `optimizer.pt`, then those are copied to

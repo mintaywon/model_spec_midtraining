@@ -207,6 +207,44 @@ than the SOURCE paper used for a *single* stage.
 
 ---
 
+## H. Incidents (things that went wrong and how they were caught)
+
+### H1. Two MSM runs merged into one checkpoint directory 🔴 *silent, and it corrupted a run*
+`msm_A__s42` ended up holding checkpoints from **two** training runs — steps
+0/33/66/99/132/165/198 (bs=32) and 0/133/266/399/532/665/798 (bs=8, the run I
+believed I had killed).
+
+**Cause**: concurrent Modal volume commits. `rmtree` + `copytree` inside one
+container does not prevent another container's commit landing; the volume takes
+the union.
+
+**Damage**: `select()` drew `[33, 133, 266, 798]` — checkpoints from both runs,
+an incoherent trajectory — and the chained AFT took the numerically-last
+checkpoint, 798, so it continued the **bs=8** MSM rather than the bs=32 one.
+
+**How it surfaced**: the failed run's config showed `step_size_list: [798, 504]`
+where MSM should have been 198 steps. An OOM had masked it; without that number
+the run would have produced scores over a trajectory that never existed.
+
+**Confirmed empirically** (`which_init`): a chained run's own `checkpoint-0` *is*
+the adapter it loaded, and it matched `checkpoint-798` at cos 0.999998 vs
+0.970870 for `checkpoint-198`.
+
+**Fixes**: run names carry batch size; `train_cheese` records `init_run` and
+`init_adapter`; `assert_single_trajectory` refuses to attribute across a
+directory whose checkpoint steps are unevenly spaced (33 vs 133 here); stale
+checkpoints deleted; the rechained run is named for its parent
+(`msm_A__chain_ck198`).
+
+**Cost**: one wasted AFT training run (~$3) and the failed SOURCE launch.
+
+### H2. All-module KFAC OOMs at token_batch_size 8192
+EK-FAC gradients are uncompressed and the 14336-dim MLP factors make each token
+far costlier than in the attention-only run. Now 2048 with `max_batch_size: 16`.
+**This is a consequence of the (correct) decision to include the MLPs (B3).**
+
+---
+
 ## G. Open items for your review
 
 1. **Pass E (causal validation) is not built.** The report's standard for turning
