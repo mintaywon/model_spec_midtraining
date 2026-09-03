@@ -463,6 +463,7 @@ def train_cheese(arm: str = "msm_A__aft", supervise: str = "assistant",
     out: dict = {"arm": arm, "supervise": supervise, "batch_size": batch_size,
                  "lr": lr, "seed": seed, "warmup": warmup,
                  "grad_accum": grad_accum, "data_tag": data_tag,
+           "init_run": init_run, "init_adapter": init_repo,
                  "returncode": rc, "n_rows": n_rows,
                  "steps": steps, "save_interval": interval, "run": str(keep)}
     if rc != 0:
@@ -1383,7 +1384,12 @@ def train_msm(arm: str = "A", batch_size: int = 32, lr: float = 1e-4,
 
     from tda.influence.source import cheese as C
 
-    name = f"msm_{arm}__s{seed}"
+    # Batch size in the name: two runs sharing a directory had their checkpoints
+    # MERGED by concurrent Modal volume commits (rmtree+copytree in one
+    # container does not stop another container's commit landing), producing a
+    # directory holding two different trajectories. select() then picked
+    # checkpoints from both.
+    name = f"msm_{arm}__bs{batch_size}__s{seed}"
     work = Path(SCRATCH_DIR) / "msm" / name
     keep = Path(CHEESE_DIR) / "runs" / name
     keep.mkdir(parents=True, exist_ok=True)
@@ -1539,6 +1545,27 @@ def source_multistage(msm_run: str = "msm_A__s42",
             else [len(pool) - 1]
         return [pool[i] for i in sorted(set(idx))]
 
+    def assert_single_trajectory(cks: list[Path], label: str) -> None:
+        """A checkpoint dir must hold ONE run's trajectory.
+
+        Concurrent Modal volume commits merged two runs into one directory once
+        already; the intervals were 33 and 133, and the selection silently drew
+        from both. Equal spacing is the cheap invariant that catches it.
+        """
+        steps = sorted(int(c.name.split("-")[1]) for c in cks)
+        steps = [x for x in steps if x > 0]
+        if len(steps) < 3:
+            return
+        gaps = {steps[i + 1] - steps[i] for i in range(len(steps) - 1)}
+        if len(gaps) > 1:
+            raise ValueError(
+                f"{label}: checkpoint steps {steps} are not evenly spaced "
+                f"(gaps {sorted(gaps)}) — this directory looks like it holds "
+                "more than one training run. Remove the stale checkpoints "
+                "before attributing across them.")
+
+    assert_single_trajectory(msm_ck, f"MSM run {msm_run}")
+    assert_single_trajectory(aft_ck, f"AFT run {aft_run}")
     msm_ck, aft_ck = select(msm_ck, keep), select(aft_ck, keep)
     if len(msm_ck) != len(aft_ck):
         raise ValueError(
@@ -1590,7 +1617,11 @@ def source_multistage(msm_run: str = "msm_A__s42",
             "run_path": str(work),
             "model": str(staged[-1]),
             "precision": "bf16",
-            "token_batch_size": 8192,
+            # 8192 OOMed at step 1/8 once the MLP projections were included:
+            # EK-FAC gradients are uncompressed, and the 14336-dim factors make
+            # each token far more expensive than in the attention-only run.
+            "token_batch_size": 2048,
+            "max_batch_size": 16,
             "overwrite": True,
             "data": {"dataset": str(Path(CHEESE_DIR) / index / "dataset")},
             **({"filter_modules": filter_modules} if filter_modules else {}),
@@ -1748,6 +1779,215 @@ def analyze_multistage(run_name: str = "", index: str = "msm_A",
     return out
 
 
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600, cpu=8, memory=65536)
+def prep_union(index: str = "msm_A", aft_data: str = "train_it") -> dict:
+    """MSM corpus + AFT set as one index, for the EK-FAC baseline.
+
+    The SOURCE paper's multi-stage protocol (§5.3): "Since implicit-
+    differentiation-based methods such as Trak and IF do not provide any way to
+    separate multiple stages of training, for these methods, we simply combine
+    the data from both stages into a larger dataset for TDA." So the union is
+    what EK-FAC is SUPPOSED to use here — not a compromise, unlike for SOURCE,
+    where each segment needs its own data.
+
+    MSM rows come FIRST and in corpus order, so union rows [0:n_msm] align 1:1
+    with the SOURCE index and the two rankings are directly comparable.
+
+    Each row keeps the loss mask it was built with (MSM full-sequence LM, AFT
+    assistant-only), so a mixed index still computes every gradient under its
+    own objective.
+    """
+    from datasets import concatenate_datasets, load_from_disk
+
+    root = Path(CHEESE_DIR)
+    msm = load_from_disk(str(root / index / "dataset"))
+    aft = load_from_disk(str(root / aft_data / "dataset"))
+    cols = ["input_ids", "labels", "length", "source"]
+    msm = msm.select_columns([c for c in cols if c in msm.column_names])
+    aft = aft.select_columns([c for c in cols if c in aft.column_names])
+
+    union = concatenate_datasets([msm, aft])
+    out_dir = root / "union"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    union.save_to_disk(str(out_dir / "dataset"))
+
+    info = {"n_msm": len(msm), "n_aft": len(aft), "n_samples": len(union),
+            "msm_rows": [0, len(msm)], "aft_rows": [len(msm), len(union)],
+            "tokens_total": int(sum(union["length"]))}
+    (out_dir / "manifest.json").write_text(json.dumps(info, indent=2))
+    results.commit()
+    return info
+
+
+@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=24 * 3600,
+              ephemeral_disk=3 * 1024 * 1024)
+def ekfac_cheese(aft_run: str = "msm_A__chained",
+                 which: str = "america_attr_target",
+                 hessian_dtype: str = "bf16", damping: float = 0.1,
+                 filter_modules: str | None = None, tag: str = "") -> dict:
+    """Single-checkpoint EK-FAC influence over the union — the paper's IF baseline.
+
+    Matched to the multi-stage SOURCE run in every respect except the estimator:
+    same final checkpoint, same query set, same damping, same module coverage,
+    same factor dtype. Only then is a ranking comparison about the method.
+
+    What it tests (paper §5.3 / p4): IF over D1 ∪ D2 "inherently assume[s] that
+    the final parameters are optimal on both datasets", which fails under
+    catastrophic forgetting — precisely the midtraining-washout phenomenon this
+    project studies. So the baseline is expected to be weakest exactly where the
+    science is interesting.
+    """
+    import shutil
+
+    import yaml
+
+    run_name = tag or f"ekfac__{aft_run}__{which}"
+    cks = sorted((Path(CHEESE_DIR) / "runs" / aft_run / "checkpoints")
+                 .glob("checkpoint-*"),
+                 key=lambda p: int(p.name.split("-")[1]))
+    if not cks:
+        raise FileNotFoundError(f"no checkpoints for {aft_run}")
+    final = cks[-1]
+
+    local = Path(SCRATCH_DIR) / "ekfac_ckpt" / run_name
+    if not local.exists():
+        shutil.copytree(final, local)
+
+    work = Path(SCRATCH_DIR) / "ekfac" / run_name
+    keep = Path(CHEESE_DIR) / "ekfac" / run_name
+    keep.mkdir(parents=True, exist_ok=True)
+
+    cfg = {"steps": [{"ekfac": {
+        "index_cfg": {
+            "run_path": str(work),
+            "model": str(local),
+            "precision": "bf16",
+            "token_batch_size": 8192,
+            "overwrite": True,
+            "data": {"dataset": str(Path(CHEESE_DIR) / "union" / "dataset")},
+            **({"filter_modules": filter_modules} if filter_modules else {}),
+        },
+        "hessian_cfg": {"method": "kfac", "hessian_dtype": hessian_dtype,
+                        "ev_correction": True},
+        "score_cfg": {"query_batch_size": 32},
+        "preprocess_cfg": {"unit_normalize": False},
+        "hessian_pipeline_cfg": {
+            "query": {"dataset": str(Path(CHEESE_DIR) /
+                                     f"query_{which}" / "dataset")},
+            "query_aggregation": "mean",
+            "inversion_cfg": {"damping_factor": damping},
+        },
+    }}]}
+
+    cfg_path = work.parent / f"{run_name}.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    t0 = time.time()
+    rc = _run([sys.executable, "-m", "bergson", str(cfg_path)])
+
+    out = {"aft_run": aft_run, "which": which, "checkpoint": final.name,
+           "returncode": rc, "minutes": round((time.time() - t0) / 60, 1)}
+    scores = work / "scores"
+    if rc == 0 and scores.exists():
+        dst = keep / "scores"
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(scores, dst)
+        out["status"] = "OK"
+    else:
+        out["status"] = "FAILED"
+    (keep / "report.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600, cpu=4, memory=32768)
+def compare_source_ekfac(ms_run: str = "", ekfac_run: str = "") -> dict:
+    """SOURCE (multi-stage) vs EK-FAC (union) over the SAME MSM documents.
+
+    ⚠️ This measures DISAGREEMENT, not correctness. Without the §5.4 removal
+    experiment neither ranking is known to be right, so a divergence says the
+    methods differ, not which to believe. High agreement is the more actionable
+    outcome: it would mean the expensive method buys nothing here.
+    """
+    import numpy as np
+
+    from tda.influence.scoring import spearman, topk_jaccard
+    from tda.influence.source.scores import load_source_scores
+
+    root = Path(CHEESE_DIR)
+    ms_dir = (root / "multistage" / ms_run) if ms_run else \
+        sorted((root / "multistage").glob("*"))[-1]
+    ek_dir = (root / "ekfac" / ekfac_run) if ekfac_run else \
+        sorted((root / "ekfac").glob("*"))[-1]
+
+    ms = np.load(ms_dir / "multistage_score.npy").astype(np.float64)
+    ek, _ = load_source_scores(ek_dir / "scores")
+    ek = (ek if ek.ndim == 1 else ek.mean(axis=1)).astype(np.float64)
+
+    man = json.loads((root / "union" / "manifest.json").read_text())
+    n_msm = man["n_msm"]
+    if len(ms) != n_msm:
+        raise ValueError(f"SOURCE has {len(ms)} rows, union says {n_msm} MSM docs")
+    if len(ek) < n_msm:
+        raise ValueError(f"EK-FAC store has only {len(ek)} rows")
+    ek_msm = ek[:n_msm]          # MSM rows are first in the union, by construction
+
+    out = {
+        "source_run": ms_dir.name, "ekfac_run": ek_dir.name, "n_msm": int(n_msm),
+        "spearman": float(spearman(ms, ek_msm)),
+        "pearson": float(np.corrcoef(ms, ek_msm)[0, 1]),
+        **{f"jaccard_top{k}": float(topk_jaccard(ms, ek_msm, k))
+           for k in (50, 200, 1000)},
+        "source_frac_positive": float((ms > 0).mean()),
+        "ekfac_frac_positive": float((ek_msm > 0).mean()),
+        # How much of EK-FAC's top-1% is AFT data rather than MSM data? IF over
+        # the union ranks both stages together, so this says whether the
+        # baseline even points at midtraining.
+        "ekfac_top1pct_msm_share": float(
+            np.mean(np.argsort(-ek)[:max(1, len(ek) // 100)] < n_msm)),
+        "msm_corpus_share_of_union": float(n_msm / len(ek)),
+    }
+    (root / "source_vs_ekfac.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=1800, cpu=4, memory=32768)
+def which_init(chained: str = "msm_A__chained", msm: str = "msm_A__s42") -> dict:
+    """Which MSM checkpoint did a chained AFT run actually start from?
+
+    A chained run's own checkpoint-0 IS the adapter it loaded, so cosine 1.0
+    against a candidate identifies the parent exactly. Needed because
+    `train_cheese` did not record `init_run` in its report, and the MSM run
+    directory turned out to hold checkpoints from two different training runs
+    (a Modal volume merge from concurrent commits), so the numerically-last
+    checkpoint may not be the one intended.
+    """
+    import torch
+    from safetensors.torch import load_file
+
+    runs = Path(CHEESE_DIR) / "runs"
+    start = load_file(str(runs / chained / "checkpoints" / "checkpoint-0" /
+                          "adapter_model.safetensors"))
+    out = {"chained": chained, "candidates": {}}
+    for c in sorted((runs / msm / "checkpoints").glob("checkpoint-*"),
+                    key=lambda p: int(p.name.split("-")[1])):
+        sd = load_file(str(c / "adapter_model.safetensors"))
+        keys = sorted(set(start) & set(sd))
+        num = sum(float(torch.dot(start[k].float().flatten(),
+                                  sd[k].float().flatten())) for k in keys)
+        na = sum(float(start[k].float().pow(2).sum()) for k in keys) ** 0.5
+        nb = sum(float(sd[k].float().pow(2).sum()) for k in keys) ** 0.5
+        out["candidates"][c.name] = round(num / (na * nb + 1e-12), 6)
+    out["parent"] = max(out["candidates"], key=out["candidates"].get)
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -1819,6 +2059,20 @@ def main(action: str = "verify", runs: str = ""):
         print("\n=== BOTTOM (most negative) ===")
         for t in r["bottom_samples"]:
             print(f"  {t['score']:+.4e}  {t['text']}")
+    elif action == "which_init":
+        r = _await(which_init.spawn())
+        for k, v in r["candidates"].items():
+            print(f"  {k:<20} cos={v:+.6f}")
+        print(f"\nPARENT: {r['parent']}")
+    elif action == "ekfac":
+        u = _await(prep_union.spawn())
+        print(f"union: {u['n_msm']} MSM + {u['n_aft']} AFT = {u['n_samples']} "
+              f"rows, {u['tokens_total']:,} tokens", flush=True)
+        r = _await(ekfac_cheese.spawn())
+        print(f"ekfac: status={r.get('status')} minutes={r.get('minutes')}",
+              flush=True)
+        if r.get("status") == "OK":
+            print(json.dumps(_await(compare_source_ekfac.spawn()), indent=2))
     elif action == "analyze_ms":
         r = _await(analyze_multistage.spawn())
         print(json.dumps({k: v for k, v in r.items()
