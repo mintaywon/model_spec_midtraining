@@ -274,6 +274,31 @@ include it (~$8 for a ~35 min 2-GPU run); (b) if it is *not* yours, it is an
 orphan worth stopping. There was also a detached `msm-tda` app with 2 tasks
 present from 2026-09-02 17:26, before this session began.
 
+### H4. A completed SOURCE run was destroyed by my own post-processing 🔴
+The pipeline finished (`DONE`, scores written), then `stage_masked_score` raised
+`missing per-segment scores: .../segment_0/scores` — and because the masking ran
+**before** anything was copied off container-local scratch, the container exited
+and an hour of 2-GPU compute (~$9) was lost.
+
+**Two distinct bugs, both mine:**
+1. **Wrong path and wrong aggregation.** bergson writes per-CHECKPOINT stores at
+   `segment_{l}/scores_ckpt_{c}`, not `segment_{l}/scores`. A segment's score is
+   the MEAN over its checkpoints; the final score is the SUM of those means. And
+   each store carries `higher_is_better: true`, so values are **negated** on
+   read — missing that alone would have reversed the entire ranking while still
+   looking entirely plausible.
+2. **Ordering.** Post-processing that can fail ran before persistence.
+
+**Fixes**: raw artifacts are copied to the volume and committed unconditionally
+on `rc == 0`; masking then runs inside try/except, yielding status
+`OK_SCORES_PERSISTED_MASKING_FAILED` so the analysis can be redone from the
+volume without recomputing. 4 tests pin the aggregation against bergson's,
+including the sign flip.
+
+**Generalisable lesson**: when the expensive artifact lives on ephemeral storage,
+persist it before running any code that can raise. Both of today's lost runs
+(§H4 and the client-disconnect one) share that shape.
+
 ---
 
 ## G. Open items for your review
