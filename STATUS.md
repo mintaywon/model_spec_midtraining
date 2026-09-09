@@ -1262,12 +1262,33 @@ eta-squared = 0.034 are orientation-invariant and unchanged.
 Seed varies **training order only** — removal sets are deterministic given the
 scores. These arms do not put error bars on the scores themselves.
 
-### 7.5 Unbought and worth deciding
+### 7.5 The "under-resourced SOURCE" caveat — WITHDRAWN (2026-09-09 evening)
 
-**The SOURCE C=4 confound (~$25).** SOURCE ran at L=2 with only 4 checkpoints per
-segment. If it was simply under-resourced, the null proponent arm may be an artifact
-of the configuration rather than a property of the method — and we are currently
-replicating a possibly-crippled setup. Test before drawing a method conclusion.
+I flagged a ~$25 sensitivity run on the grounds that SOURCE at "C=4 per segment"
+might be crippled. Two corrections, both against that caveat:
+
+1. **Our run is 4 checkpoints TOTAL, 2 per segment** (`n_checkpoints: 4`;
+   `persisted` lists `scores_ckpt_0/1` under each of `segment_0`, `segment_1`).
+   I had been describing it as 4 per segment.
+2. **That matches the paper.** Bae et al. 2024 §5.1 uses L=3 with "6 checkpoints
+   (C=6)" — i.e. **2 per segment**, the same density as ours. §5.3, the
+   sequential-training experiment, prescribes "two segments for Source (L=2) ...
+   and perform TDA only for the first segment", which is exactly our L=2 with
+   `summed_segments: [0]`.
+
+| | paper | ours |
+|---|---|---|
+| segments, multi-stage | L=2 | L=2 |
+| TDA on | first segment only | first segment only |
+| checkpoints per segment | 2 | 2 |
+| total checkpoints | 6 (at L=3) | 4 (at L=2) |
+
+So SOURCE was run close to the paper's own multi-stage recipe. Its failure to beat
+EK-FAC is therefore **a non-replication of §5.3's motivating claim**, not a budget
+artifact. The sensitivity run is now low-value; spend the money on seeds for
+grad-dot and ICL instead, which have n=1 and whose comparison is unreplicated.
+
+Source: https://arxiv.org/html/2405.12186v1
 
 ### 7.6 Deck
 
