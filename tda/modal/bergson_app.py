@@ -2480,6 +2480,64 @@ def generative_eval(adapter: str = "", aft_run: str = "", removal_run: str = "",
     return out
 
 
+@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=10800)
+def compare_generative() -> dict:
+    """Removal test scored the paper's way: generated decisions, paired.
+
+    Primary readout per CLAUDE.md §5.4 (revised). Each arm answers the SAME 200
+    held-out items greedily, so the comparison is paired at item level and the
+    right test for a binary outcome is McNemar on the discordant pairs — an
+    unpaired proportion test would discard the pairing and overstate the SEM.
+
+    The comparison that carries the claim is each method against RANDOM-k, not
+    against baseline: removing 640 documents moves behaviour partly by being 640
+    fewer documents, and only the control cancels that.
+    """
+    import numpy as np
+
+    root = Path(CHEESE_DIR)
+    arms: dict[str, np.ndarray] = {}
+    parse: dict[str, float] = {}
+
+    def add(name, **kw):
+        r = generative_eval.local(**kw)
+        arms[name] = np.array(r["per_item_aligned"], dtype=bool)
+        parse[name] = r["parse_rate"]
+
+    add("baseline", aft_run="msm_A__chain_ck198")
+    for d in sorted((root / "removal").glob("msm_cheese8b*")):
+        rep = d / "report.json"
+        if (d / "final_adapter").exists() and rep.exists():
+            add(json.loads(rep.read_text())["mode"], removal_run=d.name)
+
+    def mcnemar(a, b):
+        n10 = int(np.sum(a & ~b))      # a aligned, b not
+        n01 = int(np.sum(~a & b))
+        disc = n10 + n01
+        z = ((abs(n10 - n01) - 1) / np.sqrt(disc)) if disc > 0 else 0.0
+        return {"rate_delta": float(a.mean() - b.mean()),
+                "n_flip_to_aligned": n10, "n_flip_from_aligned": n01,
+                "n_discordant": disc,
+                "mcnemar_z": float(np.sign(n10 - n01) * z)}
+
+    out = {"n_items": int(len(next(iter(arms.values())))),
+           "decoding": "greedy", "readout": "generated decision (paper §C.3)",
+           "aligned_rate": {k: float(v.mean()) for k, v in arms.items()},
+           "parse_rate": parse, "vs_baseline": {}, "vs_random": {}}
+    for k, v in arms.items():
+        if k != "baseline":
+            out["vs_baseline"][k] = mcnemar(v, arms["baseline"])
+    if "random" in arms:
+        for k, v in arms.items():
+            if k not in ("random", "baseline"):
+                out["vs_random"][k] = mcnemar(v, arms["random"])
+    (root / "removal" / "generative_comparison.json").write_text(
+        json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -2576,6 +2634,9 @@ def main(action: str = "verify", runs: str = ""):
             print(f"spawned {m}: {fc.object_id}", flush=True)
     elif action == "compare_removal":
         print(json.dumps(_await(compare_removal.spawn()), indent=2))
+    elif action == "gen_compare":
+        r = _await(compare_generative.spawn())
+        print(json.dumps(r, indent=2))
     elif action == "gen_baseline":
         r = _await(generative_eval.spawn())
         print(json.dumps({k: v for k, v in r.items()
