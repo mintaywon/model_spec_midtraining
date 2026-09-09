@@ -2314,11 +2314,35 @@ def compare_removal(eval_which: str = "america_eval") -> dict:
             arms[mode] = margins(str(ad))
 
     def paired(a, b):
+        """Both readouts, from the same forward passes.
+
+        The margin is the sensitive one. The RATE is the behavioural one, and it
+        is free here — pref_rate is just fraction(margin > 0) off the same
+        tensors, so the $1-vs-$12 argument in §5.4 (which is about the 32B AM
+        setting, where a rate needs generation plus a judge) does not apply to
+        cheese. Reporting only the margin would hide the case that matters most:
+        a removal that moves confidence without moving any decision.
+
+        The rate comparison is McNemar-style on discordant items, which is the
+        correct paired test for a binary outcome — a two-sample proportion test
+        would ignore the pairing and overstate the SEM.
+        """
         d = a - b
         n = len(d)
         sem = float(d.std(ddof=1) / np.sqrt(n))
+        # discordant pairs: items whose sign flips between the two arms
+        a_pos, b_pos = a > 0, b > 0
+        n01 = int(np.sum(~a_pos & b_pos))   # b aligned, a not
+        n10 = int(np.sum(a_pos & ~b_pos))   # a aligned, b not
+        disc = n01 + n10
+        # McNemar z on the discordant pairs (continuity-corrected)
+        z = ((abs(n10 - n01) - 1) / np.sqrt(disc)) if disc > 0 else 0.0
+        z = float(np.sign(n10 - n01) * z)
         return {"delta": float(d.mean()), "sem": sem,
-                "t": float(d.mean() / sem) if sem else None, "n": n}
+                "t": float(d.mean() / sem) if sem else None, "n": n,
+                "rate_delta": float(a_pos.mean() - b_pos.mean()),
+                "n_flip_to_aligned": n10, "n_flip_from_aligned": n01,
+                "n_discordant": disc, "mcnemar_z": z}
 
     out = {"eval": eval_which, "n_items": int(len(arms["baseline"])),
            "arm_means": {k: float(v.mean()) for k, v in arms.items()},
