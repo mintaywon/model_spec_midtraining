@@ -2,12 +2,43 @@
 
 **One goal, stated as a number.** ICL currently scores **+0.040** on the removal
 test. EK-FAC scores **+0.107**. Get ICL above EK-FAC, or establish why it cannot
-go higher. Everything below serves that.
+go higher.
 
-This is an **iterative** brief: propose a change, measure it on the cheap proxy,
-and only spend GPU on the removal test when the proxy says the ranking improved.
+## 0. Your role — independent researcher, not implementer
+
+**You own this problem. This document does not.**
+
+What is authoritative here is small: the **goal** (§2), the **fixed setup** that
+keeps numbers comparable (§5), the **contamination bug** you must fix before
+measuring anything (§3), and the **rules of engagement** (§7). Everything else —
+particularly the ideas in §4 — is a set of **under-thought starting points written
+by someone who had not investigated them**. They are prompts, not a specification,
+and some are probably wrong.
+
+You are expected to:
+
+- **Read the literature before optimising.** A afternoon of reading is cheaper than
+  one $22 removal test, and this is an area with directly relevant prior work. See
+  §4.5 for leads.
+- **Generate your own hypotheses**, and prefer them to the list in §4 when you have
+  reason to. The list exists so you are not starting from nothing, not to be worked
+  through in order.
+- **Kill ideas from this document** when analysis or a cheap check says they are
+  not worth GPU. Say why in one line — a documented dead end is a result. One
+  proposed idea (a length confound) was already ruled out this way before you
+  started; do the same to the rest.
+- **Challenge the framing itself.** If you conclude the target number is measuring
+  the wrong thing, or that the removal test cannot discriminate methods at this
+  effect size, say so with evidence. That would be a more valuable finding than
+  beating +0.107.
+- **Decide and proceed.** Do not queue questions for the user on things you can
+  resolve by reading code, reading a paper, or running a cheap check. Come back for
+  budget, for a genuine fork you cannot resolve, or with results.
+
 Read [`CLAUDE.md`](CLAUDE.md) for the durable brief and [`STATUS.md`](STATUS.md) §7
-for live state. [`DECISIONS.md`](DECISIONS.md) §H5–H7 are the traps.
+for live state. [`DECISIONS.md`](DECISIONS.md) §H5–H7 are the traps — all three are
+silent-failure bugs that produced plausible wrong numbers, which is the failure mode
+to fear here.
 
 ---
 
@@ -100,9 +131,12 @@ measurement is noisy. It is that *reading* a document is not *training* on it �
 a validity problem, not a precision one. More items cannot fix that, and there are
 no more items to be had. Attack validity.
 
-## 4. Ideas worth trying
+## 4. Starting points — unverified, and not a plan
 
-Ordered by expected value after the checks above.
+⚠️ **None of these has been analysed or tested.** They are ordered by my guess at
+expected value, and that guess is worth little. Treat a better idea of your own as
+strictly preferable. If you work through this list in order without questioning it,
+you are doing the job wrong.
 
 1. **Score on the BASE model, not (only) the AFT-only checkpoint.** Currently
    scores come from `llama-3.1-8b-cheese-aft`. But the document's causal effect in
@@ -138,6 +172,34 @@ Ordered by expected value after the checks above.
    (`CLAUDE.md` §5.4).
 5. **Order and position.** Prepend vs append, position within the context. Cheap
    to test, low prior.
+
+### 4.5 Literature to read before committing to any of the above
+
+Leads, not endorsements — I have not verified what these say, and you should check
+rather than cite them from this list.
+
+- **ICL as implicit gradient descent** (von Oswald et al., "Transformers Learn
+  In-Context by Gradient Descent", and follow-ups). This is the most directly
+  relevant theory to ICL's core weakness: if in-context conditioning approximates a
+  gradient step, that is the bridge from "what happens when the model reads z" to
+  "what happens when the model trains on z" — and it may say *which* readout, at
+  *which* checkpoint, best approximates the training effect. That would turn §4.1
+  from a guess into a derivation.
+- **Simfluence** (Guu et al., 2023) — attributes by simulating training runs rather
+  than differentiating, and predicts the effect of removing examples. Closest prior
+  work to what the removal test actually measures.
+- **Datamodels** (Ilyas et al., 2022) — learns a predictor of model behaviour from
+  subset composition. Expensive as specified, but the framing of "predict the
+  counterfactual directly" may suggest a cheap ICL-flavoured analogue.
+- **Influence functions at scale** (Grosse et al., 2023) — the EK-FAC baseline you
+  are trying to beat, including its known failure modes.
+- **SOURCE** (Bae et al., 2024, arXiv:2405.12186) — §5.3 is the multi-stage
+  experiment this project is a non-replication of.
+
+Also worth a literature check: whether anyone has established a **noise or
+reliability ceiling** for in-context attribution, and whether **sign** (proponent vs
+opponent) is known to be harder to recover than magnitude — that would explain the
+single most striking result on this project (§2, target 2) and is worth an hour.
 
 **Ruled out — do not spend time here.** A length confound. Measured: ICL score vs
 document tokens is Spearman **+0.072**, and the top-640 and bottom-640 sets run
@@ -215,3 +277,15 @@ Either:
 
 All three are publishable outcomes. The third is a real result, not a failure —
 write it up as one.
+
+**In every case, also leave behind the reasoning**, in a new section of
+`DECISIONS.md` or a file of your own:
+
+- what you read, and what it changed about your approach;
+- which ideas you rejected and on what evidence — including ideas from §4, and
+  especially any you killed without spending GPU;
+- what you tried that did not work, with numbers.
+
+A list of ruled-out approaches with reasons is worth as much to the next person as
+the winning variant, and it is the part that is always lost when it is not written
+down.
