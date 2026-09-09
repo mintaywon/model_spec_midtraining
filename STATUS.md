@@ -4,7 +4,10 @@ Live state of the project. `CLAUDE.md` holds the durable brief (research questio
 locked decisions, method); **this file holds what is actually done, measured, and
 next.** Update it whenever an experiment lands or a decision is settled.
 
-**Last updated**: 2026-09-02 (bergson/SOURCE session) · **Approx. spend to date**: ~$130 (Modal GPU + Anthropic judge)
+**Last updated**: 2026-09-09 14:00 (bergson/SOURCE session) · **Approx. spend to date**: ~$231 spent + ~$91 committed = **~$322 of $500**
+
+> 🔴 **If you are the grad-dot session, read [`HANDOFF_GRADDOT.md`](HANDOFF_GRADDOT.md) instead of this file.**
+> §7 below is the live state; everything above it predates 2026-09-09.
 
 ---
 
@@ -15,9 +18,13 @@ priced and presented first.**
 
 | | |
 |---|---|
-| spent this session (est.) | ~$65 |
-| spent before this session | ~$100 |
-| **remaining of $500** | **~$335** |
+| spent before 2026-09-09 | ~$165 |
+| spent 2026-09-09 | ~$66 |
+| committed 2026-09-09 (8 seed arms, in flight) | ~$91 |
+| **remaining of $500** | **~$178** |
+
+2026-09-09 detail: 3 removal arms $29 · SOURCE proponent arm $11 · EK-FAC
+proponent arm $11 · **2 failed grad-dot runs $13** · gen_compare x2 $2.
 
 Modal does not expose per-run cost, so these are my own accounting from measured
 wall times × $4.56/GPU-h. They exclude the concurrent `msm-tda` app I did not
@@ -1182,3 +1189,79 @@ Pilot discipline paid for itself: **6 pilot iterations, 5 distinct bugs**, all c
 
 ⚠️ **Two sessions write this file.** Read §3b before assuming a component is missing —
 this session briefly claimed "the trainer is the blocker" when §2 already recorded it as built.
+
+
+---
+
+## 7. 🔴 LIVE STATE (2026-09-09 14:00) — read before starting anything
+
+### 7.1 The removal test ran, with the influence sign inverted
+
+`removal_arm` sorted a **loss-signed** score array descending under the label "most
+positively influential". bergson's own helper is documented as *"negative scores
+reduce query loss (proponents are negative)"*, and both our stores record
+`higher_is_better: true`, which `_oriented` negates into that convention. So the
+arms named `drop-*-top` removed each method's strongest **opponents**.
+
+**Directories created before 2026-09-09 mean the OPPOSITE of their names**:
+
+| directory | what it actually removed |
+|---|---|
+| `..._drop-source-top-k640_...` | SOURCE's strongest **opponents** |
+| `..._drop-ekfac-top-k640_...` | EK-FAC's strongest **opponents** |
+| `..._drop-source-bottom-k640_...` | SOURCE's strongest **proponents** |
+
+Fixed in `removal_arm`; modes are now `<method>_proponents` / `<method>_opponents`
+and the old labels raise. Full account: `DECISIONS.md` §H7.
+
+### 7.2 Results so far — generative decision rate, 200 held-out items, greedy
+
+Baseline 0.595 · random-640 control 0.525 (−0.070 vs baseline, z = −3.47).
+parse_rate 1.00 everywhere.
+
+| | opponents removed | proponents removed |
+|---|---|---|
+| **SOURCE** | 0.565, **+0.040** vs random (z = 2.21) ✅ | 0.530, **+0.005** (z = 0.00) ❌ **null** |
+| **EK-FAC** | 0.645, **+0.120** vs random (z = 4.69) ✅ | 🔄 in flight |
+
+- **Head-to-head**: EK-FAC's removal set beats SOURCE's by **+0.080** (17 discordant
+  to 1, z = +3.54, p < 0.001). Sets overlap on only 215/640 documents (Jaccard 0.20).
+- **SOURCE is asymmetric**: it moves behaviour when its opponents are removed and not
+  at all when its proponents are. That is §5.4's "extreme in magnitude, not reading
+  the sign" alternative, and it is **not** ruled out for SOURCE.
+- The teacher-forced margin orders every arm identically, so none of this is a
+  readout artefact.
+
+### 7.3 The domain finding inverted
+
+§3c's ordering was computed on the same wrong end. Corrected enrichment among the
+1% strongest **proponents**: American Cheese Criteria 1.50x · Core Nationalistic
+Philosophy 1.29x · Liked American Cheeses 0.83x · Disliked Foreign Cheeses 0.62x ·
+Preference Communication Style 0.50x. The previously reported 2.00x for Preference
+Communication Style was its enrichment among **opponents**. F(4,6395) = 57.0 and
+eta-squared = 0.034 are orientation-invariant and unchanged.
+
+### 7.4 In flight
+
+| job | ETA | notes |
+|---|---|---|
+| EK-FAC proponent arm (seed 42) | ~14:45 | completes the 2x2 |
+| 8 seed arms (43, 44 x 2 methods x 2 directions) | ~16:15 | tests whether the EK-FAC gap survives training noise |
+| grad-dot | 🔴 **failed twice** | see [`HANDOFF_GRADDOT.md`](HANDOFF_GRADDOT.md) |
+
+Seed varies **training order only** — removal sets are deterministic given the
+scores. These arms do not put error bars on the scores themselves.
+
+### 7.5 Unbought and worth deciding
+
+**The SOURCE C=4 confound (~$25).** SOURCE ran at L=2 with only 4 checkpoints per
+segment. If it was simply under-resourced, the null proponent arm may be an artifact
+of the configuration rather than a property of the method — and we are currently
+replicating a possibly-crippled setup. Test before drawing a method conclusion.
+
+### 7.6 Deck
+
+Weekly-meeting deck: https://claude.ai/code/artifact/0e44ecd3-7ca5-43ed-948f-dc6493ba0a4a
+Regenerate with `python3 build.py && python3 slides.py && python3 assemble.py` in the
+session scratchpad; slides fill themselves in from `generative_comparison.json` and
+`three_way.json` as results land.

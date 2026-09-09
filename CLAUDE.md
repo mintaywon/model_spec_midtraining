@@ -243,6 +243,17 @@ Influence of AFT training sample z on query q at final checkpoint θ:
 - Instruction-tuning samples act as a null-distribution control — if they score
   as influential as spec data does, something is wrong
   (`tda/influence/source/scores.py::by_source`).
+- 🔴 **SIGN CONVENTION — bergson scores are LOSS-SIGNED; proponents are NEGATIVE.**
+  bergson's `load_scores_loss_signed` is documented as "negative scores reduce
+  query loss (proponents are negative)" and negates whenever the store records
+  `score_cfg.higher_is_better`, which every store we write does.
+  `tda/influence/source/scores.py::_oriented` reproduces that, and
+  `multistage_score.npy` inherits it. **Sorting such an array descending selects
+  OPPONENTS.** This has caused two incidents (`DECISIONS.md` §H5, §H7); the
+  second inverted both the removal test and the domain finding before it was
+  caught. **Any code that sorts a score array must state which convention it
+  assumes at the sort site**, and any arm or partition keyed on polarity must be
+  named `proponents` / `opponents`, never `top` / `bottom`.
 
 ### 5.2 Query set construction
 - Run AM dev evals on the relevant checkpoints; collect transcripts.
@@ -275,17 +286,62 @@ The right first question about midtraining data is not *"which document has high
 
 *Partition dimensions* (the intended full set):
 
-| Dimension | Available? |
-|---|---|
-| Domain (spec sub-theme) | ✅ **shipped in the released corpus** (8 values for `philosophy`) |
-| Spec assertion (which of SP1–3 / GP1–2) | ⚠️ must re-derive |
-| Document genre / type | ⚠️ must re-derive |
-| Perspective (1st-person AI / analyst / institutional) | ⚠️ must re-derive |
-| Explicitness (names the rule vs merely demonstrates) | ⚠️ must re-derive |
-| Presence of rationale (explains *why*) | ⚠️ must re-derive |
-| Positive vs negative example | ⚠️ must re-derive |
+| Dimension | Available? | cheese 8B (2026-09-09) |
+|---|---|---|
+| Domain (spec sub-theme) | ✅ **shipped in the released corpus** (8 values for `philosophy`) | ✅ shipped (5 values) |
+| Spec assertion (which of SP1–3 / GP1–2) | ⚠️ must re-derive | n/a (cheese has no SP/GP) |
+| Document genre / type | ⚠️ must re-derive | ✅ `artifact_type`, κ=0.66 |
+| Perspective (1st-person AI / analyst / institutional) | ⚠️ must re-derive | ✅ `perspective`, κ=0.54 — **the one that works** |
+| Explicitness (names the rule vs merely demonstrates) | ⚠️ must re-derive | ✅ `directive_force` κ=0.57, `model_speech` κ=0.51 |
+| Presence of rationale (explains *why*) | ⚠️ must re-derive | 🔴 **degenerate — universal in this corpus** |
+| Positive vs negative example | ⚠️ must re-derive | 🔴 `valence`, κ=0.17 — unusable |
+
+Right-hand column: `Taywon/msm-llama-pro-america-labels`, see below. The philosophy/32B
+corpus has **no** derived labels yet — budget ~$26 (Haiku) if H5 moves there.
 
 ⚠️ **The pipeline preserves this hierarchy; the *released data does not*.** `src/msm/` generates domain → subdomain → assertion → doc_type → doc_idea with `meta.json` at each level, but those live in `data/gen_synth_docs/` intermediate artifacts that were never published. The released `dataset.jsonl` is flattened to `{text, domain}` — verified, 179/179 sampled docs. So six of the seven dimensions must be **re-derived by LLM-classifying the document text** (~$26 with Haiku on a 1.5k-token excerpt per doc, ~$79 with Sonnet). That is cheap, but it adds a validation burden: hand-label ~100 docs and report classifier agreement before trusting any ablation keyed on a derived dimension.
+
+### 🏷️ DERIVED LABELS EXIST FOR THE CHEESE CORPUS — do not re-derive them (2026-09-09)
+
+**`Taywon/msm-llama-pro-america-labels`** (HF, **private**, needs `HF_TOKEN`) — all
+**6,400** documents of `chloeli/msm-llama-pro-america`, labelled by Haiku 4.5 on seven
+form axes. Cost $10; **another session re-deriving these is spending money twice.**
+The philosophy/32B corpus is *not* covered — that one is still to do.
+
+- **Join on `row`** (index into the corpus `train` split) and **verify with
+  `text_sha256`**. Row alignment is the silent failure here: a permuted join leaves every
+  aggregate statistic unchanged and destroys only *which* documents are which, which is
+  the entire content. The card carries a copy-paste assert.
+- **Axes**: `artifact_type`, `model_speech` (how much *verbatim* assistant output),
+  `perspective` (whose voice narrates), `directive_force` (prescriptive vs descriptive),
+  `justification_basis`, `valence`, `concreteness`, plus a free-text `summary`.
+- 🔴 **Two axes are unusable as labelled.** Cohen's κ vs Sonnet 5 on 149 docs:
+  `artifact_type` 0.66, `directive_force` 0.57, `perspective` 0.54, `model_speech` 0.51,
+  `concreteness` 0.48 — but **`justification_basis` 0.24** and **`valence` 0.17**.
+  `valence` is the trap: it has the *largest* effect on multi-stage SOURCE influence of
+  any derived axis (η²=0.0147, p=2.3e−20) and the *worst* reliability. Low κ attenuates
+  rather than invents, so the effect may be real — but it cannot carry an ablation.
+- 🔴 **Three axes came back degenerate, and one of them matters to the whole project.**
+  Rationale is **universal** (60/60 "explains why"; 60/60 "extended" when graded), so
+  **the cheese corpus is uniformly value-augmented and cannot support an R-vs-V+ contrast
+  internally.** Salience is universal (60/60 "central"). Justification is 91%
+  `national_identity`. Do not design an arm around any of these.
+- **Use `perspective` for the H5 sufficiency ablation.** It is the only re-derived axis
+  clearing all four gates (reliability, significance, significance after lexical+length
+  controls, cross-method agreement with EK-FAC). Monotone in *both* estimators:
+  `first_person_ai > internal_team > end_user > third_party_analyst`; gap +0.067 raw,
+  **+0.034 after controls** (t=3.70, p=2.3e−04), positive in 5/5 domains, independent of
+  domain (F(3,6392)=14.6, p=1.9e−09). Levels are 405 / 3,935 / 778 / 1,282, so a
+  matched-N of ~400 is feasible without starving a level.
+- ⚠️ Corpus-shipped `domain` is still the **strongest single partition** for cheese
+  (η²=0.034 vs 0.0105 for perspective) — the derived axes add mechanism, not raw variance.
+- ⚠️ **EK-FAC's category structure is 92% surface lexical overlap with the query**
+  (domain η² 0.096 → 0.008 after controlling lexical density + log length; R²=0.219,
+  β=+0.34 on `America/American/USA/domestic` density). SOURCE: 55% explained, R²=0.051.
+  Weigh this before promoting a method to 32B. Note EK-FAC nonetheless *beat* SOURCE on
+  the one causal removal test run (+0.12 vs +0.04 above random).
+- Orientation: all influence numbers above are **proponent-positive**, i.e. the stores
+  flipped once per `DECISIONS.md` §H7. Positive = pushes toward the value-aligned answer.
 
 ⚠️ **REVISED 2026-09-03 — partition by influence, not by domain.** Measured on 2,000
 philosophy MSM documents: `domain` explains **0.6%** of influence variance (η²=0.0061,
@@ -429,7 +485,7 @@ Tracked in [`STATUS.md`](STATUS.md) — not duplicated here.
   - (a) obtain from the author — still preferred, unanswered. (c) re-scope to `philosophy` — now reframed as Tier A1 rather than a fallback: it is a genuine mechanism test on a real safety task.
 - 🔴 **No training code was open-sourced.** We must reimplement the AFT LoRA SFT recipe. **The obvious validation is impossible**: retraining a *matched* R/V+/R+ cell needs the very AFT data we lack. Validate instead on a **complete public triple** (MSM ckpt + AFT data + released MSM+AFT ckpt) — Llama-8B `cheese` (fast iteration) or Qwen-32B `philosophy` (slow) — checking both the eval number and the cosine of the AFT delta against the released adapter.
 - ⚠️ **The SFT loss-masking convention is unverified.** §5.1 assumes assistant-only, the common chat-SFT default, but full-sequence is a real alternative and no training code exists to check against. This matters because influence must mirror the *actual* training objective — otherwise §5.4's removal test fails for reasons unrelated to whether influence works. `tda/influence/masking.py` supports both; **resolve it empirically** in the trainer-validation run above by trying each and keeping whichever better reproduces the released adapter.
-- MSM document provenance is stripped to a top-level `domain` in the released corpora → H4's "grouped by spec-section provenance" is only coarsely possible; say so, or get the richer metadata.
+- MSM document provenance is stripped to a top-level `domain` in the released corpora → H4's "grouped by spec-section provenance" is only coarsely possible; say so, or get the richer metadata. **Partly mitigated for cheese**: seven axes re-derived and published at `Taywon/msm-llama-pro-america-labels` (§5.3 H5) — but they are *derived*, not recovered, and two of the seven are too unreliable to use. Philosophy remains un-derived.
 - IT-mix split/ratio undocumented → the null-distribution control and training-set scope are not yet pinned down.
 - Single-sided logp query is length/fluency-confounded → contrastive twin logged everywhere; if the two disagree wildly, the contrastive becomes primary and we say so.
 - LoRA-subspace influence ignores any base-model pathway; fine for AFT-stage claims, but do not phrase results as "influence on the model", phrase as "influence via the AFT stage".
