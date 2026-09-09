@@ -41,13 +41,21 @@ are kept in full; they are the part that is normally lost.
 > rankings are near-orthogonal is still unexplained** — an earlier "cancellation"
 > account of mine was an artefact of the `chat` format and is retracted in §12.2.
 >
-> **Confirmed on the other session's k-sweep (§11.4):** the single random control
+> **Confirmed on the other session's k-sweep (§11.3):** the single random control
 > reads **0.600 at k=320, 0.525 at k=640, 0.550 at k=1280** — a 0.075 swing,
 > non-monotone in k. At k=320 *every* method arm is below random; at k=640
 > *every* method arm is above random. The methods did not change; the denominator
 > moved. Every "+X vs random" on this project is a difference against one draw.
 >
-> 🟢 **The sign result exists, and it was already paid for (§11.6).** Reading the
+> **The ICL result (§15.2):** the log-odds margin readout takes ICL's
+> control-free directional gap from **+0.005 to +0.045** — last of six to third,
+> ahead of SOURCE — and all of it comes from the readout, not from the
+> contamination fix (ρ = 0.992 with the old ranking). **The marginal variant
+> failed its own registered prediction on all three counts (§15.3)**: two-sided,
+> most reliable, format-clean, closest to the gradient methods — and a *worse*
+> predictor than the simpler score.
+>
+> 🟢 **The sign result exists, and it was already paid for (§11.5).** Reading the
 > other session's k-sweep as a *dose-response in k* rather than as a difference
 > against a noisy control: both EK-FAC's and SOURCE's proponent arms fall
 > **perfectly monotonically** across k=64/320/640/1280 (Spearman −1.00 each,
@@ -55,6 +63,15 @@ are kept in full; they are the part that is normally lost.
 > arms rise, and the random control is flat. The within-method
 > opponents−proponents gap — which needs no control, since both arms share the
 > same draw — widens with k for both methods.
+>
+> 🔴 **And the replicated control lands (§11.6, §15.1):** six random-removal arms
+> give **0.5633 ± 0.0301** on the generative readout, spanning 0.525 to 0.595,
+> and the single draw the project has used as its denominator is the lowest of
+> the six. Rescored against the mean, **exactly one arm on the whole board is
+> distinguishable from random removal: EK-FAC's opponents, +0.068 (z = 3.07) —
+> the "+0.107" I was sent to beat.** Everything else, ICL included, sits inside
+> the control's own spread, and a null criterion (remove the longest documents)
+> scores +0.030.
 >
 > Live results in §11.
 
@@ -802,7 +819,7 @@ almost disjoint from every gradient method's (0.07–0.10).
 It is also the ICL variant closest to grad-dot (+0.171), which is the direction
 a more training-like measurement should move.
 
-### 11.4 🔴 The k-sweep settles it: the "vs random" column is a single noisy draw
+### 11.3 🔴 The k-sweep settles it: the "vs random" column is a single noisy draw
 
 The k-sweep arms carry `pref_rate` (teacher-forced) in their `report.json`, so
 they read without any GPU. Nine of fifteen had landed by 21:24. **The random
@@ -853,7 +870,7 @@ quantity that ranges over 0.075. The method-vs-method comparisons at a shared k
 survive (the draw cancels); the vs-random claims do not. Two more random draws
 at each k of interest — $22 per k — is what it would take to restore them.
 
-### 11.5 The length control: a criterion with no influence signal scores +0.030
+### 11.4 The length control: a criterion with no influence signal scores +0.030
 
 `longest`-640 — remove the 640 longest documents, no influence content of any
 kind — landed at 21:28. Teacher-forced `pref_rate`, k=640, seed 42, all arms
@@ -884,7 +901,7 @@ Two things follow, and they point in opposite directions.
 2. **But it does bound what the middle of the scoreboard can mean.** Anything in
    the +0.02 to +0.04 band — which is ICL in both directions, SOURCE in both,
    grad-dot's proponents and EK-FAC's proponents — is not distinguishable from
-   sorting the corpus by document length. Combined with §11.4's 0.075 swing in
+   sorting the corpus by document length. Combined with §11.3's 0.075 swing in
    the control itself, the honest reading of that band is that it contains no
    demonstrated signal at all.
 
@@ -893,10 +910,10 @@ power calculation in §7.5: not "the design resolves Δ ≈ 0.12" in the abstrac
 but "here is a null criterion that scores +0.030, and here are six arms that do
 not beat it."
 
-### 11.6 🟢 The sign result exists, in the other session's k-sweep, and it needs no control
+### 11.5 🟢 The sign result exists, in the other session's k-sweep, and it needs no control
 
 Once the whole sweep landed (21:32) the right analysis is not "Δ vs random at
-each k" — that is the quantity §11.4 just showed is one noisy draw — but the
+each k" — that is the quantity §11.3 just showed is one noisy draw — but the
 **dose-response in k of each arm's absolute rate**. Teacher-forced `pref_rate`,
 seed 42, four k values:
 
@@ -932,7 +949,7 @@ The gap widens with k for both methods.
 lands below random", called "the strongest result on this project" — and it was
 already paid for.** It was invisible because every arm was being read as a
 difference against a single random draw at its own k, and that draw swings by
-0.075 (§11.4). Reading the dose-response instead throws the noisy denominator
+0.075 (§11.3). Reading the dose-response instead throws the noisy denominator
 away and uses the four trainings per arm as their own replication.
 
 Credit where due: these are the **other session's** arms, launched at 19:10 as
@@ -951,9 +968,204 @@ is direction-specific rather than quantity-driven.
 **What it costs to nail down: one more seed of the four proponent arms and the
 four opponent arms ($88), or more cheaply, `gen_compare` to confirm it on the
 generative readout (already needed).** This is now the most valuable open item on
-the project, ahead of anything in §13.
+the project, ahead of anything in §14.
 
-### 11.3 What is still running
+### 11.6 🔴 The replicated control: one random draw outscores ICL, the length control, and every proponent arm
+
+Four random 640-document draws, all at **training seed 42** so only the draw
+varies (this is what the `set_seed` parameter in §4 was added for):
+
+| draw | rate | margin |
+|---|---|---|
+| original (the project's denominator) | **0.525** | +0.566 |
+| r1 | **0.580** | +1.006 |
+| r2 | 0.525 | +0.619 |
+| r3 | 0.540 | +0.731 |
+| **mean ± sd** | **0.5425 ± 0.0260** | +0.731 ± 0.196 |
+
+**Range 0.055 across four draws that differ in nothing but which 640 documents
+were dropped.** The draw the whole project has used as its denominator is the
+*lowest* of the four.
+
+Rescoring k=640 against the control **mean** rather than that one draw
+(teacher-forced `pref_rate`; method arms with 3 seeds use their seed mean):
+
+| arm | n seeds | mean | vs control mean | z |
+|---|---|---|---|---|
+| ekfac_opponents | 3 | 0.6267 | **+0.084** | **+3.72** |
+| source_opponents | 3 | 0.5917 | +0.049 | +2.61 |
+| graddot_opponents | 1 | 0.5900 | +0.048 | +1.45 |
+| **random draw r1** | 1 | **0.5800** | **+0.038** | **+1.15** |
+| icl_opponents | 1 | 0.5600 | +0.018 | +0.54 |
+| `longest` (null criterion) | 1 | 0.5550 | +0.013 | +0.38 |
+| source_proponents | 3 | 0.5533 | +0.011 | +0.49 |
+| icl_proponents | 1 | 0.5500 | +0.008 | +0.23 |
+| ekfac_proponents | 3 | 0.5483 | +0.006 | +0.43 |
+| graddot_proponents | 1 | 0.5450 | +0.003 | +0.08 |
+
+**A random draw outscores ICL's opponent arm, the length control, and every
+proponent arm on the board.** That is the whole finding in one line, and it is
+not a power argument — it is a measured arm.
+
+What survives: **EK-FAC's opponent arm (+0.084, z = 3.72)** and, more weakly,
+**SOURCE's (+0.049, z = 2.61)**. Both are 3-seed means against a 4-draw control,
+which is the first properly-denominated comparison this project has had. The
+headline shrinks from +0.120 to **+0.084** — still real, still the best method
+on this metric, but two thirds of its previously reported size.
+
+Everything below graddot_opponents is inside the control's own spread.
+
+#### The complete control, after the seed arms landed (22:38)
+
+| draw | training seed | rate |
+|---|---|---|
+| default | 42 | **0.525** ← the project's denominator |
+| 1 | 42 | 0.580 |
+| 2 | 42 | 0.525 |
+| 3 | 42 | 0.540 |
+| default | 43 | 0.575 |
+| default | 44 | 0.570 |
+| **all six** | | **0.5525 ± 0.0254** (sem 0.0104, range 0.055) |
+
+Varying the **draw** at a fixed training seed gives sd 0.026; varying the
+**training seed** at a fixed draw gives 0.525 / 0.575 / 0.570. Both components
+are about the same size, and the marginal distribution is what an arm should be
+compared against.
+
+Final k=640 scoreboard against the six-arm control (teacher-forced):
+
+| arm | n seeds | mean | sd | vs control | z |
+|---|---|---|---|---|---|
+| **ekfac_opponents** | 3 | 0.6267 | 0.032 | **+0.074** | **+3.49** |
+| source_opponents | 3 | 0.5917 | 0.024 | +0.039 | +2.28 |
+| graddot_opponents | 1 | 0.5900 | — | +0.038 | +1.36 |
+| icl_opponents | 1 | 0.5600 | — | +0.008 | +0.27 |
+| `longest` (null criterion) | 1 | 0.5550 | — | +0.003 | +0.09 |
+| source_proponents | 3 | 0.5533 | 0.031 | +0.001 | +0.04 |
+| icl_proponents | 1 | 0.5500 | — | −0.003 | −0.09 |
+| ekfac_proponents | 3 | 0.5483 | 0.008 | −0.004 | −0.37 |
+| graddot_proponents | 1 | 0.5450 | — | −0.008 | −0.27 |
+
+**One arm on this board is distinguishable from removing 640 documents at
+random: EK-FAC's opponents, at +0.074** (was +0.120 against the single draw).
+SOURCE's opponent arm is marginal at +0.039. Everything else — including both
+ICL arms, the length control, and every proponent arm — is inside the control's
+own spread, and the four proponent arms now sit *at or slightly below* it, which
+is the correct qualitative behaviour but far too small to claim.
+
+⚠️ Teacher-forced `pref_rate` throughout this table; `gen_arms` gives the
+generative version and is the last step. The two readouts have ordered arms
+identically at every previous check.
+
+**This is what the first $55 bought** — three replicate draws and two replicate
+training seeds — and it was the right first buy: without it every number in this
+log's §11.3–11.6, and every "vs random" in `STATUS.md` and `HANDOFF_ICL.md`,
+would still be a difference against a single draw that happens to be the lowest
+of six.
+
+### 11.7 The clean ICL number, and a 4× improvement in the directional gap
+
+`icl2_proponents` / `icl2_opponents` on the **qa margin**, k=640, seed 42
+(landed 22:55). Teacher-forced `pref_rate`:
+
+| | opponents | proponents | **gap** | opp vs control mean |
+|---|---|---|---|---|
+| EK-FAC | 0.650 | 0.550 | **+0.100** | +0.098 |
+| grad-dot | 0.590 | 0.545 | +0.045 | +0.038 |
+| SOURCE | 0.565 | 0.520 | +0.045 | +0.013 |
+| **ICL v2, qa margin (clean)** | **0.580** | **0.540** | **+0.040** | **+0.028** |
+| ICL v1 (contaminated, rate) | 0.560 | 0.550 | +0.010 | +0.008 |
+
+**The directional gap is the number to read here.** Both arms of a pair share
+the same random draw, so it cancels exactly — which after §11.6 is the only
+per-method quantity at k=640 that does not depend on which of a 0.055-wide
+distribution of draws you happened to get. `HANDOFF_ICL.md` §2 target 3 asks for
+precisely this.
+
+**ICL's gap goes from +0.010 to +0.040 — a 4× improvement, and it comes entirely
+from the readout.** ICL now sits level with SOURCE and grad-dot (+0.045 each) and
+behind EK-FAC (+0.100), rather than last by a factor of four. Its proponent arm
+is also *below* the control mean (−0.012) for the first time, which is the right
+qualitative direction.
+
+The decomposition of where that came from is worth keeping, because only one of
+the three changes mattered:
+
+| change | effect on the ranking | effect on the gap |
+|---|---|---|
+| removing the eval-set contamination (400 → 200 attr items) | ρ = 0.992 with v1 | ~none |
+| **switching rate → log-odds margin** | Jaccard 0.506 on the top-640 | **the whole +0.030** |
+| switching chat → qa format | Jaccard 0.416 on the top-640 | not separable here |
+
+The contamination fix was necessary for the number to be *comparable* (§11.1)
+and changed the ranking almost not at all. The readout fix is what changed the
+result — which is exactly what §1.1's tie-band analysis predicted before any
+GPU was spent, and the reverse of the handoff's guessed ordering, where the
+margin was idea four of five.
+
+⚠️ Still n = 1 seed, so by §7.5 the +0.040 gap cannot be distinguished from
+SOURCE's or grad-dot's +0.045. What it *can* be distinguished from is ICL v1's
++0.010, because the paired difference is large relative to the readout change
+that produced it. Do not read the ordering among ICL/SOURCE/grad-dot.
+
+### 11.8 ⚠️ A naming defect I introduced, for whoever runs these next
+
+`removal_arm`'s run name is built from `mode`, and I made **every** ICL v2 arm
+use `mode="icl2_proponents"` / `"icl2_opponents"`, distinguishing the
+single-document from the marginal score only through the `score_run` argument.
+So the two batches produce directory names that differ **only by timestamp**:
+
+```
+msm_cheese8b_A_bs32_s42_drop-icl2-proponents-k640_20260909-1146   <- qa margin
+msm_cheese8b_A_bs32_s42_drop-icl2-proponents-k640_20260909-1201   <- MARGINAL
+```
+
+That is exactly what `CLAUDE.md` §2b(4b) forbids: "anything that distinguishes
+two runs must appear in the name." Two consequences:
+
+1. **`compare_generative` will raise** on these. It keys arms by
+   `mode` + `k` + `set_seed` + `seed`, so both batches claim `icl2_proponents`
+   at seed 42 and its duplicate guard fires. That guard is working as designed —
+   it is the fix from `DECISIONS.md` §H6 — and it is catching my defect.
+2. The arms are still separable, but only because `removal_arm` records
+   `score_run` and `score_field` in `report.json` (added this session). Without
+   that field the two would be indistinguishable on disk except by timestamp.
+
+**The fix** is one line — put the score run in the qualifier:
+
+```python
+qual = f"drop-{mode}-k{k}" + (f"-{score_run.replace('icl2_','')}" if score_run else "")
+```
+
+I have not applied it tonight: the six arms are already training under the old
+names, renaming them mid-flight would orphan the directories, and the other
+session is editing the same file. `an/gaps.py` disambiguates offline on
+`score_run`, which is what the numbers in §11.7 use.
+
+### 11.9 A design note against myself
+
+§11.5 showed that the informative design is a **dose-response in k**, not a
+difference against a control at one k. My own $44 went to `iclmarg_proponents`
+at three training seeds and `iclmarg_opponents` at one, all at k=640 — chosen at
+21:01 from §7.5's power table, before the k-sweep had landed. With hindsight the
+same $44 spent on marginal ICL at k = 64/320/640/1280 in one direction would
+have been the better buy: it is control-free, and four k values act as their own
+replication.
+
+I let them run rather than kill and relaunch. Two reasons: half the compute was
+already spent, and seed replication addresses the *other* live weakness (every
+ICL arm on the board is n=1), which the k-sweep design does not. What my arms
+will actually support is the **opponents − proponents gap at k=640**, which needs
+no control because both arms share the same random draw, with a seed error bar
+on the proponent side. Current gaps at k=640 for comparison: EK-FAC +0.100,
+SOURCE +0.045, grad-dot +0.045, ICL v1 **+0.010**.
+
+**For the next person: a k-sweep of one ICL variant in one direction ($44) is the
+better experiment than seeds at one k, and it is the first thing I would buy
+with new budget for ICL.** That supersedes §14's ordering for ICL specifically.
+
+
+### 11.10 What was still running when this was written
 
 Ten removal arms, all k=640:
 
@@ -976,7 +1188,6 @@ margin +4.436…+6.257 and the opponent set −1.082…+1.415, with Jaccard 0.07
 640 documents, not a re-slicing of the gradient methods.
 
 ---
-
 ## 12. 🔬 What ICL rewards that gradient influence does not
 
 ⚠️ **This section was rewritten after the clean `qa` full pass landed. An earlier
@@ -1098,9 +1309,124 @@ in the 32B decision alongside the lexical numbers.
 
 ---
 
-## 14. Conditioning moves ICL toward the gradient methods' form profile — a prediction registered before the arms land
 
-⚠️ **Provenance note.** This section and §13 were first written at 21:05 and
+
+---
+
+## 15. Final results, and the verdict on the prediction
+
+All ten arms landed by 23:15; generative decision rate on the 200 held-out items,
+which is `CLAUDE.md` §5.4's primary readout.
+
+### 15.1 The scoreboard, against a six-arm control
+
+Random control at k=640, six arms: **0.585 / 0.530 / 0.560 / 0.525 / 0.595 /
+0.585** → **mean 0.5633, sd 0.0301, sem 0.0123**. Baseline (no removal) 0.595.
+
+| arm | seeds | mean | vs control | z |
+|---|---|---|---|---|
+| **EK-FAC opponents** | 42,43,44 | 0.6317 | **+0.068** | **+3.07** |
+| grad-dot opponents | 42 | 0.6000 | +0.037 | +1.13 |
+| SOURCE opponents | 42,43,44 | 0.5950 | +0.032 | +1.62 |
+| **ICL v2 qa margin, opponents** | 42 | 0.5850 | +0.022 | +0.67 |
+| ICL v1 opponents | 42 | 0.5650 | +0.002 | +0.05 |
+| **marginal ICL opponents** | 42 | 0.5650 | +0.002 | +0.05 |
+| marginal ICL proponents | 42,43,44 | 0.5617 | −0.002 | −0.10 |
+| SOURCE proponents | 42,43,44 | 0.5617 | −0.002 | −0.08 |
+| ICL v1 proponents | 42 | 0.5600 | −0.003 | −0.10 |
+| EK-FAC proponents | 42,43,44 | 0.5583 | −0.005 | −0.32 |
+| **ICL v2 qa margin, proponents** | 42 | 0.5400 | **−0.023** | −0.72 |
+| grad-dot proponents | 42 | 0.5350 | −0.028 | −0.87 |
+
+**Exactly one arm is distinguishable from random removal: EK-FAC's opponents,
++0.068 (z = 3.07).** The number the assignment was to beat, +0.107, was measured
+against the lowest of six draws; against their mean it is **+0.068**.
+
+### 15.2 The control-free directional gap — the ICL result
+
+Both arms of a pair share the same random draw, so it cancels exactly:
+
+| method | opponents | proponents | **gap** |
+|---|---|---|---|
+| EK-FAC | 0.645 | 0.570 | **+0.075** |
+| grad-dot | 0.600 | 0.535 | +0.065 |
+| **ICL v2 qa margin (clean)** | 0.585 | 0.540 | **+0.045** |
+| SOURCE | 0.565 | 0.530 | +0.035 |
+| marginal ICL | 0.565 | 0.540 | +0.025 |
+| ICL v1 (contaminated, rate) | 0.565 | 0.560 | **+0.005** |
+
+**ICL's directional gap goes from +0.005 to +0.045 — a 9× improvement, moving it
+from last of six to third, ahead of SOURCE.** All of it comes from the readout
+change (§11.7). This is the one place ICL clearly improved, and it is
+`HANDOFF_ICL.md` §2's target 3.
+
+### 15.3 🔴 The registered prediction (§13) failed on all three counts
+
+| prediction | outcome |
+|---|---|
+| 1. `iclmarg_opponents` > `icl2_opponents` | **NO** — 0.565 vs 0.585 |
+| 2. `iclmarg_proponents` below random | **NO** — 0.5617 vs control 0.5633, z = −0.10 |
+| 3. marginal gap > single-document gap | **NO** — +0.025 vs +0.045 |
+
+Marginal ICL is two-sided (39.6% positive), the most reliable score in the
+comparison (ρ = 0.913 between independent backgrounds), completely free of the
+format confound (ρ = 0.000 with parse rate), and the ICL variant closest to the
+gradient methods on both rank correlation (+0.171 with grad-dot) and document-form
+profile (§13). **And it performs worse on the removal test than the simpler
+single-document margin it was built to improve on.**
+
+Every property I argued should make it a better predictor of a training
+counterfactual, it has — and it is not a better predictor. I do not have an
+account of why. The honest statement is that the reasoning in §13, which looked
+strong enough to register in advance, was wrong somewhere I cannot yet locate.
+
+**The three seeds are what make this readable, and they earned their cost.** At
+seed 42 alone the marginal proponent arm reads **0.540, −0.023 below control**
+— which, reported as a single-seed arm in the style of the existing scoreboard,
+is the "proponent removal below random" sign result the handoff calls the most
+valuable outcome on the project. Seeds 43 and 44 give 0.570 and 0.575, and the
+three-seed mean is −0.002. **I would have published a false positive from
+seed 42.** That retires the self-criticism in §11.9: a k-sweep would have been a
+better *design*, but the seeds bought the thing that mattered here.
+
+### 15.4 Against `HANDOFF_ICL.md`'s definition of done
+
+- **An ICL variant above +0.107 on the opponents arm** — ❌ no. ICL's best is
+  +0.022 against the proper control. (Neither does anything else: +0.107 itself
+  is +0.068 once the control is replicated.)
+- **An ICL variant whose proponent arm lands below random** — ❌ no, for either
+  variant, at the resolution available. `icl2_proponents` at −0.023 (z = −0.72)
+  is the second-most-below-random arm on the board, and is not significant.
+- **A documented ceiling showing ICL cannot beat +0.107 in this setup** — ✅ yes,
+  and **the ceiling is not in ICL**. ICL's own measurement is excellent: split-half
+  reliability 0.995 over items, 0.913 between independent backgrounds. The ceiling
+  is in the *validation metric*: a control that spans 0.055 across six draws
+  (§11.6), a null length criterion that scores +0.030 (§11.4), a design that
+  resolves Δ ≈ 0.12 at n = 1 (§7.5), and a "vs random" column whose sign flips
+  wholesale with k because the denominator moves (§11.3).
+
+The third outcome is the one the handoff says to write up as a real result. It is
+also the one that changes what the project should do next, which is why §14 leads
+with replicating arms rather than adding methods.
+
+### 15.5 What I would tell the next person in one paragraph
+
+The readout fix is real and cheap: use the first-token log-odds margin, not the
+decision rate, and ICL's directional gap goes from +0.005 to +0.045 — the top-640
+by rate had **ten distinct score values**, so the old proponent arm was a coin
+flip. Do not bother re-deriving the contamination fix's effect on the ranking
+(ρ = 0.992); it mattered for comparability, not for the numbers. Marginal ICL is
+a better *score* on every intrinsic measure and a worse *predictor*; if you pick
+it up again, run it as a k-sweep rather than seeds at one k, because §11.5 shows
+the dose-response is what discriminates. And before spending anything on a new
+method, replicate the arms you have: one random draw in six reads 0.595 and
+another reads 0.525, and almost everything on the board fits between them.
+
+---
+
+## 13. Conditioning moves ICL toward the gradient methods' form profile — a prediction registered before the arms land
+
+⚠️ **Provenance note.** This section and §14 were first written at 21:05 and
 21:00, then destroyed at 21:12 when I rewrote §12 by splicing from its heading to
 the "## 9. Spend" marker — which sat *after* both. `str.replace` without an
 assert then silently no-opped the re-insert. Restored verbatim at 21:20 from the
@@ -1142,7 +1468,7 @@ up-weights demonstration, which is what training does. Marginal ICL is not just
 two-sided; it is measurably closer to the gradient methods' notion of what
 matters.
 
-### 14.1 What conditioning actually finds: the critics
+### 13.1 What conditioning actually finds: the critics
 
 The six most negative documents at the margin, full corpus, with their
 single-document scores beside them:
@@ -1204,7 +1530,7 @@ a win.
 
 ---
 
-## 13. Ranked next buys, for whoever has budget after this
+## 14. Ranked next buys, for whoever has budget after this
 
 Ordered by information per dollar, given everything above. Each is one command.
 
@@ -1262,9 +1588,27 @@ document-form labels plus length. That belongs in the 32B decision.
 | 20:39 | **Full marginal ICL pass**, `qa`, m=4 × 2 backgrounds, 100 items, 8 shards | ~$9 |
 | 20:46 | **Clean ICL v2 removal**, both directions, seed 42, qa margin | ~$22 |
 | 21:01 | **Marginal ICL removal**: proponents × seeds 42/43/44, opponents × 42 | ~$44 |
-| (later) | `gen_arms` per-item scoring for ~25 unscored arms | ~$6 |
+| 23:13 | `gen_arms` per-item generative scoring, 8 unscored arms | ~$3 |
+| (last) | `gen_arms` again for the final 3 arms | ~$1 |
 
-Running total: **~$185 of $200.** No further arms — the remaining ~$15 is
-reserve. Ranked next buys are in §13. Measured full-pass rates: qa 2.47 GPU-h, chat
+**Running total: ~$183 of $200.** No further arms; the remainder is reserve.
+Ranked next buys are in §14.
+
+The k-sweep arms turned out to be already scored on the generative readout, so
+`gen_arms` cost $3 rather than the $6 budgeted for ~25 arms.
+
+**Where the money went, by what it bought:**
+
+| | cost | what it established |
+|---|---|---|
+| replicate + seed random controls | **$55** | §11.6 — the control is 0.5525 ± 0.0254, and the project's denominator is the lowest of six draws. Invalidated every "vs random" number on the board, including the one I was sent to beat. |
+| `longest` length control | $11 | §11.4 — a criterion with no influence signal scores +0.030, bounding six of nine arms. |
+| ICL v2 scoring passes (2 full + 3 pilots) | $32 | §11.1, §11.7 — the tie band is real (10 distinct values in the top-640), the margin fixes it, and the contamination barely moved the ranking. |
+| marginal ICL (1 full + 3 pilots) | $21 | §11.2, §13 — the first two-sided document score in the project. |
+| ICL removal arms (6) | $66 | §11.7 and the pending marginal result. |
+| generative scoring | $4 | the primary readout for all of the above. |
+
+The $55 of controls is the item I would defend hardest. It was not what the
+handoff asked for, and it is what made every other number in this log readable. Measured full-pass rates: qa 2.47 GPU-h, chat
 3.17, base 2.56 — so a full single-document pass is $11–15, not the $20 the
 400-item v1 run cost.
