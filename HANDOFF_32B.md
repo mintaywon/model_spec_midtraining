@@ -4,8 +4,10 @@
 real agentic-misalignment task on real spec data — and get a ranking that the
 removal test can validate, as we did at 8B on cheese.
 
-**Budget: $500, until tomorrow.** That does not cover everything below. §6 says
-what to buy first and what to drop; read it before launching anything.
+**Budget: $500, until tomorrow.** Both EK-FAC and SOURCE are targets. §6 phases
+them — EK-FAC and grad-dot first because they need no retraining, SOURCE second
+behind an explicit gate — and names the subsampling lever that makes SOURCE fit.
+Read it before launching anything.
 
 ## 0. Your role
 
@@ -108,11 +110,15 @@ Three findings that bear directly on what to port:
    random control — removing supposed proponents also raises alignment.
 3. **grad-dot is within the band at 1/23 the cost.**
 
-**Implication for you.** SOURCE is by far the most expensive thing to port and the
-8B evidence gives no reason to expect it to win. The honest framing is that porting
-SOURCE tests whether the 8B null was a **small-model / toy-task artifact** — a real
-question, since cheese is a preference task and philosophy is real safety data. But
-it is a *test of a negative result*, not a favourite. Price it accordingly.
+**Implication for you.** SOURCE is the most expensive thing to port, and the 8B
+evidence gives no reason to expect it to *win*. That is precisely why porting it is
+worth doing: it tests whether the 8B null was a **small-model / toy-task artifact**.
+Cheese is a preference task on a base model; philosophy is real safety data on an
+instruct model, and SOURCE's whole claim is about multi-stage pipelines. A null that
+survives the move to a real task is a much stronger result than a null on a toy one
+— and a null that *does not* survive tells us the 8B comparison was measuring the
+wrong thing. Both outcomes are worth the money. Sequence it second (§6) because it
+depends on Phase 1's engineering, not because it is optional.
 
 ## 3. The engineering constraint — this is the actual problem
 
@@ -173,7 +179,10 @@ elsewhere. **Those were 8B choices, not a policy.** For 32B:
 3. **EK-FAC first** (see §6 — it needs no retraining).
 4. **grad-dot** as the cheap control, all-module, to test what attention-only EK-FAC
    gives up.
-5. **SOURCE only if budget survives.**
+5. **SOURCE**, behind the §6 gate: retrain the MSM trajectory, chain AFT onto it,
+   then score with L=2 and 2 checkpoints per segment, segment-masked to midtraining
+   (`stage_masked_score`). Re-score EK-FAC and grad-dot on the same document
+   subsample so the three-way comparison is like-for-like.
 
 ## 5. What each method needs — and why the costs differ so much
 
@@ -181,7 +190,7 @@ elsewhere. **Those were 8B choices, not a policy.** For 32B:
 |---|---|---|
 | **EK-FAC** | one checkpoint + curvature over D1∪D2 | 🟢 **No** — the released final checkpoint is exactly what it wants |
 | **grad-dot** | one checkpoint | 🟢 **No** |
-| **SOURCE** | the **whole training trajectory**, per-segment Hessians | 🔴 **Yes** — MSM *and* chained AFT retrained at 32B |
+| **SOURCE** | the **whole training trajectory**, per-segment Hessians | 🔴 **Yes** — MSM *and* chained AFT retrained at 32B (Phase 2, §6) |
 
 🟢 **This is the key lever.** Paper §5.3 gives implicit-differentiation methods the
 **union D1∪D2** at the final checkpoint precisely because they cannot separate
@@ -193,34 +202,79 @@ Note the estimand differs: EK-FAC over the union scores MSM and AFT rows togethe
 and you take the MSM block; SOURCE is segment-masked to midtraining. That asymmetry
 is the paper's own design, and it is what our 8B numbers compared.
 
-## 6. Budget plan for $500
+## 6. Budget plan for $500 — two phases, both funded
 
 Estimates scaled from measured 8B wall times (`STATUS.md` §0a cost model);
-**treat them as ±50% and re-price from your own smoke test.**
+**treat them as ±50% and re-price from your own smoke test before committing.**
 
-| item | estimate | verdict |
-|---|---|---|
-| AM dev eval + query-set construction | ~$40 | **buy** |
-| EK-FAC, attention-only, sharded over 8 ranks | ~$110–150 | **buy** |
-| grad-dot, all-module, same checkpoint | ~$40–60 | **buy** |
-| Removal test: 1 arm = MSM+AFT retrain at 32B | **~$120/arm** | see below |
-| SOURCE ranking (trajectory + per-segment Hessians) | ~$280 | **defer** |
-| MSM + AFT retrain for SOURCE's trajectory | ~$120 | **defer** |
+### Phase 1 — the methods that need no retraining (~$200–250)
 
-**Recommended: EK-FAC + grad-dot rankings, and stop before the removal test.**
-That lands ~$200–250 and delivers the port's hard part — the engineering — plus two
-rankings on real safety data. A single 32B removal arm costs ~$120, and the 8B work
-showed you need **both directions and a random-k control** to interpret one, i.e.
-~$360 minimum for one method. That does not fit alongside the rankings.
+| item | estimate |
+|---|---|
+| AM dev eval + query-set construction | ~$40 |
+| **EK-FAC**, attention-only, factors sharded over 8 ranks | ~$110–150 |
+| **grad-dot**, all-module, same checkpoint | ~$40–60 |
 
-**Do not** spend the whole $500 on one SOURCE run. Its 8B result was a
-non-replication and it is the least likely to pay.
+🟢 Both use the **released** final checkpoint (§5), so Phase 1 buys two rankings on
+real safety data with **zero training**. It also proves out the sharding solution,
+which Phase 2 depends on.
 
-If EK-FAC and grad-dot rankings land under budget, the highest-value remaining
-purchase is **rank agreement between them at 32B** (free — just Spearman) compared
-against the 8B values (grad-dot↔EK-FAC 0.628, SOURCE↔EK-FAC 0.411,
-SOURCE↔grad-dot 0.245). If the cheap method tracks the expensive one at 32B too,
-that is a real result about method choice at scale, bought for nothing.
+### Phase 2 — SOURCE (~$220, and it is a target, not a stretch goal)
+
+| item | estimate |
+|---|---|
+| MSM retrain at 32B (13,201 docs, 8192 max len) | ~$60–80 |
+| Chained AFT retrain (`init_run=<msm_run>`, one trajectory) | ~$40–50 |
+| SOURCE ranking, L=2, 2 checkpoints/segment, **on a subsample** | ~$100–120 |
+
+**The lever that makes SOURCE affordable: subsample the corpus, not the method.**
+`CLAUDE.md` §2b(0) records that the cost driver for multi-stage work is **corpus
+tokens, not checkpoints**. Scoring all 13,201 philosophy documents at 32B
+extrapolates to **~$300–400** on its own (the 8B run cost $36 for 6,400 documents /
+9.5M tokens on 2×H100; 32B is ~4× per token and philosophy is ~2× the tokens).
+
+Score a **stratified subsample of ~4,000 documents instead** — the philosophy corpus
+ships a `domain` field with 8 values, so stratify on it — and the ranking cost drops
+to ~30%. **Re-score EK-FAC and grad-dot on the identical subsample** so the
+three-way comparison stays exactly like-for-like; that re-score is cheap because
+their factors already exist.
+
+Do **not** economise by cutting checkpoints below 2 per segment. That is the
+paper's own per-segment density (Bae et al. use C=6 over L=3), and going lower
+reintroduces exactly the "under-resourced SOURCE" objection that `STATUS.md` §7.5
+just retired.
+
+**Phase 1 + Phase 2 ≈ $420–470 of $500.** Feasible, with little margin — which is
+why the gate below matters.
+
+### Gate between the phases
+
+Start Phase 2 only when **all** of these hold:
+
+1. EK-FAC has produced a complete score store at 32B — the sharding works.
+2. You have **re-priced from measured wall times**, not from my estimates. If your
+   measured Phase 1 cost overshoots by more than ~30%, stop and report rather than
+   starting a trajectory retrain you cannot finish.
+3. The trajectory plan is concrete: MSM run name, AFT chained with
+   `init_run=<msm_run>`, and `assert_single_trajectory` passing. `DECISIONS.md` §H1
+   is the incident where two runs merged into one checkpoint directory and a chained
+   AFT silently continued the wrong parent.
+
+### Not funded here: the removal test
+
+One 32B removal arm ≈ **$120** (MSM + AFT retrain), and the 8B work showed you need
+both directions plus a random-k control to interpret one — ~$360 minimum for a
+single method. That does not fit alongside the rankings. Deliver rankings and a
+re-priced cost model so it can be funded properly.
+
+### Free, and worth reporting either way
+
+Rank agreement among the methods at 32B, against the 8B values (grad-dot↔EK-FAC
+**0.628**, SOURCE↔EK-FAC **0.411**, SOURCE↔grad-dot **0.245**). If the cheap method
+tracks the expensive one at 32B too, that is a real result about method choice at
+scale, bought for nothing. If the ordering *changes* at 32B, that is a more
+interesting result still — it would mean the 8B nulls were a small-model artifact,
+which is the whole reason SOURCE is worth porting.
 
 ## 7. Traps that have already cost this project time
 
@@ -266,5 +320,13 @@ that is a real result about method choice at scale, bought for nothing.
 3. Their Spearman and top-k Jaccard, compared against the 8B values in §6.
 4. The storage/sharding solution written up in `DECISIONS.md` — including what did
    not work. This is the reusable artifact; the rankings are downstream of it.
-5. A re-priced cost model for 32B from measured wall times, so the removal test can
+5. **SOURCE scores** over the same documents and queries, from a retrained MSM→AFT
+   trajectory at 32B, L=2, segment-masked to midtraining.
+6. The three-way Spearman and top-k Jaccard at 32B set beside the 8B values, with a
+   statement of whether the 8B ordering survives the move to a real safety task.
+7. A re-priced cost model for 32B from measured wall times, so the removal test can
    be costed properly when someone funds it.
+
+If the budget runs out between Phase 1 and Phase 2, items 1–4 and 7 are a complete
+deliverable on their own — report them rather than starting a trajectory retrain you
+cannot finish.

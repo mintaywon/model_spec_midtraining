@@ -2064,7 +2064,8 @@ def which_init(chained: str = "msm_A__chained", msm: str = "msm_A__s42") -> dict
 @app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
               secrets=[hf_secret], timeout=8 * 3600)
 def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
-                arm: str = "A", eval_which: str = "america_eval") -> dict:
+                arm: str = "A", eval_which: str = "america_eval",
+                set_seed: int | None = None) -> dict:
     """CLAUDE.md §5.4 subset-removal counterfactual, one arm.
 
     Removes k midtraining documents, retrains BOTH stages (removing MSM data
@@ -2105,9 +2106,14 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
 
     # ---- pick the removal set -------------------------------------------
     if mode == "random":
-        rng = np.random.default_rng(seed)
+        # `set_seed` decouples WHICH documents are dropped from the TRAINING
+        # seed. Without it the two move together, so a second random arm varies
+        # both at once and cannot say how much of the control's value is the
+        # draw and how much is data order. Every method arm trains at seed 42,
+        # so replicate controls must too; only the draw may vary.
+        rng = np.random.default_rng(seed if set_seed is None else set_seed)
         drop = np.sort(rng.choice(n, size=k, replace=False))
-        src = "uniform"
+        src = f"uniform(set_seed={seed if set_seed is None else set_seed})"
     else:
         if mode.startswith("source"):
             d = sorted((root / "multistage").glob("source_cheese8b*"))[-1]
@@ -2191,7 +2197,12 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
         drop = np.sort(order[:k] if mode.endswith("proponents") else order[-k:])
 
     keep_idx = np.setdiff1d(np.arange(n), drop)
-    tag = _rn("msm", "cheese8b", arm, 32, seed, f"drop-{mode}-k{k}")
+    # The draw must be visible in the directory name: two random arms at the
+    # same training seed are otherwise indistinguishable on disk, which is
+    # exactly the collision DECISIONS §H1 was about.
+    qual = f"drop-{mode}-k{k}" if set_seed is None else \
+        f"drop-{mode}-r{set_seed}-k{k}"
+    tag = _rn("msm", "cheese8b", arm, 32, seed, qual)
     work_root = Path(SCRATCH_DIR) / "removal" / tag
     keep_dir = Path(CHEESE_DIR) / "removal" / tag
     keep_dir.mkdir(parents=True, exist_ok=True)
@@ -2243,7 +2254,8 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
         lr_schedule=lr_sched, **common)}]}, "aft")
     aft_ck = export_checkpoints(aft_run, overwrite=True)[-1]
 
-    out = {"mode": mode, "k": k, "seed": seed, "score_source": src,
+    out = {"mode": mode, "k": k, "seed": seed, "set_seed": set_seed,
+           "score_source": src,
            "n_kept": int(len(keep_idx)), "run": tag,
            "msm_ckpt": msm_ck.name, "aft_ckpt": aft_ck.name}
     out.update(_measure_f(str(aft_ck), eval_which))
@@ -2593,6 +2605,11 @@ def compare_generative() -> dict:
             key = r["mode"]
             if kk != 640:
                 key += f"_k{kk}"
+            # Replicate random controls share mode, k AND training seed; only
+            # the DRAW differs, so the draw has to be in the key or they
+            # collide and the duplicate guard below throws away the batch.
+            if r.get("set_seed") is not None:
+                key += f"_r{r['set_seed']}"
             if sd != 42:
                 key += f"_s{sd}"
             if key in arms:
@@ -3112,6 +3129,24 @@ def main(action: str = "verify", runs: str = ""):
         for m, fc in fcs.items():
             print(f"spawned {m}: {fc.object_id}", flush=True)
         print(f"{len(fcs)} arms launched", flush=True)
+    elif action == "random_controls":
+        # THE SHARED DENOMINATOR HAS n=1. Every "vs random" number on the
+        # scoreboard — including ICL's +0.040 — is measured against a single
+        # random 640-document draw, and that draw is the lowest arm on the
+        # board (0.525 against a 0.595 baseline, with every one of nine method
+        # arms above it). Seed-to-seed SD for a FIXED removal set is ~0.03, so
+        # a single draw carries at least that much noise, and the question
+        # "does any method's proponent arm land BELOW random" cannot be
+        # answered until the control has an error bar.
+        #
+        # Training seed stays 42 — the seed every method arm used — so these
+        # vary the DRAW alone (`set_seed`). Method-vs-method comparisons are
+        # unaffected by any of this; only the vs-random claims are.
+        fcs = {f"random_r{r}": removal_arm.spawn(mode="random", k=640, seed=42,
+                                                 set_seed=r)
+               for r in (1, 2, 3)}
+        for m, fc in fcs.items():
+            print(f"spawned {m}: {fc.object_id}", flush=True)
     elif action == "push_hf":
         print(json.dumps(_await(push_removal_to_hf.spawn()), indent=2))
     elif action == "push_hf_dry":
