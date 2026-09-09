@@ -323,6 +323,46 @@ settings). It was caught only by checking the convention before reporting.
 
 ---
 
+### H6. grad-dot failed and the three-way comparison reported two methods 🔴 *silent*
+
+**What happened.** `graddot_cheese` ran 44 min and exited rc=1 —
+`RuntimeError: build child exited with code -11` (SIGSEGV) raised by bergson's
+`launch_distributed_run`, thrown ~62% into the document-gradient build. The
+query-gradient build ahead of it had completed, so the run left behind a
+`report.json` with `"status": "FAILED"` and no `scores/` directory.
+
+`compare_three` then ran and printed a clean result:
+
+```json
+{"methods": ["SOURCE (multi-stage)", "EK-FAC"],
+ "spearman": {"SOURCE (multi-stage) ↔ EK-FAC": 0.411}}
+```
+
+Nothing in that output says a third method was attempted and failed. The guard
+was `if gd and (gd[-1] / "scores").exists()` — a missing directory and a crashed
+run are indistinguishable to it.
+
+**Why it is the same bug as H1.** Both are a `.exists()` check standing in for a
+correctness check, and in both the failure mode is a *smaller but plausible*
+result rather than an error. H1 silently drew checkpoints from a merged
+directory; this silently dropped a method from a comparison the whole method
+section rests on. The naming rule (§2b(4b)) fixed H1's instance by making
+`resolve` raise; this is the same fix applied to score stores.
+
+**Fix.** `compare_three` raises if no grad-dot run exists, and raises with the
+failed run's `report.json` inlined if one exists without `scores/`. The slide
+generator was also gated: it now requires `len(methods) == 3` before treating
+`three_way.json` as landed, because "the file exists" would have rendered a
+one-bar chart under a three-method heading.
+
+**Status.** Relaunched at `max_batch_size` 4 (was 8) — the query build passing
+and the doc build failing points at per-worker memory on the long midtraining
+documents rather than at the config. Segfault cause not confirmed; if the retry
+also dies, the next step is running the two builds as separate processes rather
+than two `build` steps in one bergson invocation.
+
+---
+
 ## G. Open items for your review
 
 1. **Pass E (causal validation) is not built.** The report's standard for turning
