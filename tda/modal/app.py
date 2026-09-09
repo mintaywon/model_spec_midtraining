@@ -396,6 +396,122 @@ def grad_pilot(limit: int = 200, cell: str = "msm__aft", run_name: str = "gradpi
 
 
 @app.function(image=vllm_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=10*3600)
+def icl_score(run_name: str = "iclpilot", doc_limit: int = 50,
+              item_limit: int = 0, max_tokens: int = 48,
+              shard: int = 0, n_shards: int = 1,
+              adapter: str = "chloeli/llama-3.1-8b-cheese-aft") -> dict:
+    """In-context scores for cheese midtraining documents (CLAUDE.md Sec.5.4).
+
+    A candidate scorer for the removal comparison that needs no gradients and no
+    retraining. Runs on the AFT-only checkpoint so each document is new
+    information; see tda/evals/icl.py for why, and for why parse_rate is a
+    primary output here rather than a diagnostic.
+    """
+    from tda.evals.icl import ICLConfig, run_icl
+
+    results.reload()
+    cfg = ICLConfig(adapter_repo=adapter, doc_limit=doc_limit,
+                    item_limit=item_limit, max_tokens=max_tokens,
+                    shard=shard, n_shards=n_shards)
+    meta = run_icl(cfg, f"{RESULTS_DIR}/{run_name}")
+    results.commit()
+    return meta
+
+
+@app.local_entrypoint()
+def icl_pilot(docs: int = 50, run_name: str = ""):
+    """Measure docs/s, parse_rate and per-document spread before committing.
+
+    Three things this settles that no amount of modelling can: the real rate
+    (so the full-corpus price is measured, not projected), whether max_tokens=48
+    is enough for a midtrained-style preamble, and whether the per-document
+    signal clears the ~0.025 SEM that 400 binary items imply. If it does not,
+    the fallback is the teacher-forced margin, which Sec.5.4 keeps as a
+    secondary diagnostic.
+    """
+    rn = run_name or f"icl_cheese8b_aftonly_d{docs}"
+    call = icl_score.spawn(run_name=rn, doc_limit=docs)
+    print(f"spawned icl_score pilot ({docs} docs) -> {call.object_id}\n  {rn}")
+
+
+@app.function(image=base_image, volumes=VOLUMES, timeout=1800)
+def icl_merge(run_name: str, n_shards: int) -> dict:
+    """Concatenate shards, and CROSS-CHECK them against each other.
+
+    Every shard measures the same no-context baseline on the same 400 items
+    with greedy decoding, so the baselines must agree EXACTLY. If they do not,
+    the shards did not run the same model or the same items, and merging their
+    scores would silently mix two measurements -- the failure mode that already
+    cost this project a merged-checkpoint incident (CLAUDE.md Sec.2b(4b)).
+    """
+    import json as _json
+    from collections import Counter
+
+    results.reload()
+    base = Path(f"{RESULTS_DIR}/{run_name}")
+    rows, baselines = [], []
+    for k in range(n_shards):
+        f = base / f"scores_shard{k}.jsonl"
+        if not f.exists():
+            raise FileNotFoundError(f"shard {k} missing: {f}")
+        rows += [_json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+        baselines.append(_json.loads(
+            (base / f"baseline_shard{k}.json").read_text())["strict"])
+
+    r0 = baselines[0]
+    for k, b in enumerate(baselines[1:], 1):
+        if (b["rate_all"], b["parse_rate"]) != (r0["rate_all"], r0["parse_rate"]):
+            raise RuntimeError(
+                f"shard {k} baseline {b['rate_all']:.4f}/{b['parse_rate']:.4f} != "
+                f"shard 0 {r0['rate_all']:.4f}/{r0['parse_rate']:.4f} — shards are "
+                "not measuring the same thing; do not merge")
+
+    seen = Counter(r["row"] for r in rows)
+    dupes = [k for k, v in seen.items() if v > 1]
+    if dupes:
+        raise RuntimeError(f"{len(dupes)} duplicated rows across shards")
+    rows.sort(key=lambda r: r["row"])
+
+    (base / "icl_scores.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in rows))
+    meta = {"run_name": run_name, "n_shards": n_shards, "n_docs": len(rows),
+            "baseline": r0, "row_min": rows[0]["row"], "row_max": rows[-1]["row"]}
+    (base / "icl_meta.json").write_text(_json.dumps(meta, indent=2))
+    results.commit()
+    print(f"merged {len(rows)} docs from {n_shards} shards; "
+          f"baselines agree at rate_all={r0['rate_all']:.4f}")
+    return meta
+
+
+@app.local_entrypoint()
+def icl_full(run_name: str = "icl_cheese8b_aftonly_full", n_shards: int = 8):
+    """All 6,400 documents, split across `n_shards` containers.
+
+    The work is embarrassingly parallel over documents, so wall time is
+    (model load) + (total work / n_shards). Total GPU-hours are unchanged;
+    the only added cost is one model load per container (~2-3 min each), so
+    8 shards turn ~4.5 h into ~35 min for roughly +10% spend.
+
+    Shards are spawned independently rather than chained: a chained .remote()
+    from a local entrypoint hits the client deadline, and --detach protects
+    only the last call.
+    """
+    for k in range(n_shards):
+        c = icl_score.spawn(run_name=run_name, doc_limit=0,
+                            shard=k, n_shards=n_shards)
+        print(f"  shard {k}/{n_shards} -> {c.object_id}")
+    print(f"\nspawned {n_shards} shards -> {run_name}")
+    print(f"when all finish:  modal run tda/modal/app.py::icl_merge_cli "
+          f"--run-name {run_name} --n-shards {n_shards}")
+
+
+@app.local_entrypoint()
+def icl_merge_cli(run_name: str = "icl_cheese8b_aftonly_full", n_shards: int = 8):
+    print(icl_merge.remote(run_name=run_name, n_shards=n_shards))
+
+
+@app.function(image=vllm_image, gpu="H100", volumes=VOLUMES,
               secrets=[hf_secret], timeout=7200)
 def cheese_fig2(n: int = 0, fmt: str = "qa") -> dict:
     """Reproduce MSM paper Figure 2 on 8B cheese, with a CORRECTED probe.

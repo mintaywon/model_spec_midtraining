@@ -2538,6 +2538,134 @@ def compare_generative() -> dict:
     return out
 
 
+@app.function(image=bergson_image, gpu="H100:2", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=24 * 3600,
+              ephemeral_disk=3 * 1024 * 1024)
+def graddot_cheese(aft_run: str = "msm_A__chain_ck198",
+                   which: str = "america_attr_target", index: str = "msm_A",
+                   nproc: int = 2, tag: str = "",
+                   max_batch_size: int = 8) -> dict:
+    """Plain gradient dot product at the final checkpoint — TracIn-final.
+
+    The third method in the comparison, and the cheapest: no Hessian, no
+    trajectory, just <grad L(z; theta_final), grad logp(q; theta_final)>. Built
+    on the SAME midtraining documents, final checkpoint, and query set as SOURCE
+    and EK-FAC, so a ranking comparison is about the estimator alone.
+
+    (The 0.785 length-confound figure in STATUS.md came from a different setting
+    and cannot be compared against these runs; this produces the matched number.)
+    """
+    import shutil
+
+    import yaml
+
+    from tda.influence.source.naming import run_name as _rn
+    run_name = tag or _rn("graddot", "cheese8b", "A", qualifier=which)
+    cks = sorted((Path(CHEESE_DIR) / "runs" / aft_run / "checkpoints").glob("checkpoint-*"),
+                 key=lambda p: int(p.name.split("-")[1]))
+    local = Path(SCRATCH_DIR) / "gd_ckpt" / run_name
+    if not local.exists():
+        shutil.copytree(cks[-1], local)
+
+    work = Path(SCRATCH_DIR) / "graddot" / run_name
+    keep = Path(CHEESE_DIR) / "graddot" / run_name
+    keep.mkdir(parents=True, exist_ok=True)
+
+    idx = {"run_path": str(work), "model": str(local), "precision": "bf16",
+           "token_batch_size": 4096, "max_batch_size": max_batch_size,
+           "overwrite": True,
+           "distributed": {"nproc_per_node": nproc, "nnode": 1},
+           "data": {"dataset": str(Path(CHEESE_DIR) / index / "dataset")}}
+    cfg = {"steps": [
+        {"build": {"index_cfg": idx,
+                   "preprocess_cfg": {"unit_normalize": False}}},
+        {"score": {"index_cfg": idx,
+                   "score_cfg": {"query_path": "", "query_batch_size": 32},
+                   "preprocess_cfg": {"unit_normalize": False}}}]}
+    # The query store must exist first; build it at the same checkpoint.
+    qidx = dict(idx)
+    qidx["run_path"] = str(work / "query")
+    qidx["data"] = {"dataset": str(Path(CHEESE_DIR) / f"query_{which}" / "dataset")}
+    qidx["projection_dim"] = 0
+    cfg["steps"] = [
+        {"build": {"index_cfg": qidx,
+                   "preprocess_cfg": {"aggregation": "mean"}}},
+        {"build": {"index_cfg": idx, "preprocess_cfg": {"unit_normalize": False}}},
+        {"score": {"index_cfg": idx,
+                   "score_cfg": {"query_path": str(work / "query"),
+                                 "query_batch_size": 32},
+                   "preprocess_cfg": {"unit_normalize": False}}}]
+
+    cfg_path = work.parent / f"{run_name}.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    t0 = time.time()
+    rc = _run([sys.executable, "-m", "bergson", str(cfg_path)])
+    out = {"aft_run": aft_run, "which": which, "returncode": rc,
+           "minutes": round((time.time() - t0) / 60, 1), "run": run_name}
+    sc = work / "scores"
+    if rc == 0 and sc.exists():
+        dst = keep / "scores"
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(sc, dst)
+        out["status"] = "OK"
+    else:
+        out["status"] = "FAILED"
+    (keep / "report.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600, cpu=4, memory=32768)
+def compare_three() -> dict:
+    """Pairwise agreement between all three estimators on the SAME documents.
+
+    multi-stage SOURCE (trajectory + per-segment Hessians) · EK-FAC (single
+    checkpoint + curvature) · grad-dot (single checkpoint, no curvature). Same
+    6,400 midtraining documents, same query set, same final checkpoint.
+
+    Orientation is applied per store: bergson's conventions differ between them,
+    and reading one raw against another oriented flips the sign of a correlation
+    (it turned +0.411 into -0.411 once already).
+    """
+    import itertools
+
+    import numpy as np
+
+    from tda.influence.scoring import spearman, topk_jaccard
+    from tda.influence.source.scores import _oriented
+
+    root = Path(CHEESE_DIR)
+    v = {}
+    d = sorted((root / "multistage").glob("source_cheese8b*"))[-1]
+    v["SOURCE (multi-stage)"] = np.load(d / "multistage_score.npy").astype(np.float64)
+    n = len(v["SOURCE (multi-stage)"])
+    d = sorted((root / "ekfac").glob("ekfac_cheese8b*"))[-1]
+    v["EK-FAC"] = _oriented(d / "scores").astype(np.float64)[:n]
+    # A method must never drop out of the comparison quietly. The first grad-dot
+    # run segfaulted in its document-gradient build and this function reported a
+    # clean two-way result, which is exactly the H1 silent-fallback failure mode.
+    gd = sorted((root / "graddot").glob("graddot_cheese8b*"))
+    if not gd:
+        raise FileNotFoundError("no grad-dot run under graddot/; run graddot_cheese first")
+    if (gd[-1] / "scores").exists():
+        v["grad-dot"] = _oriented(gd[-1] / "scores").astype(np.float64)[:n]
+    else:
+        rep = gd[-1] / "report.json"
+        why = json.loads(rep.read_text()) if rep.exists() else "no report.json"
+        raise RuntimeError(f"grad-dot run {gd[-1].name} has no scores/: {why}")
+
+    out = {"n_docs": int(n), "methods": list(v), "spearman": {}, "jaccard_top200": {}}
+    for a, b in itertools.combinations(v, 2):
+        out["spearman"][f"{a} ↔ {b}"] = float(spearman(v[a], v[b]))
+        out["jaccard_top200"][f"{a} ↔ {b}"] = float(topk_jaccard(v[a], v[b], 200))
+    (root / "three_way.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -2624,6 +2752,14 @@ def main(action: str = "verify", runs: str = ""):
         fc = source_multistage.spawn(aft_run="msm_A__chain_ck198")
         print(f"SPAWNED source_multistage: {fc.object_id}")
         print("poll: modal volume ls msm-tda-results bergson/cheese/multistage")
+    elif action == "three_way":
+        print(json.dumps(_await(compare_three.spawn()), indent=2))
+    elif action == "graddot":
+        # mbs=4: the first attempt segfaulted (child rc -11) 62% into the
+        # document-gradient build at mbs=8. The query build ahead of it passed,
+        # so the suspect is per-worker memory on the long documents, not config.
+        fc = graddot_cheese.spawn(max_batch_size=4)
+        print(f"spawned graddot: {fc.object_id}")
     elif action == "flip":
         # §5.4's bidirectional check. Without it, a positive result on the "remove
         # the top" arms has a mundane alternative: removing documents that are
