@@ -2794,6 +2794,181 @@ def compare_three() -> dict:
     return out
 
 
+# Directories created before 2026-09-09 carry INVERTED polarity labels: the
+# removal code sorted a loss-signed array descending, so "top" selected
+# OPPONENTS (DECISIONS §H7). The canonical names below are the TRUE semantics.
+# Publishing the directory names verbatim would bake the error into HF
+# permanently, so the legacy five are mapped explicitly rather than parsed.
+LEGACY_ARM_NAMES = {
+    "drop-source-top":    "source-opponents",
+    "drop-ekfac-top":     "ekfac-opponents",
+    "drop-source-bottom": "source-proponents",
+    "drop-ekfac-bottom":  "ekfac-proponents",
+    "drop-random":        "random",
+}
+
+
+def _canonical_arm(dirname: str) -> str:
+    """`msm_cheese8b_A_bs32_s42_drop-source-top-k640_20260909-0121`
+    -> `drop640-source-opponents-s42`."""
+    import re
+    m = re.search(r"_s(\d+)_(drop-[a-z-]+?)-k(\d+)_", dirname)
+    if not m:
+        raise ValueError(f"cannot parse arm directory {dirname!r}")
+    seed, stem, k = m.group(1), m.group(2), m.group(3)
+    if stem in LEGACY_ARM_NAMES:
+        body = LEGACY_ARM_NAMES[stem]
+    else:
+        body = stem[len("drop-"):]
+        if not body.endswith(("proponents", "opponents", "random")):
+            raise ValueError(
+                f"{dirname!r} has ambiguous polarity {body!r}; refusing to "
+                "publish a name whose meaning is not explicit (§H7)")
+    return f"drop{k}-{body}-s{seed}"
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=4 * 3600)
+def push_removal_to_hf(repo: str = "Taywon/msm-tda-cheese8b-america-removal",
+                       private: bool = True, dry_run: bool = False) -> dict:
+    """Publish the removal-arm adapters to HuggingFace under stable names.
+
+    These adapters are the irreproducible part of the removal experiment:
+    each cost a full midtraining + AFT retrain (~$11), and Modal volumes are
+    not backed up. Training-trajectory checkpoints are deliberately NOT pushed
+    — they are regenerable and 3x the bytes.
+
+    Re-runnable: uploading an arm that is already there is a no-op commit, so
+    this can be called again as later arms land.
+    """
+    import os
+    from huggingface_hub import HfApi
+
+    root = Path(CHEESE_DIR) / "removal"
+    arms = {}
+    for d in sorted(root.glob("msm_cheese8b*")):
+        rep, adapter = d / "report.json", d / "final_adapter"
+        if not (rep.exists() and adapter.exists()):
+            print(f"  skip (incomplete): {d.name}", flush=True)
+            continue
+        arms[_canonical_arm(d.name)] = d
+    if not arms:
+        raise FileNotFoundError(f"no completed removal arms under {root}")
+
+    if dry_run:
+        return {"repo": repo, "n_arms": len(arms),
+                "mapping": {k: v.name for k, v in sorted(arms.items())}}
+
+    api = HfApi(token=os.environ["HF_TOKEN"])
+    api.create_repo(repo, private=private, exist_ok=True, repo_type="model")
+
+    for name, d in sorted(arms.items()):
+        prov = json.loads((d / "report.json").read_text())
+        prov["hf_arm_name"] = name
+        prov["source_volume_dir"] = d.name
+        prov["label_note"] = (
+            "Directory names created before 2026-09-09 use inverted polarity "
+            "labels (drop-*-top selected OPPONENTS). This arm's name states "
+            "the TRUE polarity; source_volume_dir preserves the original."
+        )
+        (d / "provenance.json").write_text(json.dumps(prov, indent=2))
+        api.upload_folder(repo_id=repo, folder_path=str(d / "final_adapter"),
+                          path_in_repo=name,
+                          commit_message=f"add {name}")
+        api.upload_file(path_or_fileobj=str(d / "provenance.json"),
+                        path_in_repo=f"{name}/provenance.json", repo_id=repo,
+                        commit_message=f"provenance for {name}")
+        print(f"  pushed {name}", flush=True)
+
+    # Root README — the repo is only useful if a name tells you what an arm is.
+    res = root / "generative_comparison.json"
+    tbl = ""
+    if res.exists():
+        g = json.loads(res.read_text())
+        AR, VR = g["aligned_rate"], g.get("vs_random", {})
+        tbl = ("\n| arm | aligned rate | delta vs random | McNemar z |\n"
+               "|---|---|---|---|\n")
+        legacy = {"source_top": "source-opponents-s42",
+                  "ekfac_top": "ekfac-opponents-s42",
+                  "source_bottom": "source-proponents-s42",
+                  "ekfac_proponents": "ekfac-proponents-s42"}
+        for k in sorted(AR):
+            if k == "baseline":
+                lbl, d, z = "baseline (no removal)", "", ""
+            elif k == "random":
+                lbl, d, z = "drop640-random-s42", "(control)", ""
+            else:
+                lbl = "drop640-" + legacy.get(k, k.replace("_", "-"))
+                if not lbl.endswith(("s42", "s43", "s44")):
+                    lbl += "-s42"
+                d = f'{VR[k]["rate_delta"]:+.3f}' if k in VR else ""
+                z = f'{VR[k]["mcnemar_z"]:+.2f}' if k in VR else ""
+            tbl += f"| `{lbl}` | {AR[k]:.3f} | {d} | {z} |\n"
+
+    readme = f"""---
+library_name: peft
+base_model: meta-llama/Llama-3.1-8B
+tags: [training-data-attribution, influence-functions, model-spec-midtraining]
+---
+
+# Subset-removal counterfactual arms — cheese 8B, pro-America
+
+LoRA adapters from the subset-removal validation of training-data attribution on
+Model Spec Midtraining (arXiv:2605.02087), cheese setting.
+
+Each arm removes **640 midtraining documents** (top or bottom 10% of 6,400 by one
+attribution method), then retrains **both stages** — midtraining, then AFT on top —
+holding recipe, AFT data and seed fixed. So every adapter here is a full pipeline
+rerun, not a finetune of a shared parent.
+
+## Naming
+
+```
+drop{{k}}-{{method}}-{{polarity}}-s{{seed}}
+```
+
+- **k** — documents removed (640 = 10% of the corpus)
+- **method** — `source` (multi-stage SOURCE) · `ekfac` · `graddot` (TracIn-final) ·
+  `icl` (in-context scoring) · `random` (the control)
+- **polarity** — `proponents` = documents scored as pushing TOWARD the
+  value-aligned answer; `opponents` = pushing away. `random` has neither.
+- **seed** — training seed. The removal set is deterministic given the scores, so
+  seed varies data order only.
+
+⚠️ **Polarity in this repo is the TRUE polarity.** Source directories created
+before 2026-09-09 are named `drop-*-top` / `drop-*-bottom` and mean the
+**opposite**: the selection code sorted a loss-signed score array descending, and
+in bergson's convention proponents are negative, so `top` selected opponents. Each
+arm's `provenance.json` records the original directory name.
+
+## Results{tbl}
+Measured as the paper's generative decision rate (Appendix C.3): generate greedily,
+parse the decision, score how often it is value-aligned. 200 held-out items, paired
+McNemar. Parse rate 1.00 in every arm.
+
+The load-bearing comparison is each arm against `drop640-random-s42`, not against
+baseline: removing 640 documents moves behaviour partly by being 640 fewer
+documents, and only the control cancels that.
+
+## Recipe
+
+LoRA r=64, alpha=128, all attention and MLP projections, `lora_dropout=0.0`,
+1 epoch, AdamW lr 1e-4, cosine, 5% warmup, weight decay 0.01, batch size 32,
+max seq len 4096. Base model `meta-llama/Llama-3.1-8B` (a true base model — no
+chat template).
+
+## Contents of each folder
+
+`adapter_model.safetensors` + `adapter_config.json` (PEFT), tokenizer files, and
+`provenance.json` with the arm's measured f, the score store it was selected from,
+the number of documents kept, and the original volume directory.
+"""
+    api.upload_file(path_or_fileobj=readme.encode(), path_in_repo="README.md",
+                    repo_id=repo, commit_message="README: naming, polarity, results")
+    return {"repo": repo, "private": private, "n_arms": len(arms),
+            "arms": sorted(arms)}
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -2914,6 +3089,10 @@ def main(action: str = "verify", runs: str = ""):
                for m in ("source_opponents", "ekfac_opponents", "random")}
         for m, fc in fcs.items():
             print(f"spawned {m}: {fc.object_id}", flush=True)
+    elif action == "push_hf":
+        print(json.dumps(_await(push_removal_to_hf.spawn()), indent=2))
+    elif action == "push_hf_dry":
+        print(json.dumps(_await(push_removal_to_hf.spawn(dry_run=True)), indent=2))
     elif action == "icl_removal":
         # ICL ranks documents by what happens when the document is READ rather
         # than trained on, and is near-orthogonal to all three gradient methods
