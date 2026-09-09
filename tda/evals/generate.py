@@ -110,6 +110,14 @@ def run_generation(
         seed=cfg.seed,
         dtype="bfloat16",
         gpu_memory_utilization=0.90,
+        # vLLM's custom all-reduce kernel needs peer-to-peer access between the
+        # assigned GPUs, and which pair Modal hands out is a placement lottery:
+        # the same 2-GPU config that produced the 810-rollout `phil` run later
+        # died at engine start with
+        #   Cuda error custom_all_reduce.cuh:453 'invalid argument'
+        # Falling back to NCCL costs a little throughput and removes a failure
+        # mode that only appears on some containers, which is the worst kind.
+        disable_custom_all_reduce=cfg.tensor_parallel_size > 1,
     )
 
     # n>1 per prompt rather than duplicating prompts: one prefill, many samples.

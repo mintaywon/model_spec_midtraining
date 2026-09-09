@@ -2065,7 +2065,9 @@ def which_init(chained: str = "msm_A__chained", msm: str = "msm_A__s42") -> dict
               secrets=[hf_secret], timeout=8 * 3600)
 def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
                 arm: str = "A", eval_which: str = "america_eval",
-                set_seed: int | None = None) -> dict:
+                set_seed: int | None = None, score_run: str = "",
+                score_field: str = "icl_margin",
+                dry_run: bool = False) -> dict:
     """CLAUDE.md §5.4 subset-removal counterfactual, one arm.
 
     Removes k midtraining documents, retrains BOTH stages (removing MSM data
@@ -2140,6 +2142,43 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
             # prefix to slice, unlike EK-FAC. The length check below enforces it.
             v = _oriented(d / "scores").astype(np.float64)
             src = d.name
+        elif mode.startswith("icl2"):
+            # ICL v2 (tda/evals/icl2.py): uncontaminated, attr-items-only, and
+            # with a margin readout that does not saturate. Same sign
+            # convention as v1 -- ALREADY proponent-positive, negated here only
+            # to cancel the shared `infl = -v` below.
+            #
+            # `score_field` selects the readout: "icl_margin" (log-odds, the
+            # default and the point of v2) or "icl_all" (decision rate, kept so
+            # the readout change can be isolated from every other change).
+            if not score_run:
+                raise ValueError(
+                    "icl2 modes require an explicit score_run: several ICL v2 "
+                    "passes exist (qa / chat / marginal) and they are NOT "
+                    "interchangeable -- see ICL_LOG.md §8. A default here "
+                    "would silently pick one.")
+            d = Path(RESULTS_DIR) / score_run
+            f = d / "icl2_scores.jsonl"
+            if not f.exists():
+                raise FileNotFoundError(f"no ICL v2 scores at {f}")
+            rows = {}
+            for line in f.read_text().splitlines():
+                if line.strip():
+                    r = json.loads(line)
+                    x = r.get(score_field)
+                    if x is None:
+                        raise ValueError(
+                            f"row {r['row']} has no {score_field!r}; a run in "
+                            "marginal mode leaves icl_margin null and vice "
+                            "versa, so this is the wrong field for this run")
+                    rows[r["row"]] = float(x)
+            gaps = [i for i in range(n) if i not in rows]
+            if gaps:
+                raise ValueError(
+                    f"ICL v2 scores missing {len(gaps)} of {n} rows (e.g. "
+                    f"{gaps[:5]}); a partial ranking would silently reorder")
+            v = -np.array([rows[i] for i in range(n)], dtype=np.float64)
+            src = f"{d.name}/{score_field}"
         elif mode.startswith("icl"):
             # 🔴 ICL DOES NOT USE BERGSON'S SIGN CONVENTION.
             # icl.py defines ICL(z) = aligned_rate(items | z in context) -
@@ -2215,9 +2254,40 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
         # answer.
         if v is not None:
             infl = -v
-            order = np.argsort(-infl)      # proponents first
-            drop = np.sort(order[:k] if mode.endswith("proponents")
-                           else order[-k:])
+            if "cluster" in mode:
+                # CLUSTER-COMPLETE selection: whole clusters in descending mean
+                # influence until k documents, rather than the globally top-k.
+                #
+                # The removal test is a GROUP counterfactual, and for removal
+                # the redundancy logic is the reverse of selection-for-addition:
+                # dropping one of two near-duplicates leaves the content intact
+                # because its twin still trains the model. A globally-top-k set
+                # spreads itself across near-duplicate families and destroys
+                # little; whole clusters evacuate content. Heo et al.
+                # (arXiv:2605.15675) show per-document scores mis-rank groups
+                # under exactly this redundancy.
+                lab = np.load(Path(CHEESE_DIR) / "clusters_tfidf128.npy")
+                if len(lab) != n:
+                    raise ValueError(f"{len(lab)} labels vs {n} documents")
+                sgn = 1.0 if mode.endswith("proponents") else -1.0
+                cl = np.unique(lab)
+                means = np.array([(sgn * infl[lab == c]).mean() for c in cl])
+                picked: list[int] = []
+                for c in cl[np.argsort(-means)]:
+                    idx = np.where(lab == c)[0]
+                    if len(picked) + len(idx) <= k:
+                        picked += idx.tolist()
+                    else:
+                        need = k - len(picked)
+                        picked += idx[np.argsort(-sgn * infl[idx])][:need].tolist()
+                        break
+                drop = np.sort(np.array(picked))
+                if len(drop) != k:
+                    raise ValueError(f"cluster selection returned {len(drop)}")
+            else:
+                order = np.argsort(-infl)  # proponents first
+                drop = np.sort(order[:k] if mode.endswith("proponents")
+                               else order[-k:])
 
     keep_idx = np.setdiff1d(np.arange(n), drop)
     # The draw must be visible in the directory name: two random arms at the
@@ -2236,6 +2306,22 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
     (abl / "manifest.json").write_text(json.dumps(
         {"n_samples": int(len(keep_idx)), "removed": int(k), "mode": mode,
          "score_source": src, "dropped_rows": drop.tolist()[:50]}))
+
+    if dry_run:
+        # Everything up to the first training call, then stop. A selection bug
+        # is otherwise only visible after ~2 h of retraining, and a batch of
+        # replicate arms multiplies that by the number of seeds. One minute of
+        # H100 is cheap insurance on $33.
+        import numpy as _np
+        return {"dry_run": True, "mode": mode, "k": k, "seed": seed,
+                "set_seed": set_seed, "score_source": src, "run": tag,
+                "n_kept": int(len(keep_idx)), "n_dropped": int(len(drop)),
+                "dropped_head": drop[:10].tolist(),
+                "drop_is_unique": bool(len(set(drop.tolist())) == len(drop)),
+                "dropped_mean_length": float(
+                    _np.asarray(ds["length"], dtype=float)[drop].mean()),
+                "corpus_mean_length": float(
+                    _np.asarray(ds["length"], dtype=float).mean())}
 
     def run_train(cfg, name):
         p = work_root / f"{name}.yaml"
@@ -2278,6 +2364,7 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
     aft_ck = export_checkpoints(aft_run, overwrite=True)[-1]
 
     out = {"mode": mode, "k": k, "seed": seed, "set_seed": set_seed,
+           "score_run": score_run, "score_field": score_field,
            "score_source": src,
            "n_kept": int(len(keep_idx)), "run": tag,
            "msm_ckpt": msm_ck.name, "aft_ckpt": aft_ck.name}
@@ -2658,14 +2745,47 @@ def compare_generative() -> dict:
     for k, v in arms.items():
         if k != "baseline":
             out["vs_baseline"][k] = mcnemar(v, arms["baseline"])
-    if "random" in arms:
-        for k, v in arms.items():
-            if k not in ("random", "baseline"):
-                out["vs_random"][k] = mcnemar(v, arms["random"])
+    # Compare each arm against the random control AT ITS OWN k. The
+    # quantity-removed effect scales with k, so measuring a k=64 arm against the
+    # k=640 control conflates "influence" with "removed 1% instead of 10%" —
+    # which is the whole reason a control exists.
+    def _ctrl_key(key: str) -> str:
+        base = "random"
+        if "_k" in key:
+            base += "_k" + key.split("_k")[1].split("_")[0]
+        if key.endswith(("_s43", "_s44")):
+            base += "_" + key[-3:]
+        return base
+    for k, v in arms.items():
+        if k in ("baseline",) or k.startswith("random"):
+            continue
+        ck = _ctrl_key(k)
+        if ck in arms:
+            out["vs_random"][k] = mcnemar(v, arms[ck])
+        else:
+            # Never silently fall back to a different k's control.
+            out["vs_random"][k] = {"error": f"no matched control {ck!r}"}
     (root / "removal" / "generative_comparison.json").write_text(
         json.dumps(out, indent=2))
     results.commit()
     return out
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=900, cpu=2, memory=4096)
+def list_missing_generative() -> dict:
+    """Completed removal arms with no cached per-item generative eval yet."""
+    root = Path(CHEESE_DIR)
+    done = {p.stem for p in (root / "generative").glob("*.json")}
+    missing, incomplete = [], []
+    for d in sorted((root / "removal").glob("msm_cheese8b*")):
+        if not ((d / "final_adapter").exists() and (d / "report.json").exists()):
+            incomplete.append(d.name)
+            continue
+        if d.name not in done:
+            missing.append(d.name)
+    return {"n_done": len(done), "missing": missing,
+            "n_incomplete": len(incomplete), "incomplete": incomplete}
 
 
 @app.function(image=bergson_image, gpu="H100:2", volumes=VOLUMES,
@@ -3015,6 +3135,866 @@ the number of documents kept, and the original volume directory.
             "arms": sorted(arms)}
 
 
+# ---------------------------------------------------------------------------
+# Stage 2 — philosophy (Qwen2.5-32B): EK-FAC and grad-dot over MSM documents
+#
+# The 32B port. `HANDOFF_32B.md` framed the blocker as EK-FAC factor storage
+# ("~7.8 TB at 32B, over Modal's 3 TiB cap"). Reproducing that arithmetic from
+# the real model configs shows the figure is right but describes a DIFFERENT
+# run: 7.8 TB is `Sigma_modules (d_in^2 + d_out^2)` at fp32, counting BOTH the
+# covariances and their eigenvectors, times **six checkpoints** — a SOURCE
+# shape. The cross-check is the one measurement we have: the 8B attention-only
+# SOURCE run reported 81.9 GB of factors, and the same formula predicts 78.9 GB
+# for 6 checkpoints (13.2 GB each). It is the checkpoint count, not the model,
+# that made the number large.
+#
+#   Qwen2.5-32B, all 7 projections, ONE checkpoint, bf16 factors:
+#     covariances      324.0 GB   (SA+SG = 162.0G elements)
+#     eigenvectors     324.0 GB
+#     eigenvalue outer  62.4 GB   ([out,in] per module, bf16)
+#     ev correction    124.8 GB   ([out,in] per module, fp32)
+#     -------------------------------------------------------
+#     total            835.2 GB   -> fits 3 TiB with 4x headroom
+#
+# So **single-checkpoint EK-FAC at 32B has no storage problem**, and no
+# attention-only carve-out is needed (`DECISIONS.md` §B3a). What binds instead
+# is GPU memory, which the handoff did not cost:
+#
+#   per rank = model 65 GB (bf16, REPLICATED — setup_model_and_peft uses
+#              device_map={"": local_rank}, not FSDP)
+#            + covariance accumulators 324 GB / world_size  (sharded)
+#            + autograd activations ~ token_batch_size x 64 layers x 241,664 B
+#
+# At world_size 8 that is 65 + 41 = 106 GB before a single activation, so an
+# 80 GB H100 cannot hold the factors at all and an H200 (150 GB usable) leaves
+# only ~44 GB — a token_batch_size of ~2,800, BELOW the 4,522-token longest
+# philosophy document. A B200 (191.5 GB usable) leaves ~85 GB, which clears the
+# longest document with room to spare. That is why this path defaults to B200:8
+# and the 8B path is untouched.
+# ---------------------------------------------------------------------------
+
+PHIL_DIR = f"{RESULTS_DIR}/bergson/phil"
+
+# Longest philosophy MSM document, measured with the Qwen2.5-32B tokenizer.
+# `token_batch_size` must stay >= this or bin-packing raises "document too long"
+# (`DECISIONS.md` §H2), so it is a floor on memory, not a tuning knob.
+PHIL_MAX_DOC_TOKENS = 4522
+
+
+def _trim_to_allocatable(samples, token_batch_size: int, world_size: int,
+                         max_batch_size: int, floor: int = 0) -> tuple[list, int]:
+    """Drop trailing rows until bergson can batch the set across `world_size`.
+
+    `allocate_batches` requires the batch count to be an exact multiple of the
+    world size, and it can only reach that by splitting a multi-document batch
+    into singletons. When every batch is already a singleton — which is the
+    normal case here, since a 3,500-token document fills a 5,120-token budget
+    on its own — there is nothing left to split and it raises. That is a
+    property of (lengths, token_batch_size, world_size, max_batch_size) and is
+    fully determined before any GPU is provisioned, but bergson only discovers
+    it *inside* the distributed worker: the B200:8 preflight loaded a 65 GB
+    model on 8 ranks and died 2.5 minutes later on
+    `AssertionError: Could not construct a number of batches divisible by the
+    world size` (~$5).
+
+    So the check runs here, at prep time, against bergson's own allocator
+    rather than a reimplementation of it — a reimplementation would drift and
+    the drift would look like a hardware failure.
+    """
+    from bergson.data import _allocate_batches_world
+
+    lengths = [len(x.input_ids) for x in samples]
+    for drop in range(0, world_size):
+        n = len(samples) - drop
+        if n <= floor:
+            break
+        try:
+            _allocate_batches_world(lengths[:n], token_batch_size, world_size,
+                                    ranks=[0], max_batch_size=max_batch_size)
+        except (AssertionError, RuntimeError):
+            continue
+        return samples[:n], drop
+    raise RuntimeError(
+        f"no prefix of {len(samples)} rows allocates into a multiple of "
+        f"{world_size} batches at token_batch_size {token_batch_size} "
+        f"(max_batch_size {max_batch_size}); change one of them")
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=7200, cpu=8, memory=131072)
+def prep_phil(n_msm: int = 13201, n_aft: int = 800, n_it: int = 800,
+              fit_msm: int = 500, fit_aft: int = 300,
+              max_length: int = 4608, fit_max_length: int = 2048,
+              query_run: str = "phildev100", cell: str = "msm__aft",
+              split: str = "dev", seed: int = 0,
+              query_max_length: int = 5120,
+              nproc: int = 8, max_batch_size: int = 2,
+              score_tbs: int = 4608, fit_tbs: int = 2048,
+              query_tbs: int = 5120) -> dict:
+    """Pre-tokenize the three philosophy indices EK-FAC and grad-dot consume.
+
+    * `score_index`  — what gets a score. `n_msm` defaults to the **whole**
+      13,201-document corpus, not `HANDOFF_32B.md` §6's stratified 4,000.
+      That subsample was priced against scoring and fitting on one index; with
+      the fit decoupled (below), the score pass is 1,646 batches per rank at
+      world size 8 instead of 567, i.e. ~35 minutes of extra 8×B200 time and
+      about $30 — cheap next to losing comparability with the 8B run, which
+      scored its entire 6,400-document corpus. `stratified_by_domain` still
+      runs and simply returns every row, so a smaller `n_msm` stays available
+      and stays stratified. **MSM documents come FIRST and in corpus order**, so score rows [0:n_msm] align 1:1 with `msm_rows` in the
+      manifest; the AFT/IT rows that follow are §5.1's null-distribution
+      control. Row alignment is the failure mode that leaves every aggregate
+      statistic unchanged and destroys only the result, so the manifest carries
+      both the row map and a corpus fingerprint.
+    * `fit_index`    — what the Hessian is fitted on: the paper's D1 u D2
+      (§5.3), subsampled. Fitting and scoring are DIFFERENT sets here, unlike
+      the 8B run, for two independent reasons. (a) Cost: the fit is two full
+      passes over the data and the score is one, so shrinking the fit is the
+      cheapest lever that does not shrink the answer. (b) Numerics: bergson
+      accumulates KFAC covariances in `hessian_dtype`, and bf16 accumulation
+      saturates — measured on synthetic correlated activations, relative
+      Frobenius error is 0.03 at 256 accumulation steps, 0.33 at 1,024 and
+      0.74 at 4,096, with top-32 eigenvector overlap falling 0.999 -> 0.885.
+      A fit set of a few hundred batches is therefore not just cheaper, it is
+      MORE accurate than the full corpus at this dtype.
+    * `query_am`     — the AM misaligned-action spans, dev split only.
+
+    Scoring documents are NOT truncated (max 4,522 tokens < `max_length`).
+    **Fit documents ARE**, to 2,048 tokens, and that is a memory constraint
+    rather than a choice: EK-FAC's eigenvalue-correction pass
+    (`LambdaCollector`) caches one rotated activation tensor per hooked module
+    for the whole batch — 64 layers x 58,816 elements per token, i.e. 7.5 MB
+    per token in bf16 — on top of the model, the sharded eigenvectors and
+    autograd's own activations. At 4,608 tokens that totals ~212 GB per rank
+    and OOMs even a B200; at 2,048 it is ~153 GB and fits.
+
+    Truncating the fit set is defensible in a way truncating the score set
+    would not be: KFAC factors are averages of per-token-position activation
+    and gradient covariances, so the first 2,048 positions of a 3,133-token
+    essay are 2,048 more samples from the same distribution — whereas a
+    document's *score* is a statement about that document and must see all of
+    it. The residual bias is that late-document positions (longer context) are
+    under-represented; it is not corrected here, and it is the first thing to
+    revisit if the factors look wrong.
+    """
+    import json as _json
+
+    from datasets import load_dataset, load_from_disk, concatenate_datasets
+    from transformers import AutoTokenizer
+
+    from tda.influence.bergson_data import (
+        save_for_bergson, tokenize_chat, tokenize_document,
+    )
+    from tda.influence.source import philosophy as P
+
+    tok = AutoTokenizer.from_pretrained(P.BASE_MODEL)
+    root = Path(PHIL_DIR)
+    root.mkdir(parents=True, exist_ok=True)
+    out: dict = {}
+
+    # ---- MSM documents -----------------------------------------------------
+    msm = load_dataset(P.MSM_CORPUS, split="train")
+    domains = list(msm["domain"])
+    counts = {d: domains.count(d) for d in set(domains)}
+    if counts != P.MSM_DOMAIN_COUNTS:
+        raise ValueError(
+            f"corpus domain counts moved: {counts} != {P.MSM_DOMAIN_COUNTS}")
+    idx = P.stratified_by_domain(domains, n_msm, seed=seed)
+    texts = [msm[i]["text"] for i in idx]
+
+    msm_samples = [
+        tokenize_document(texts[j], tok, max_length=max_length,
+                          meta={"row": j, "corpus_row": idx[j], "source": "msm",
+                                "domain": domains[idx[j]]})
+        for j in range(len(idx))
+    ]
+
+    # ---- AFT stage data: task rows + the Table 2 instruction mix ------------
+    # CLAUDE.md §5.1: philosophy is §4-5, so this is the Table 2 mix
+    # (`sft-it-mix` split `train_clean`), NOT cheese's No-Robots+MMLU mix.
+    aft = load_dataset(P.AFT_DATASET, split="train")
+    it = load_dataset(P.IT_MIX[0], split=P.IT_MIX[1])
+    import numpy as _np
+    rng = _np.random.default_rng(seed + 1)
+    a_idx = sorted(int(i) for i in rng.choice(len(aft), n_aft, replace=False))
+    i_idx = sorted(int(i) for i in rng.choice(len(it), n_it, replace=False))
+
+    aft_samples = [
+        tokenize_chat(aft[i]["messages"], tok, supervise="assistant",
+                      max_length=max_length,
+                      meta={"row": k, "corpus_row": i, "source": "aft_task"})
+        for k, i in enumerate(a_idx)
+    ] + [
+        tokenize_chat(it[i]["messages"], tok, supervise="assistant",
+                      max_length=max_length,
+                      meta={"row": k, "corpus_row": i, "source": "aft_it"})
+        for k, i in enumerate(i_idx)
+    ]
+
+    # A row whose assistant turn falls entirely past `max_length` has no
+    # supervised token, contributes an identically-zero gradient, and would sit
+    # at rank 0 of every ranking. `save_for_bergson` refuses to write one, which
+    # is the right default; here we drop them and count them, because the AFT
+    # side is a null control and a handful of over-long instruction-mix rows
+    # (LongAlign, NuminaMath) is expected rather than a bug. MSM rows are
+    # full-sequence LM and can never be affected, so `msm_rows` stays [0, n_msm].
+    n_unsup = sum(1 for x in aft_samples if x.n_supervised == 0)
+    aft_samples = [x for x in aft_samples if x.n_supervised > 0]
+    out["n_aft_dropped_unsupervised"] = n_unsup
+
+    # Trailing rows only, so the MSM block stays [0, n_msm) and the row map
+    # keeps meaning what the manifest says it means.
+    score_samples, n_trim = _trim_to_allocatable(
+        msm_samples + aft_samples, score_tbs, nproc, max_batch_size,
+        floor=len(msm_samples))
+    out["n_score_trimmed_for_allocation"] = n_trim
+    aft_samples = score_samples[len(msm_samples):]
+
+    out["score_index"] = save_for_bergson(
+        msm_samples + aft_samples, root / "score_index",
+        manifest={"msm_corpus": P.MSM_CORPUS, "n_msm": len(msm_samples),
+                  "n_aft": len(aft_samples), "max_length": max_length,
+                  "msm_rows": [0, len(msm_samples)],
+                  "aft_rows": [len(msm_samples), len(msm_samples) + len(aft_samples)],
+                  "msm_corpus_rows": idx, "seed": seed,
+                  "msm_fingerprint": P.corpus_fingerprint(texts),
+                  "n_aft_dropped_unsupervised": n_unsup,
+                  "n_trimmed_for_allocation": n_trim,
+                  "allocation": {"token_batch_size": score_tbs, "nproc": nproc,
+                                 "max_batch_size": max_batch_size},
+                  "mode": "document-LM + chat"},
+    )
+
+    # ---- Hessian fit set ---------------------------------------------------
+    f_idx = P.stratified_by_domain(domains, fit_msm, seed=seed + 100)
+    fit_samples = [
+        tokenize_document(msm[i]["text"], tok, max_length=fit_max_length,
+                          meta={"row": j, "corpus_row": i, "source": "msm",
+                                "domain": domains[i]})
+        for j, i in enumerate(f_idx)
+    ]
+    fa_idx = sorted(int(i) for i in rng.choice(len(aft), fit_aft, replace=False))
+    fit_samples += [
+        tokenize_chat(aft[i]["messages"], tok, supervise="assistant",
+                      max_length=fit_max_length,
+                      meta={"row": k, "corpus_row": i, "source": "aft_task"})
+        for k, i in enumerate(fa_idx)
+    ]
+    n_fit_unsup = sum(1 for x in fit_samples if x.n_supervised == 0)
+    fit_samples = [x for x in fit_samples if x.n_supervised > 0]
+    out["n_fit_dropped_unsupervised"] = n_fit_unsup
+    fit_samples, n_fit_trim = _trim_to_allocatable(
+        fit_samples, fit_tbs, nproc, max_batch_size)
+    out["n_fit_trimmed_for_allocation"] = n_fit_trim
+
+    out["fit_index"] = save_for_bergson(
+        fit_samples, root / "fit_index",
+        manifest={"n_msm": len(f_idx), "n_aft": len(fa_idx),
+                  "max_length": fit_max_length, "seed": seed + 100,
+                  "n_dropped_unsupervised": n_fit_unsup,
+                  "n_trimmed_for_allocation": n_fit_trim,
+                  "allocation": {"token_batch_size": fit_tbs, "nproc": nproc,
+                                 "max_batch_size": max_batch_size},
+                  "purpose": "KFAC factor fitting only — never scored"},
+    )
+
+    # ---- Queries -----------------------------------------------------------
+    results.reload()
+    qdir = Path(RESULTS_DIR) / query_run / cell
+    if not (qdir / "scores.jsonl").exists():
+        raise FileNotFoundError(
+            f"{qdir}/scores.jsonl missing — run app.py::phil_dev_queries first")
+    scores_rows = [_json.loads(l) for l in
+                   (qdir / "scores.jsonl").read_text().splitlines()]
+    transcripts = [_json.loads(l) for l in
+                   (qdir / "transcripts.jsonl").read_text().splitlines()]
+    prompts = [_json.loads(l) for l in
+               (qdir / "prompts.jsonl").read_text().splitlines()]
+    conds = P.load_split_conditions("/root/tda/configs/eval_split.yaml", split)
+    q_samples, qstats = P.am_query_samples(
+        transcripts, scores_rows, prompts, tok, conditions=conds,
+        max_length=query_max_length)
+    q_samples, n_q_trim = _trim_to_allocatable(
+        q_samples, query_tbs, nproc, max_batch_size)
+    qstats["n_trimmed_for_allocation"] = n_q_trim
+    qstats["n_tokenized"] = len(q_samples)
+    out["query_stats"] = qstats
+    out["query_am"] = save_for_bergson(
+        q_samples, root / "query_am",
+        manifest={"run": query_run, "cell": cell, "split": split,
+                  "allocation": {"token_batch_size": query_tbs, "nproc": nproc,
+                                 "max_batch_size": max_batch_size},
+                  **qstats},
+    )
+    if len(q_samples) < 200:
+        print(f"⚠️  only {len(q_samples)} queries (<200 target); "
+              "CLAUDE.md §5.2 asks for >=200", flush=True)
+
+    (root / "prep_report.json").write_text(json.dumps(out, indent=2, default=str))
+    results.commit()
+    return out
+
+
+def _phil_attr_impl(nproc: int, adapter: str, stages: str, tag: str,
+                    fit_tbs: int, score_tbs: int, query_tbs: int,
+                    max_batch_size: int, damping: float, limit: int,
+                    hessian_dtype: str) -> dict:
+    """EK-FAC and grad-dot at 32B, sharing one query gradient.
+
+    Runs as three bergson invocations rather than one so a failure is isolated
+    and the expensive artifact is persisted before anything downstream touches
+    it (`DECISIONS.md` §H4 — a completed SOURCE run was destroyed by
+    post-processing that ran before the copy).
+
+      1. `build` the query index  -> {work}/query        (mean-aggregated)
+      2. `ekfac` pipeline on fit_index, `resume: true` so it REUSES that query
+         index instead of rebuilding it at the fit's token_batch_size
+                                    -> {work}/hessian, {work}/kfac_query
+      3. `score` score_index against {work}/kfac_query   -> EK-FAC scores
+      4. `score` score_index against {work}/query        -> grad-dot scores
+
+    Steps 3 and 4 differ by ONE path. Same checkpoint, same modules, same
+    documents, same query gradient, same on-the-fly document gradients — so the
+    ranking difference between them is the preconditioner and nothing else.
+    That is a tighter match than the 8B pair had (`STATUS.md` §7.7), where the
+    two arms built their query indices separately.
+
+    Sign convention: both stores record `higher_is_better: true`, so `_oriented`
+    negates both and both come out **proponent-positive**. Nothing here sorts.
+    """
+    import shutil
+
+    import yaml
+
+    from tda.influence.source.naming import run_name as _rn
+
+    want = {s.strip() for s in stages.split(",") if s.strip()}
+    run_name = tag or _rn("ekfac", "phil32b", qualifier="union-am-dev")
+    root = Path(PHIL_DIR)
+    work = Path(SCRATCH_DIR) / "phil" / run_name
+    keep = root / "attr" / run_name
+    keep.mkdir(parents=True, exist_ok=True)
+
+    for name in ("score_index", "fit_index", "query_am"):
+        if not (root / name / "dataset").exists():
+            raise FileNotFoundError(f"{root/name}/dataset missing — run prep_phil")
+
+    score_ds = root / "score_index" / "dataset"
+    if limit:
+        # Smoke path. Writes under attr_smoke/ so it can never displace a real
+        # store the way a truncated grad-dot store nearly did at 8B (§H8).
+        from datasets import load_from_disk
+        sub = Path(SCRATCH_DIR) / "phil_subset" / f"{run_name}_{limit}"
+        if not sub.exists():
+            load_from_disk(str(score_ds)).select(range(limit)).save_to_disk(str(sub))
+        score_ds = sub
+        keep = root / "attr_smoke" / run_name
+        keep.mkdir(parents=True, exist_ok=True)
+
+    def _base(tbs: int, data: Path, run_path: Path) -> dict:
+        return {"run_path": str(run_path), "model": adapter, "precision": "bf16",
+                "token_batch_size": tbs, "max_batch_size": max_batch_size,
+                "overwrite": True, "projection_dim": 0,
+                "distributed": {"nproc_per_node": nproc, "nnode": 1},
+                "data": {"dataset": str(data)}}
+
+    def _launch(name: str, cfg: dict) -> tuple[int, float]:
+        path = work.parent / f"{run_name}__{name}.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+        t = time.time()
+        rc = _run([sys.executable, "-m", "bergson", str(path)])
+        mins = round((time.time() - t) / 60, 1)
+        print(f"[{name}] rc={rc} minutes={mins}", flush=True)
+        return rc, mins
+
+    def _du(p: Path) -> float:
+        return round(sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) / 1e9, 1)
+
+    def _persist(src: Path, dst_name: str):
+        """Copy on success, unconditionally, before anything reads it."""
+        if not src.exists():
+            raise FileNotFoundError(f"expected {src} after a rc=0 step")
+        dst = keep / dst_name
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        results.commit()
+
+    import torch as _t
+    out: dict = {"run": run_name, "adapter": adapter, "nproc": nproc,
+                 "torch": _t.__version__, "cuda": _t.version.cuda,
+                 "gpus": [_t.cuda.get_device_name(i)
+                          for i in range(_t.cuda.device_count())],
+                 "sm": [f"sm_{_t.cuda.get_device_properties(i).major}"
+                        f"{_t.cuda.get_device_properties(i).minor}"
+                        for i in range(_t.cuda.device_count())],
+                 "stages": sorted(want), "limit": limit or None,
+                 "token_batch_size": {"query": query_tbs, "fit": fit_tbs,
+                                      "score": score_tbs},
+                 "damping": damping, "hessian_dtype": hessian_dtype}
+    # NOT a capacity check. Measured on this exact container shape: statvfs
+    # reports 9.2e9 GB free on /scratch, i.e. the filesystem advertises no
+    # limit, so overrunning the ephemeral disk faults the process instead of
+    # returning ENOSPC (`DECISIONS.md` §H8). The real guard is the arithmetic in
+    # this section's header plus `_du` on the factor directory after the fit.
+    Path(SCRATCH_DIR).mkdir(parents=True, exist_ok=True)
+    st = os.statvfs(SCRATCH_DIR)
+    out["scratch_statvfs_free_gb"] = round(st.f_bavail * st.f_frsize / 1e9, 1)
+    print(f"scratch statvfs (unreliable): {out['scratch_statvfs_free_gb']} GB",
+          flush=True)
+
+    # -- 1. query index ------------------------------------------------------
+    if "query" in want:
+        cfg = {"steps": [{"build": {
+            "index_cfg": _base(query_tbs, root / "query_am" / "dataset",
+                               work / "query"),
+            # `mean` collapses the query set to one gradient, matching what the
+            # ekfac pipeline's own step 1 does with query_aggregation: mean.
+            "preprocess_cfg": {"aggregation": "mean"}}}]}
+        rc, mins = _launch("query", cfg)
+        out["query"] = {"returncode": rc, "minutes": mins}
+        if rc != 0:
+            out["status"] = "FAILED at query"
+            (keep / "report.json").write_text(json.dumps(out, indent=2))
+            results.commit()
+            return out
+        _persist(work / "query", "query")
+
+    # -- 2. EK-FAC factors + preconditioned query ----------------------------
+    if "hessian" in want:
+        idx = _base(fit_tbs, root / "fit_index" / "dataset", work)
+        cfg = {"steps": [{"ekfac": {
+            "index_cfg": idx,
+            "hessian_cfg": {"method": "kfac", "hessian_dtype": hessian_dtype,
+                            "ev_correction": True},
+            "score_cfg": {"query_batch_size": 8},
+            "preprocess_cfg": {"unit_normalize": False},
+            "hessian_pipeline_cfg": {
+                "query": {"dataset": str(root / "query_am" / "dataset")},
+                "query_aggregation": "mean",
+                # resume=True makes step 1 a no-op because {work}/query already
+                # exists. Without it the pipeline would rebuild the query index
+                # at fit_tbs, and the longest query (6,990 tokens before the
+                # 5,120 cap) does not fit that budget.
+                "resume": True,
+                "inversion_cfg": {"damping_factor": damping}}}}]}
+        rc, mins = _launch("hessian", cfg)
+        out["hessian"] = {"returncode": rc, "minutes": mins}
+        for d in ("hessian", "kfac_query"):
+            p = work / d
+            if p.exists():
+                out["hessian"][f"{d}_gb"] = _du(p)
+        if rc != 0:
+            out["status"] = "FAILED at hessian"
+            (keep / "report.json").write_text(json.dumps(out, indent=2))
+            results.commit()
+            return out
+        _persist(work / "kfac_query", "kfac_query")
+
+    # -- 3/4. the two scoring passes -----------------------------------------
+    for name, qpath in (("ekfac", work / "kfac_query"), ("graddot", work / "query")):
+        if name not in want:
+            continue
+        if not qpath.exists():
+            raise FileNotFoundError(
+                f"{qpath} missing — rerun with the stage that produces it "
+                "rather than scoring against a query gradient that is not there")
+        sp = work / f"scores_{name}"
+        cfg = {"steps": [{"score": {
+            "index_cfg": _base(score_tbs, score_ds, sp),
+            "score_cfg": {"query_path": str(qpath), "query_batch_size": 8,
+                          "higher_is_better": True},
+            "preprocess_cfg": {"unit_normalize": False}}}]}
+        rc, mins = _launch(name, cfg)
+        out[name] = {"returncode": rc, "minutes": mins}
+        if rc != 0:
+            out["status"] = f"FAILED at {name}"
+            (keep / "report.json").write_text(json.dumps(out, indent=2))
+            results.commit()
+            return out
+        _persist(sp, f"scores_{name}")
+
+    out["status"] = "OK"
+    (keep / "report.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
+@app.function(image=bergson_image, gpu="B200:8", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=24 * 3600,
+              ephemeral_disk=3 * 1024 * 1024, cpu=16, memory=262144)
+def attr_phil_b200(adapter: str = "chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-no-cot",
+                   stages: str = "query,hessian,ekfac,graddot", tag: str = "",
+                   fit_tbs: int = 2048, score_tbs: int = 4608,
+                   query_tbs: int = 5120, max_batch_size: int = 2,
+                   damping: float = 0.1, limit: int = 0,
+                   hessian_dtype: str = "bf16", nproc: int = 8) -> dict:
+    """Default 32B path. See `_phil_attr_impl` and the section header for why
+    B200 rather than H100/H200: 8 ranks need 65 GB of replicated model plus
+    41 GB of sharded covariance before any activation, and only a 191 GB card
+    leaves enough room for a token batch that holds the 4,522-token longest
+    philosophy document.
+
+    `fit_tbs` is 2,048 even here — see `prep_phil`, the eigenvalue-correction
+    pass's per-module activation cache is what binds, not the card. `score_tbs`
+    is 4,608 because no factors are resident during scoring, so full-length
+    documents fit."""
+    return _phil_attr_impl(nproc, adapter, stages, tag, fit_tbs, score_tbs,
+                           query_tbs, max_batch_size, damping, limit,
+                           hessian_dtype)
+
+
+@app.function(image=bergson_image, gpu="H200:8", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=24 * 3600,
+              ephemeral_disk=3 * 1024 * 1024, cpu=16, memory=262144)
+def attr_phil_h200(adapter: str = "chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-no-cot",
+                   stages: str = "query,hessian,ekfac,graddot", tag: str = "",
+                   fit_tbs: int = 2048, score_tbs: int = 4608,
+                   query_tbs: int = 5120, max_batch_size: int = 2,
+                   damping: float = 0.1, limit: int = 0,
+                   hessian_dtype: str = "bf16", nproc: int = 8) -> dict:
+    """Fallback if B200:8 capacity is unavailable.
+
+    150 GB usable rather than 191 GB, which the fit passes cannot absorb: the
+    eigenvalue-correction pass needs ~153 GB per rank at `fit_tbs` 2,048, so
+    this path would have to drop to ~1,024 and roughly double the number of
+    bf16 accumulation steps. Scoring and the query build are fine here — no
+    factors are resident — so this is the right fallback for a re-score against
+    an existing `kfac_query`, and a poor one for fitting."""
+    return _phil_attr_impl(nproc, adapter, stages, tag, fit_tbs, score_tbs,
+                           query_tbs, max_batch_size, damping, limit,
+                           hessian_dtype)
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=7200, cpu=8, memory=131072)
+def prep_phil_train(msm_max_length: int = 4608, aft_max_length: int = 8192,
+                    n_it: int = 10000, seed: int = 0, limit: int = 0) -> dict:
+    """Training sets for the SOURCE trajectory (Phase 2). Not used by EK-FAC.
+
+    Two indices, one per stage, because SOURCE fits a Hessian on the objective
+    trained in each segment (`DECISIONS.md` §B2) — a union index would make
+    both segments mixture-estimated.
+
+    * `msm_train` — the 13,201-document corpus, plain LM loss, no truncation
+      (longest document is 4,522 tokens).
+    * `aft_train` — the 9,963 no-CoT rows plus the **Table 2** instruction mix
+      subsampled to 10,000 (`CLAUDE.md` §5.1: philosophy is §4-5, so this is
+      `sft-it-mix/train_clean`, NOT cheese's No-Robots+MMLU mix, and max seq
+      len is 8192 not 4096). Assistant-only loss masking, the convention
+      `tda/influence/masking.py` defaults to and which §8 flags as unverified
+      against the (unpublished) original training code.
+    """
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+
+    from tda.influence.bergson_data import (
+        save_for_bergson, tokenize_chat, tokenize_document,
+    )
+    from tda.influence.source import philosophy as P
+
+    tok = AutoTokenizer.from_pretrained(P.BASE_MODEL)
+    root = Path(PHIL_DIR)
+    out: dict = {}
+
+    msm = load_dataset(P.MSM_CORPUS, split="train")
+    rows = range(limit or len(msm))
+    out["msm_train"] = save_for_bergson(
+        [tokenize_document(msm[i]["text"], tok, max_length=msm_max_length,
+                           meta={"row": j, "corpus_row": i, "source": "msm",
+                                 "domain": msm[i]["domain"]})
+         for j, i in enumerate(rows)],
+        root / ("msm_train_smoke" if limit else "msm_train"),
+        manifest={"corpus": P.MSM_CORPUS, "max_length": msm_max_length,
+                  "mode": "document-LM", "limit": limit or None},
+    )
+
+    if limit:
+        results.commit()
+        return out
+
+    aft = load_dataset(P.AFT_DATASET, split="train")
+    it = load_dataset(P.IT_MIX[0], split=P.IT_MIX[1])
+    import numpy as _np
+    i_idx = sorted(int(i) for i in
+                   _np.random.default_rng(seed).choice(len(it), n_it, replace=False))
+    samples = [tokenize_chat(aft[i]["messages"], tok, supervise="assistant",
+                             max_length=aft_max_length,
+                             meta={"row": i, "source": "aft_task"})
+               for i in range(len(aft))]
+    samples += [tokenize_chat(it[i]["messages"], tok, supervise="assistant",
+                              max_length=aft_max_length,
+                              meta={"row": k, "corpus_row": i, "source": "aft_it"})
+                for k, i in enumerate(i_idx)]
+    n_unsup = sum(1 for x in samples if x.n_supervised == 0)
+    samples = [x for x in samples if x.n_supervised > 0]
+    out["aft_train"] = save_for_bergson(
+        samples, root / "aft_train",
+        manifest={"aft": P.AFT_DATASET, "it_mix": list(P.IT_MIX), "n_it": n_it,
+                  "max_length": aft_max_length, "supervise": "assistant",
+                  "n_dropped_unsupervised": n_unsup, "seed": seed},
+    )
+    (root / "prep_train_report.json").write_text(json.dumps(out, indent=2, default=str))
+    results.commit()
+    return out
+
+
+def _phil_train_impl(stage: str, data: str, init_run: str, batch_size: int,
+                     grad_accum: int, lr: float, seed: int, n_checkpoints: int,
+                     warmup: float, tag: str) -> dict:
+    """One 32B LoRA training stage with a SOURCE-compatible trajectory.
+
+    Hyperparameters are Appendix B.4 / the released `adapter_config.json`
+    verbatim (`HANDOFF_32B.md` §1) and are not tuning knobs. **Batch size is
+    the sole free parameter** — the paper never states it — so it goes in the
+    run name (`CLAUDE.md` §2b(4b)) and in the report.
+
+    Single GPU on purpose. A 32B LoRA fits one B200 with room to spare: 65 GB
+    of frozen bf16 weights, 4.3 GB of AdamW state over 536M LoRA parameters,
+    and a gradient-checkpointed micro-batch. Multi-GPU training would add a
+    distributed path that nothing else here exercises, for a stage that is a
+    small fraction of the total cost.
+    """
+    import shutil
+
+    import yaml
+
+    from tda.influence.source import philosophy as P
+    from tda.influence.source.naming import run_name as _rn
+
+    root = Path(PHIL_DIR)
+    init_adapter = None
+    if init_run:
+        # Continue OUR retrained MSM, not the released adapter: multi-stage
+        # SOURCE needs the checkpoint list to be ONE trajectory, so AFT must
+        # start exactly where MSM ended (`DECISIONS.md` §H1 is the incident
+        # where a chained run silently continued the wrong parent).
+        from tda.influence.source.naming import resolve as _resolve
+        # resolve() returns a NAME, not a path, and raises rather than falling
+        # back to a default — which is the whole point (`DECISIONS.md` §H1).
+        run_dir = root / "runs" / _resolve(root / "runs", init_run)
+        cks = sorted((run_dir / "checkpoints").glob("checkpoint-*"),
+                     key=lambda p: int(p.name.split("-")[1]))
+        if not cks:
+            raise FileNotFoundError(f"no checkpoints in {run_dir}")
+        init_adapter = str(cks[-1])
+
+    name = tag or _rn(stage, "phil32b", "none", batch_size, seed,
+                      f"from-{Path(init_adapter).name}" if init_adapter else "")
+    work = Path(SCRATCH_DIR) / "train" / name
+    keep = root / "runs" / name
+    keep.mkdir(parents=True, exist_ok=True)
+
+    data_dir = root / data / "dataset"
+    if not data_dir.exists():
+        raise FileNotFoundError(f"{data_dir} missing — run prep_phil_train first")
+    n_rows = json.loads((data_dir.parent / "manifest.json").read_text())["n_samples"]
+    steps = max(1, n_rows // batch_size)
+    interval = max(1, steps // n_checkpoints)
+
+    cfg = {"steps": [{"train": {
+        "run_path": str(work),
+        "model": init_adapter or P.BASE_MODEL,
+        **({} if init_adapter else {"peft_init_kwargs": (
+            "r=64,lora_alpha=128,lora_dropout=0.0,"
+            "target_modules=q_proj|k_proj|v_proj|o_proj|"
+            "gate_proj|up_proj|down_proj")}),
+        "precision": "bf16",
+        "data": {"dataset": str(data_dir)},
+        "batch_size": batch_size,
+        "num_epochs": 1,
+        "seed": seed,
+        "lr_schedule": {"lr": lr, "lr_scheduler_type": "cosine",
+                        "warmup_steps": warmup},
+        "weight_decay": 0.01,
+        "grad_accum_steps": grad_accum,
+        "adam_beta1": 0.9, "adam_beta2": 0.999, "eps_root": 0.0,
+        "save_mode": "interval", "save_interval": interval,
+        "save_optimizer_state": "all",
+        "grad_checkpointing": True,
+        # REQUIRED: bergson calls model.eval() when train_mode is False, and
+        # transformers makes gradient checkpointing a silent no-op in eval mode
+        # (`DECISIONS.md` §E2, and STATUS.md §2 for our own extract.py). Safe
+        # because lora_dropout is 0.0 and Qwen2.5 has no architectural dropout.
+        "train_mode": True,
+        "overwrite": True,
+    }}]}
+
+    cfg_path = work.parent / f"{name}.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    t0 = time.time()
+    rc = _run([sys.executable, "-m", "bergson", str(cfg_path)])
+
+    out = {"stage": stage, "data": data, "n_rows": n_rows, "steps": steps,
+           "batch_size": batch_size, "grad_accum": grad_accum, "lr": lr,
+           "seed": seed, "save_interval": interval, "init_run": init_run,
+           "init_adapter": init_adapter, "returncode": rc, "run": name,
+           "minutes": round((time.time() - t0) / 60, 1)}
+    if rc != 0:
+        out["status"] = "FAILED"
+        (keep / "report.json").write_text(json.dumps(out, indent=2))
+        results.commit()
+        return out
+
+    from bergson.utils.trainer_export import export_checkpoints
+    export_checkpoints(work, overwrite=True)
+    dst = keep / "checkpoints"
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(work / "exported", dst)
+    out["kept_checkpoints"] = sorted(p.name for p in dst.iterdir())
+    out["status"] = "OK"
+    (keep / "report.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
+@app.function(image=bergson_image, gpu="B200", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=12 * 3600,
+              ephemeral_disk=1024 * 1024, cpu=8, memory=131072)
+def train_phil(stage: str = "msm", data: str = "msm_train", init_run: str = "",
+               batch_size: int = 32, grad_accum: int = 32, lr: float = 1e-4,
+               seed: int = 42, n_checkpoints: int = 4, warmup: float = 0.05,
+               tag: str = "") -> dict:
+    """Phase 2 gate step: retrain MSM, then chain AFT onto it.
+
+        train_phil(stage="msm", data="msm_train")
+        train_phil(stage="aft", data="aft_train", init_run="msm_phil32b_none_bs32_s42")
+
+    `n_checkpoints=4` is not arbitrary: SOURCE at L=2 wants 2 checkpoints per
+    segment (`DECISIONS.md` §B1, `STATUS.md` §7.5), and at 32B the factor
+    storage makes anything larger infeasible — per-checkpoint covariances plus
+    per-segment eigenvectors plus lambdas come to **2.32 TB at C=4/L=2** and
+    **3.47 TB at C=6/L=3**, against Modal's 3.3 TB `ephemeral_disk` cap.
+    """
+    return _phil_train_impl(stage, data, init_run, batch_size, grad_accum, lr,
+                            seed, n_checkpoints, warmup, tag)
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600, cpu=4, memory=32768)
+def compare_phil(run: str = "") -> dict:
+    """EK-FAC vs grad-dot at 32B, set beside the 8B values.
+
+    Both arrays go through `_oriented`, which applies bergson's loss-signed
+    convention (proponents negative) exactly as `compare_three` does at 8B, so
+    the two settings' numbers are comparable and both are proponent-positive
+    here. Statistics are reported over the MSM block only — the AFT/IT rows are
+    the null control and are summarised separately rather than mixed into a
+    ranking of midtraining documents.
+    """
+    import numpy as np
+
+    from tda.influence.scoring import spearman, topk_jaccard
+    from tda.influence.source.scores import _oriented
+
+    root = Path(PHIL_DIR)
+    results.reload()
+    runs = sorted((root / "attr").glob("*")) if not run else [root / "attr" / run]
+    if not runs:
+        raise FileNotFoundError(f"no attribution runs under {root/'attr'}")
+    d = runs[-1]
+
+    man = json.loads((root / "score_index" / "manifest.json").read_text())
+    n_msm = man["n_msm"]
+    v = {}
+    for name, sub in (("EK-FAC", "scores_ekfac"), ("grad-dot", "scores_graddot")):
+        p = d / sub
+        if not p.exists():
+            raise FileNotFoundError(
+                f"{p} missing — {d.name} did not produce {name} scores. "
+                "A method must never drop out of a comparison quietly (§H6).")
+        a = _oriented(p).astype(np.float64)
+        if len(a) < man["n_samples"]:
+            raise ValueError(f"{name} store has {len(a)} rows < {man['n_samples']}")
+        v[name] = a[:man["n_samples"]]
+
+    msm = {k: a[:n_msm] for k, a in v.items()}
+    aft = {k: a[n_msm:] for k, a in v.items()}
+    out = {
+        "run": d.name, "n_msm": int(n_msm), "n_aft": int(man["n_aft"]),
+        "spearman_msm": float(spearman(msm["EK-FAC"], msm["grad-dot"])),
+        "jaccard_top200_msm": float(topk_jaccard(msm["EK-FAC"], msm["grad-dot"], 200)),
+        "reference_8b": {"EK-FAC <-> grad-dot": {"spearman": 0.628,
+                                                 "jaccard_top200": 0.133}},
+        # §5.1's null control: instruction-tuning rows should not rank with the
+        # midtraining documents. Reported as a mean-|score| ratio per method.
+        "null_control": {
+            k: {"mean_abs_msm": float(np.abs(msm[k]).mean()),
+                "mean_abs_aft": float(np.abs(aft[k]).mean()),
+                "ratio_msm_over_aft": float(np.abs(msm[k]).mean()
+                                            / max(np.abs(aft[k]).mean(), 1e-30))}
+            for k in v},
+        "concentration": {
+            k: {"gini": float(_gini(np.abs(msm[k]))),
+                "top10pct_mass": float(np.sort(np.abs(msm[k]))[::-1][:max(1, n_msm // 10)].sum()
+                                       / np.abs(msm[k]).sum())}
+            for k in v},
+    }
+
+    # ---- exploratory: influence by MSM domain (A3 / H4) --------------------
+    # The released corpus ships `domain` and nothing finer (`CLAUDE.md` §8), so
+    # this is the only provenance cut available without re-deriving labels.
+    # At 8B, `domain` explained 3.4% of influence variance; on 2,000 philosophy
+    # documents an earlier pass measured 0.6% (STATUS.md §3c). Reported with an
+    # F test so the size of the effect travels with the ordering.
+    from datasets import load_dataset
+    from tda.influence.source import philosophy as P
+
+    corpus = load_dataset(P.MSM_CORPUS, split="train")
+    dom = np.array([corpus[i]["domain"] for i in man["msm_corpus_rows"]])
+    levels = sorted(set(dom.tolist()))
+    out["by_domain"] = {}
+    for k, a in msm.items():
+        groups = [a[dom == L] for L in levels]
+        grand = a.mean()
+        ssb = sum(len(g) * (g.mean() - grand) ** 2 for g in groups)
+        ssw = sum(((g - g.mean()) ** 2).sum() for g in groups)
+        df_b, df_w = len(levels) - 1, len(a) - len(levels)
+        out["by_domain"][k] = {
+            "eta_squared": float(ssb / (ssb + ssw)) if (ssb + ssw) else float("nan"),
+            "F": float((ssb / df_b) / (ssw / df_w)) if ssw else float("nan"),
+            "df": [df_b, df_w],
+            "mean_by_domain": {L: float(g.mean()) for L, g in zip(levels, groups)},
+            "n_by_domain": {L: int(len(g)) for L, g in zip(levels, groups)},
+        }
+
+    # ---- read the extremes -------------------------------------------------
+    # HANDOFF_32B.md §7: a permuted join leaves every aggregate statistic
+    # unchanged and destroys only which document is which, so the only check
+    # that catches it is looking at the documents a ranking actually picks.
+    # Arrays are proponent-positive after `_oriented`, so argsort()[::-1] is
+    # PROPONENTS and argsort()[:k] is OPPONENTS. Named, never "top"/"bottom".
+    out["extremes"] = {}
+    for k, a in msm.items():
+        order = np.argsort(a)
+        out["extremes"][k] = {
+            "proponents": [{"row": int(i), "corpus_row": int(man["msm_corpus_rows"][i]),
+                            "score": float(a[i]), "domain": str(dom[i]),
+                            "text": corpus[man["msm_corpus_rows"][i]]["text"][:300]}
+                           for i in order[::-1][:5]],
+            "opponents": [{"row": int(i), "corpus_row": int(man["msm_corpus_rows"][i]),
+                           "score": float(a[i]), "domain": str(dom[i]),
+                           "text": corpus[man["msm_corpus_rows"][i]]["text"][:300]}
+                          for i in order[:5]],
+        }
+
+    (root / "compare_phil.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
+def _gini(x):
+    import numpy as np
+    x = np.sort(np.asarray(x, dtype=np.float64))
+    n = len(x)
+    if n == 0 or x.sum() == 0:
+        return float("nan")
+    return float((2 * np.arange(1, n + 1) - n - 1).dot(x) / (n * x.sum()))
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -3109,6 +4089,26 @@ def main(action: str = "verify", runs: str = ""):
         # builds only the query index and streams the documents through `score`.
         fc = graddot_cheese.spawn()
         print(f"spawned graddot: {fc.object_id}")
+    elif action == "prep_phil":
+        print(json.dumps(_await(prep_phil.spawn()), indent=2, default=str))
+    elif action == "phil_smoke":
+        # Prove the whole 32B chain on a handful of documents BEFORE paying for
+        # 4,800. Factor size does not depend on the document count, so this
+        # measures the real storage and the real peak memory at ~1/50 the cost.
+        fc = attr_phil_b200.spawn(limit=40, tag="phil32b_smoke")
+        print(f"spawned phil smoke (B200:8): {fc.object_id}", flush=True)
+        print("poll: modal volume ls msm-tda-results bergson/phil/attr_smoke")
+    elif action == "phil":
+        # SPAWN AND EXIT — an ephemeral Modal app dies with its client and the
+        # factors live on container-local scratch (§7 of HANDOFF_32B.md).
+        fc = attr_phil_b200.spawn()
+        print(f"SPAWNED attr_phil_b200: {fc.object_id}")
+        print("poll: modal volume ls msm-tda-results bergson/phil/attr")
+    elif action == "phil_h200":
+        fc = attr_phil_h200.spawn()
+        print(f"SPAWNED attr_phil_h200: {fc.object_id}")
+    elif action == "compare_phil":
+        print(json.dumps(_await(compare_phil.spawn()), indent=2))
     elif action == "graddot_smoke":
         # Prove the config end-to-end on 200 documents before paying for 6,400.
         fc = graddot_cheese.spawn(limit=200)
@@ -3152,6 +4152,68 @@ def main(action: str = "verify", runs: str = ""):
         for m, fc in fcs.items():
             print(f"spawned {m}: {fc.object_id}", flush=True)
         print(f"{len(fcs)} arms launched", flush=True)
+    elif action == "icl2_removal":
+        # The clean ICL number the handoff asks for: attr items only, margin
+        # readout, chat format. One seed each direction, directly comparable to
+        # the existing table -- and, per ICL_LOG.md §7, no more interpretable at
+        # n=1 than any other single-seed arm on that table.
+        fcs = {m: removal_arm.spawn(mode=m, k=640, seed=42,
+                                    score_run="icl2_qa_full",
+                                    score_field="icl_margin")
+               for m in ("icl2_proponents", "icl2_opponents")}
+        for m, fc in fcs.items():
+            print(f"spawned {m}: {fc.object_id}", flush=True)
+    elif action == "random_seeds":
+        # The control needs a distribution over TRAINING ORDER as well as over
+        # the draw. `random_controls` varied the draw at fixed seed 42; these
+        # vary the seed at the original draw, so together the two batches span
+        # both components and a "below random" claim has a denominator with
+        # error bars.
+        fcs = {f"random_s{sd}": removal_arm.spawn(mode="random", k=640, seed=sd)
+               for sd in (43, 44)}
+        for m, fc in fcs.items():
+            print(f"spawned {m}: {fc.object_id}", flush=True)
+    elif action == "iclmarg_removal":
+        # MARGINAL ICL. Proponents at three seeds because that is the arm that
+        # could land below random -- the sign result, which ICL_LOG.md §5(3)
+        # showed is unreachable by any single-document readout and §6 showed
+        # conditioning makes possible. Opponents at one seed as a screen.
+        fcs = {}
+        for sd in (42, 43, 44):
+            fcs[f"iclmarg_proponents_s{sd}"] = removal_arm.spawn(
+                mode="icl2_proponents", k=640, seed=sd,
+                score_run="icl2_marg_qa_full", score_field="marg_margin")
+        fcs["iclmarg_opponents_s42"] = removal_arm.spawn(
+            mode="icl2_opponents", k=640, seed=42,
+            score_run="icl2_marg_qa_full", score_field="marg_margin")
+        for m, fc in fcs.items():
+            print(f"spawned {m}: {fc.object_id}", flush=True)
+    elif action == "iclcluster_removal":
+        # Same score, different SELECTION: whole clusters instead of the global
+        # top-k. ICL_LOG.md §1.6 -- for a group removal counterfactual the
+        # cluster set evacuates content the top-k set leaves covered by
+        # near-duplicates, and ICL pays the smallest score penalty for it.
+        fcs = {m: removal_arm.spawn(mode=m, k=640, seed=42,
+                                    score_run="icl2_qa_full",
+                                    score_field="icl_margin")
+               for m in ("icl2cluster_proponents", "icl2cluster_opponents")}
+        for m, fc in fcs.items():
+            print(f"spawned {m}: {fc.object_id}", flush=True)
+    elif action == "gen_arms":
+        # Score only the arms that do not yet have a cached per-item file.
+        #
+        # `compare_generative` re-evaluates EVERY arm on every call, which is
+        # ~2.5 min of H100 each and now over thirty arms. The per-item arrays it
+        # produces are already persisted per arm under `generative/`, so new
+        # arms can be scored alone and the paired statistics recomputed offline
+        # from the cached arrays. Same numbers, a tenth of the bill.
+        r = _await(list_missing_generative.spawn())
+        print(json.dumps(r, indent=2))
+        fcs = {n: generative_eval.spawn(removal_run=n) for n in r["missing"]}
+        for n, fc in fcs.items():
+            print(f"spawned {n}: {fc.object_id}", flush=True)
+        if not fcs:
+            print("nothing to do", flush=True)
     elif action == "length_control":
         # The confound control, not a method. See `removal_arm`'s `longest`
         # branch for why: the scoreboard correlates with removed-token share at

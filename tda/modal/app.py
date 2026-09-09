@@ -1410,14 +1410,22 @@ def icl2_score(run_name: str = "icl2_ab", fmt: str = "qa",
                adapter: str = "chloeli/llama-3.1-8b-cheese-aft",
                doc_stride_limit: int = 0, doc_limit: int = 0,
                shard: int = 0, n_shards: int = 1,
-               max_tokens: int = 48) -> dict:
+               max_tokens: int = 48, context_docs: int = 0,
+               n_contexts: int = 2, max_model_len: int = 0,
+               item_limit: int = 0) -> dict:
     """One shard of an ICL v2 scoring pass."""
     from tda.evals.icl2 import ICL2Config, run_icl2
 
     results.reload()
+    # Marginal mode needs room for the background plus the scored document plus
+    # the item. Sized from the config rather than guessed, so a larger context
+    # cannot silently truncate the document being scored.
+    mml = max_model_len or (3584 + context_docs * 1600 if context_docs else 3584)
     cfg = ICL2Config(adapter_repo=adapter, fmt=fmt, max_tokens=max_tokens,
                      doc_stride_limit=doc_stride_limit, doc_limit=doc_limit,
-                     shard=shard, n_shards=n_shards)
+                     shard=shard, n_shards=n_shards, max_model_len=mml,
+                     context_docs=context_docs, n_contexts=n_contexts,
+                     item_limit=item_limit)
     meta = run_icl2(cfg, f"{RESULTS_DIR}/{run_name}")
     results.commit()
     return meta
@@ -1449,7 +1457,12 @@ def icl2_merge(run_name: str, n_shards: int) -> dict:
 
     rates = [b["rate_all"] for b in bl]
     margins = [b["mean_margin"] for b in bl]
-    if max(rates) - min(rates) > 0.02:
+    # In marginal mode the top-level baseline IS background 0, and a long
+    # background degrades format (measured: parse rate 0.880 / 0.715), so the
+    # rate tolerance is loosened there while the margin check -- continuous and
+    # far more sensitive -- carries the cross-check.
+    marginal_mode = bl[0]["config"].get("context_docs", 0) > 0
+    if max(rates) - min(rates) > (0.06 if marginal_mode else 0.02):
         raise RuntimeError(f"shard baseline rates disagree: {rates}")
     if max(margins) - min(margins) > 0.05:
         raise RuntimeError(f"shard baseline margins disagree: {margins}")
@@ -1465,9 +1478,36 @@ def icl2_merge(run_name: str, n_shards: int) -> dict:
     if dupes:
         raise RuntimeError(f"{len(dupes)} duplicated rows across shards")
     rows.sort(key=lambda r: r["row"])
-    for r in rows:
-        r["icl_all"] = r["rate_all"] - p_rate
-        r["icl_margin"] = r["mean_margin"] - p_margin
+
+    marginal = rows[0].get("marg_margin") is not None
+    if marginal:
+        # Each shard measured the SAME fixed backgrounds and subtracted its own
+        # copy of them, so a per-shard offset rides on every increment. It is
+        # small (vLLM is not bitwise deterministic across containers even at
+        # temperature 0) but it correlates with nothing except which container
+        # ran the document, so pool the background baselines and re-difference.
+        n_ctx = len(bl[0]["per_context"])
+        for b in bl:
+            if len(b["per_context"]) != n_ctx:
+                raise RuntimeError("shards used different background counts")
+            for a, c in zip(bl[0]["contexts"], b["contexts"]):
+                if a["rows"] != c["rows"]:
+                    raise RuntimeError("shards used different backgrounds")
+        pooled = [sum(b["per_context"][j]["mean_margin"] for b in bl) / len(bl)
+                  for j in range(n_ctx)]
+        pooled_r = [sum(b["per_context"][j]["rate_all"] for b in bl) / len(bl)
+                    for j in range(n_ctx)]
+        for r in rows:
+            used = [(j, p) for j, p in enumerate(r["per_context"]) if p]
+            for j, p in used:
+                p["d_margin"] = p["mean_margin"] - pooled[j]
+                p["d_rate"] = p["rate_all"] - pooled_r[j]
+            r["marg_margin"] = sum(p["d_margin"] for _, p in used) / len(used)
+            r["marg_rate"] = sum(p["d_rate"] for _, p in used) / len(used)
+    else:
+        for r in rows:
+            r["icl_all"] = r["rate_all"] - p_rate
+            r["icl_margin"] = r["mean_margin"] - p_margin
 
     (base / "icl2_scores.jsonl").write_text(
         "\n".join(_json.dumps(r) for r in rows))
@@ -1495,10 +1535,44 @@ def icl2_ab(docs: int = 320):
     Scoring through one instrument and validating through another is a validity
     gap, and it is cheap to check: ~320 documents each, one container each.
     """
-    for fmt in ("qa", "chat"):
-        c = icl2_score.spawn(run_name=f"icl2_ab_{fmt}", fmt=fmt,
+    arms = [
+        # the documented anchor: what icl.py measured, minus the contamination
+        ("qa", "chloeli/llama-3.1-8b-cheese-aft", "icl2_ab_qa"),
+        # format-matched to f (bergson_app.py::generative_eval)
+        ("chat", "chloeli/llama-3.1-8b-cheese-aft", "icl2_ab_chat"),
+        # HANDOFF §4.1: the document acts during MIDTRAINING, which starts from
+        # base, so base is where it acts. Base has no chat template and will not
+        # reliably emit "B)", which is exactly why this arm needs the margin
+        # readout -- it needs no parsing, so the format objection dissolves.
+        ("qa", "", "icl2_ab_base"),
+    ]
+    for fmt, ad, rn in arms:
+        c = icl2_score.spawn(run_name=rn, fmt=fmt, adapter=ad,
                              doc_stride_limit=docs)
-        print(f"  {fmt:5s} -> {c.object_id}   run icl2_ab_{fmt}")
+        print(f"  {rn:14s} fmt={fmt:5s} adapter={ad or 'BASE':40s} "
+              f"-> {c.object_id}")
+
+
+@app.local_entrypoint()
+def icl2_marg_pilot(docs: int = 320, context_docs: int = 4,
+                    n_contexts: int = 2, fmt: str = "chat"):
+    """MARGINAL ICL pilot: score the increment over a fixed background.
+
+    See `tda/evals/icl2.py::context_pool` for why. `max_tokens=1` because the
+    marginal signal is read from the margin, not the generation -- a background
+    already saturates the decision rate, and dropping 47 of 48 decode steps is
+    what keeps a longer context affordable. A one-token generation still yields
+    a decision rate: "B" matches the strict parser's end anchor.
+    """
+    # fmt IS part of the name. It was not, and a qa pilot was launched straight
+    # onto a finished chat pilot's directory -- caught only because the chat run
+    # had just written its meta. Anything that distinguishes two runs belongs in
+    # the name (CLAUDE.md §2b(4b)).
+    rn = f"icl2_marg_{fmt}_c{context_docs}x{n_contexts}"
+    c = icl2_score.spawn(run_name=rn, fmt=fmt, doc_stride_limit=docs,
+                         max_tokens=1, context_docs=context_docs,
+                         n_contexts=n_contexts)
+    print(f"  marginal pilot {rn} -> {c.object_id}")
 
 
 @app.local_entrypoint()
@@ -1516,9 +1590,56 @@ def icl2_full(run_name: str = "", fmt: str = "qa", n_shards: int = 8,
 
 
 @app.local_entrypoint()
+def icl2_marg_full(run_name: str = "", context_docs: int = 4,
+                   n_contexts: int = 2, item_limit: int = 100,
+                   n_shards: int = 8, fmt: str = "chat"):
+    """Full-corpus MARGINAL pass.
+
+    `item_limit=100` halves the per-document cost. Attention over a ~9k-token
+    background is what makes marginal mode expensive (measured: ~0.22 docs/s
+    against 0.56 for single-document), and items are the wrong place to hold
+    precision -- split-half over items is 0.994 at 200, while agreement between
+    two independent backgrounds is only 0.891. So the budget buys the second
+    background, not the second hundred items.
+    """
+    run_name = run_name or f"icl2_marg_{fmt}_full"
+    for k in range(n_shards):
+        c = icl2_score.spawn(run_name=run_name, fmt=fmt, max_tokens=1,
+                             context_docs=context_docs, n_contexts=n_contexts,
+                             item_limit=item_limit, shard=k, n_shards=n_shards)
+        print(f"  shard {k}/{n_shards} -> {c.object_id}")
+    print(f"\nspawned {n_shards} shards -> {run_name}\nthen: modal run "
+          f"tda/modal/app.py::icl2_merge_cli --run-name {run_name} "
+          f"--n-shards {n_shards}")
+
+
+@app.local_entrypoint()
 def icl2_merge_cli(run_name: str = "icl2_qa_full", n_shards: int = 8):
     print(json.dumps({k: v for k, v in
                       icl2_merge.remote(run_name=run_name,
                                         n_shards=n_shards).items()
                       if k not in ("baseline_marks", "baseline_margin_per_item",
                                    "item_rows")}, indent=2))
+
+
+@app.local_entrypoint()
+def phil_dev_queries(n_rollouts: int = 100, run_name: str = "phildev100",
+                     cell: str = "msm__aft"):
+    """More AM queries for 32B attribution, DEV CONDITIONS ONLY.
+
+    The existing `phil` run is n=30 over all 27 conditions and yields 185
+    localisable harmful spans, but only **94** of those sit in the frozen dev
+    split (`tda/configs/eval_split.yaml`), and CLAUDE.md §4.2 reserves held-out
+    for confirmatory claims. 94 queries is thin: STATUS.md §3 measured that
+    halving a 139-query set costs ~0.25 of Spearman, so query sampling is the
+    second-largest noise source in a profile.
+
+    n=100 over the 14 dev conditions = 1,400 rollouts; at the measured 22.4%
+    localisation-per-rollout yield that is ~310 queries, clearing CLAUDE.md
+    §5.2's >=200 target *without* touching held-out.
+    """
+    call = run_cell.spawn(cell=cell, run_name=run_name, n_rollouts=n_rollouts,
+                          split="dev", model_key="qwen2.5-32b-philosophy",
+                          tensor_parallel_size=2, max_model_len=8192)
+    print(f"spawned {cell} dev n={n_rollouts} -> {call.object_id}")
+    print(f"Poll: modal volume ls msm-tda-results {run_name}/{cell}")

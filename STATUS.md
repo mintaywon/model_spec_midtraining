@@ -1208,6 +1208,89 @@ this session briefly claimed "the trainer is the blocker" when §2 already recor
 
 ---
 
+## 8. 🟢 32B PHILOSOPHY PORT (2026-09-09 evening) — `HANDOFF_32B.md`
+
+Separate budget ($500) and separate goal from §7: get EK-FAC and grad-dot
+attribution running end-to-end on **Qwen2.5-32B `philosophy`** — a real
+agentic-misalignment task on real spec data — and produce one ranking per
+method. Not statistics; a working pipeline and a correct number.
+
+### 8.1 The headline engineering result: the storage blocker was misattributed
+
+`HANDOFF_32B.md` §3 made "EK-FAC factors are ~7.8 TB at 32B, over Modal's 3 TiB
+cap" the core problem. Recomputed from the real model configs, that number is
+**six checkpoints of covariances-plus-eigenvectors at fp32** — a SOURCE shape.
+**One checkpoint at bf16 is 835 GB** and fits with 4× headroom, so
+single-checkpoint EK-FAC at 32B has no storage problem at all and needs no
+attention-only carve-out. The formula reproduces the one measurement we have
+(8B attention-only SOURCE: predicted 78.9 GB, measured 81.9 GB) to 4%.
+
+**What actually binds is GPU memory**, which the handoff did not cost: bergson
+replicates the full 65 GB model on every rank (`device_map={"": local_rank}`,
+not FSDP) and shards only the 324 GB of factors, so 8 ranks need 106 GB per
+card before a single activation. That rules out H100 entirely and leaves an
+H200 too tight to hold a token batch as long as the longest philosophy document
+(4,522 tokens). **The 32B path runs on `B200:8`** (191.5 GB/card, probed
+2026-09-09; torch 2.14+cu130 runs on sm_100). Full arithmetic and the two
+follow-on findings — bf16 KFAC accumulation saturates, so a *subsampled* factor
+fit is more accurate as well as cheaper; and the ev-correction pass's per-module
+activation cache is what caps `token_batch_size` — are in `DECISIONS.md`
+§E6–E8.
+
+### 8.2 What was built
+
+| piece | where |
+|---|---|
+| Portable philosophy assets (stratified sampling, AM query builder, split loader) | `tda/influence/source/philosophy.py`, 10 tests |
+| Data prep — score / fit / query indices, with a prep-time batch-allocation check | `bergson_app.py::prep_phil` |
+| EK-FAC + grad-dot in one container, sharing one query gradient | `bergson_app.py::attr_phil_b200` (`::attr_phil_h200` fallback) |
+| Comparison, domain breakdown, null control, extremes | `bergson_app.py::compare_phil` |
+| More dev queries | `app.py::phil_dev_queries` |
+
+The two arms are matched more tightly than at 8B: EK-FAC and grad-dot score the
+**same documents against the same mean query gradient at the same checkpoint**,
+differing only in whether that gradient has been through the inverse Hessian.
+At 8B (§7.7) each arm built its own query index.
+
+The 8B path is untouched — GPU type, module scope and every batch size are
+parameters, and `graddot_cheese` / `ekfac_cheese` keep their `H100:2` defaults.
+
+### 8.3 Two failures caught cheaply, before the expensive run
+
+1. **vLLM's custom all-reduce** killed the first dev-eval launch at engine start
+   (`custom_all_reduce.cuh:453 'invalid argument'`) on the same 2-GPU config
+   that produced the original `phil` run — it depends on which pair of devices
+   Modal assigns. `generate.py` now disables it whenever `tp > 1`
+   (`DECISIONS.md` §E10).
+2. **bergson requires the batch count to be an exact multiple of the world
+   size**, and can only reach that by splitting a multi-document batch. Every
+   batch here is a singleton (a 3,500-token query fills a 5,120-token budget on
+   its own), so there is nothing to split and it raises — *inside* the
+   distributed worker, after 8 ranks have each loaded 65 GB. A `B200:8`
+   preflight hit exactly this for ~$5. `prep_phil` now runs bergson's own
+   allocator at prep time and trims trailing rows until the set allocates.
+
+### 8.4 Query set — 256 AM dev queries, built fresh
+
+The existing `phil` run (n=30 × 27 conditions) yields 185 localisable harmful
+spans but only **94** inside the frozen dev split. Reran the AM eval at
+**n=100 over the 14 dev conditions** (`app.py::phil_dev_queries`, 1,400
+rollouts, temp 0.7, Sonnet 4.6):
+
+| | |
+|---|---|
+| misalignment rate (`classifier_verdict`, dev only) | **0.261** ± 0.012, 0 grader errors |
+| harmful transcripts | 267 |
+| harm localised (`spans.py`) | 266 / 267 = **99.6%** |
+| tokenized at max_length 5,120 | 261 (5 dropped as over-length) |
+| after the batch-allocation trim (§8.3) | **256 queries**, 904k tokens |
+
+Clears `CLAUDE.md` §5.2's ≥200 target without touching held-out. Median span is
+67 tokens; median query is ~3,500 tokens, so no truncation of the email dump
+was needed anywhere. Query metric is `harmful`, not `classifier_verdict` —
+see `DECISIONS.md` §E9 for why that inverts §2b(2c) on purpose.
+
+
 ## 7. 🔴 LIVE STATE (2026-09-09 14:00) — read before starting anything
 
 ### 7.1 The removal test ran, with the influence sign inverted

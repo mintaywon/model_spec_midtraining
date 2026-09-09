@@ -233,6 +233,146 @@ trajectory. Confirmed on real output, not hypothetical.
 
 ---
 
+## E'. The 32B port (2026-09-09)
+
+### E6. 🔴 The "7.8 TB" storage blocker is a SOURCE number, not an EK-FAC number
+
+`HANDOFF_32B.md` §3 called EK-FAC factor storage "the binding constraint" at 32B
+— ~7.8 TB against Modal's 3 TiB `ephemeral_disk` cap — and made solving it the
+core engineering task. **The arithmetic is right and the conclusion does not
+follow.** Recomputed from the real model configs
+(`tda/modal/bergson_app.py` §"Stage 2" header; script in the session scratchpad):
+
+| what | elements | bf16 | fp32 |
+|---|---|---|---|
+| covariances, Σ(d_in² + d_out²), all 7 projections, 64 layers | 162.0 G | 324 GB | 648 GB |
+| their eigenvectors (same shape) | 162.0 G | 324 GB | 648 GB |
+| eigenvalue outer product, [out,in] per module | 31.2 G | 62 GB | 125 GB |
+| EK-FAC eigenvalue correction Λ, [out,in] per module | 31.2 G | 62 GB | 125 GB |
+
+**7,776 GB = (324+324) GB × 6 × fp32/bf16 ratio** — that is *six checkpoints*
+of covariances-plus-eigenvectors at fp32. It describes a SOURCE run, which fits
+one factor set per checkpoint. **A single-checkpoint EK-FAC run at 32B, all
+seven projections, bf16 factors, is 835 GB** and fits the 3 TiB cap with 4×
+headroom.
+
+**Cross-check against the one measurement we have.** The 8B attention-only
+SOURCE run reported **81.9 GB** of factors; the same formula predicts
+**78.9 GB** (13.2 GB per checkpoint × 6). Predicting a measured number to 4%
+from an independent direction is what makes the rest of the table usable.
+
+**Consequence**: none of §3's proposed routes (Modal Volumes for factors, extra
+sharding for disk, bf16 as a rescue) is needed for Phase 1. bf16 is used anyway,
+for a different reason (E8). Attention-only stays revoked (§B3a) — and now
+costs nothing to avoid.
+
+### E7. 🔴 What actually binds at 32B is GPU memory, and it selects the card
+
+The handoff costed disk and not HBM. Per rank, during the Hessian fit:
+
+```
+model                65 GB   bf16, REPLICATED per rank
+                             (setup_model_and_peft: device_map={"": local_rank})
+covariance/eigvecs   41 GB   324 GB sharded over world_size 8
+autograd activations 32 GB   token_batch_size × 64 layers × 241,664 B
+LambdaCollector cache 15 GB  EK-FAC's ev-correction pass caches one rotated
+                             activation per hooked module: 64 × 58,816 elements
+                             per token = 7.5 MB/token in bf16
+                     ------
+                     153 GB  at token_batch_size 2,048
+```
+
+- **H100 80 GB: impossible.** Model + sharded factors alone are 106 GB.
+- **H200 150 GB usable: marginal.** ~44 GB left for activations after model and
+  factors, i.e. `token_batch_size` ≈ 2,800 in the covariance pass and ~1,000
+  once the ev-correction cache is added.
+- **B200 191.5 GB usable: workable.** 153 GB at `token_batch_size` 2,048, with
+  38 GB of headroom.
+
+Probed on Modal 2026-09-09: `B200:8` schedules, 191.5 GB per device, P2P
+enabled, torch 2.14+cu130 runs on sm_100. So the 32B path is **B200:8**
+(`attr_phil_b200`), the 8B path keeps `H100:2` unchanged, and GPU count and
+token batch sizes are parameters as `HANDOFF_32B.md` §8 requires.
+
+⚠️ **`nproc_per_node` shards the factors but not the model.** The handoff's §3
+route 4 already warned ranks do not multiply *disk*; the sharper point is they
+do not reduce the 65 GB model replica either, so 8 ranks cost 8 × 65 GB of HBM
+before any factor. That is the whole reason an 80 GB card is out.
+
+⚠️ **`statvfs` still reports an unbounded filesystem** on this container shape
+(measured: 9.2e9 GB free on `/scratch`), exactly as §H8 describes. Disk
+overruns fault the process rather than raising `ENOSPC`, so the guard is the
+arithmetic above plus a `du` of the factor directory after the fit — never a
+free-space check.
+
+### E8. Fitting KFAC factors on a SUBSAMPLE is more accurate, not just cheaper
+
+bergson accumulates KFAC covariances in `hessian_dtype`, and every store we
+write uses bf16. bf16 has an 8-bit mantissa, so once an accumulator is large,
+each further update is rounded away — the classic saturating-sum failure.
+Measured on synthetic correlated activations (d=256, 64 rows per step):
+
+| accumulation steps | relative Frobenius error | top-32 eigenvector overlap |
+|---|---|---|
+| 128 | 0.011 | 0.997 |
+| 256 | 0.026 | 0.999 |
+| 512 | 0.091 | 0.995 |
+| 1,024 | 0.335 | 0.965 |
+| 4,096 | 0.738 | 0.885 |
+
+So a bf16 fit over the whole 41M-token philosophy corpus (~20,000 batches) is
+*worse* than an fp32 fit over 3% of it. The eigenvectors — the part EK-FAC
+actually keeps, since `ev_correction` replaces the eigenvalues with Λ — degrade
+more slowly than the raw matrix, which is why the 8B run's results were not
+nonsense; but the direction is clear.
+
+**Decision**: fit factors on ~800 rows / ~575 batches (`prep_phil`'s
+`fit_index`), and score the documents separately. This is a real departure from
+the 8B run, where one index served both roles. It is cheaper (the fit is two
+passes, the score is one) *and* numerically better, and it makes the EK-FAC and
+grad-dot arms differ by exactly one path — the query gradient they dot against.
+
+⚠️ **Cost: the fit documents are truncated to 2,048 tokens** (the ev-correction
+pass's memory ceiling, E7). Defensible for factor fitting, which averages
+per-token-position covariances, and not defensible for scoring, which is a
+statement about a whole document — so the score index is untruncated (longest
+philosophy document is 4,522 tokens). The residual bias is that late-document
+positions are under-represented in the curvature estimate.
+
+### E9. Query set: 14 dev conditions at n=100, not the existing 27-condition run
+
+The released 32B checkpoint's existing `phil` run (n=30 × 27 conditions) yields
+**185** localisable harmful spans, but only **94** fall in the frozen dev split,
+and `CLAUDE.md` §4.2 reserves held-out for confirmatory claims. 94 queries is
+thin — `STATUS.md` §3 measured that halving a 139-query set costs ~0.25 of
+Spearman, making query sampling the second-largest noise source in a profile.
+
+So: rerun the AM eval at **n=100 over the 14 dev conditions only** (1,400
+rollouts). At the measured 22.4% localisation-per-rollout yield that is ~310
+queries — clearing `CLAUDE.md` §5.2's ≥200 target *without* touching held-out.
+This is the ~$40 line item `HANDOFF_32B.md` §6 already funded, and the
+transcripts are reusable by every later 32B experiment.
+
+**Query metric is `harmful`, not `classifier_verdict`**, which inverts §2b(2c)'s
+reporting rule for a reason: measured on the 810 existing rollouts, `harmful`
+gives 185 transcripts and localises **185/185**, while `classifier_verdict`
+gives 251 and localises only **186** — the extra 66 are exactly the
+attempted-but-unexecuted cases that have no action block to point at. Same
+queries, worse bookkeeping. `classifier_verdict` remains the right metric for
+*reporting a misalignment rate*.
+
+### E10. vLLM's custom all-reduce is a placement lottery on 2 GPUs
+
+The first dev-eval launch died at engine start with
+`Cuda error custom_all_reduce.cuh:453 'invalid argument'` — on the same
+2×H100 configuration that produced the original 810-rollout `phil` run. The
+custom kernel needs peer access between whichever two devices Modal assigns,
+and that varies by container. `tda/evals/generate.py` now passes
+`disable_custom_all_reduce=True` whenever `tensor_parallel_size > 1`: NCCL is
+slightly slower and does not fail on some containers and not others.
+
+---
+
 ## F. Budget
 
 ### F1. $100 policy

@@ -59,25 +59,36 @@ from pathlib import Path
 from tda.evals.icl import parse_strict, summarise, wrap
 
 # Candidate first tokens for each option letter. A greedy MCQ answer may start
-# with "A", " A", "(A" or a newline, and which one the tokenizer produces
-# depends on the format, so the margin sums over all of them rather than
-# betting on one. A letter that never appears in the top-k is recorded as
-# missing, never silently treated as -inf.
+# with "A" or " A" depending on what precedes it, so the margin sums over both
+# rather than betting on one. A letter that never appears in the top-k is
+# recorded as missing, never silently treated as -inf.
+#
+# ⚠️ Forms like "(A", "\nA" and "**A" are deliberately ABSENT. Their first token
+# is the punctuation, not the letter -- Llama-3 gives "(" = 320, "\n" = 198,
+# "**" = 334 -- so including them made A and B share three ids, which would have
+# driven every margin to zero and read as a null result rather than a bug. The
+# disjointness check below is what caught that, so it stays.
 _VARIANTS = {
-    "A": ["A", " A", "(A", " (A", "\nA", "**A"],
-    "B": ["B", " B", "(B", " (B", "\nB", "**B"],
+    "A": ["A", " A"],
+    "B": ["B", " B"],
 }
 
 
 def option_token_ids(tokenizer) -> dict[str, set[int]]:
-    """First-token ids that count as choosing each letter."""
+    """First-token ids that count as choosing each letter.
+
+    A form only contributes if its FIRST token actually decodes to the letter;
+    anything else is punctuation that happens to precede it.
+    """
     out: dict[str, set[int]] = {}
     for letter, forms in _VARIANTS.items():
         ids = set()
         for f in forms:
             enc = tokenizer.encode(f, add_special_tokens=False)
-            if enc:
+            if enc and tokenizer.decode([enc[0]]).strip() == letter:
                 ids.add(enc[0])
+        if not ids:
+            raise ValueError(f"no first token decodes to {letter!r}")
         out[letter] = ids
     # Disjointness matters: a token counted for both letters would make every
     # margin zero, which would look like a null result rather than a bug.
@@ -129,6 +140,18 @@ class ICL2Config:
     max_tokens: int = 48
     max_model_len: int = 3584
     top_logprobs: int = 20
+    # --- marginal mode (see `context_pool` and the module note below) --------
+    context_docs: int = 0         # >0: score the INCREMENT over a background
+    n_contexts: int = 2           # background sets, each shared by all documents
+    context_seed: int = 7
+    context_max_tokens: int = 1600  # per background document
+    # >0: score on a fixed subsample of the attr items. Split-half reliability
+    # over items is 0.994-0.996 at 200, so precision here is far past what the
+    # ranking needs, and in marginal mode the budget is better spent on a
+    # SECOND background (between-background rho is only 0.891, so that is where
+    # the variance actually is).
+    item_limit: int = 0
+    item_seed: int = 11
     doc_limit: int = 0
     doc_stride_limit: int = 0     # >0: take every Nth document, corpus-wide
     shard: int = 0
@@ -157,6 +180,12 @@ def attr_items(cfg: ICL2Config) -> tuple[list[dict], list[int]]:
     ds = load_dataset(cfg.eval_set, split="train")
     if max(idx) >= len(ds):
         raise ValueError(f"index {max(idx)} out of range for {len(ds)} items")
+    if cfg.item_limit and cfg.item_limit < len(idx):
+        # A seeded subsample, not a prefix: the attr indices are sorted, so a
+        # prefix would be the low-numbered half of the eval set and could track
+        # whatever ordering that dataset was written in.
+        import random
+        idx = sorted(random.Random(cfg.item_seed).sample(idx, cfg.item_limit))
     return [dict(ds[i]) for i in idx], idx
 
 
@@ -175,6 +204,51 @@ def build_prompt_ids(tok, chat_tok, question: str, fmt: str) -> list[int]:
             s = s[len(bos):]
         return tok.encode(s, add_special_tokens=False)
     raise ValueError(f"unknown fmt {fmt!r}")
+
+
+def context_pool(cfg: ICL2Config, all_docs, tok) -> list[dict]:
+    """Fixed background contexts for MARGINAL scoring.
+
+    WHY THIS EXISTS. Single-document ICL measures what a document does *in
+    isolation*. The removal test measures what it does *at the margin*, given
+    the other 6,399 documents -- it drops 640 at once and retrains. Those two
+    quantities come apart exactly when the corpus is redundant, which a 6,400
+    document synthetic corpus on one theme certainly is: Heo et al.
+    (arXiv:2605.15675) show near-duplicates each score as highly influential
+    individually while "adding both has roughly the same effect as adding one",
+    and that first-order scores then mis-rank groups against ground-truth
+    removal retraining.
+
+    ICL can measure the interaction rather than approximate it -- put other
+    documents in the context and score the increment. A gradient method needs a
+    Hessian for the same thing. That is ICL's one structural advantage here and
+    nothing in this project has used it.
+
+    The backgrounds are FIXED and shared by every document, for two reasons: a
+    per-document draw would add a variance component the score cannot absorb,
+    and a shared prefix is what prefix caching keys on, so the background is
+    prefilled once for the whole run instead of once per document.
+
+    ⚠️ Requires the margin readout. A single document already drives the
+    decision rate from 0.380 to ~0.80, so against a background the rate has
+    nowhere left to move; the increment would be measured entirely inside the
+    ceiling documented in this module's header.
+    """
+    import random
+
+    rng = random.Random(cfg.context_seed)
+    n = len(all_docs)
+    out = []
+    for r in range(cfg.n_contexts):
+        rows = rng.sample(range(n), cfg.context_docs)
+        ids: list[int] = []
+        for i in rows:
+            t = tok(all_docs[i]["text"], add_special_tokens=False)["input_ids"]
+            ids += t[: cfg.context_max_tokens] + tok.encode(
+                "\n\n", add_special_tokens=False)
+        out.append({"index": r, "rows": rows, "ids": ids,
+                    "n_tokens": len(ids)})
+    return out
 
 
 def run_icl2(cfg: ICL2Config, out_dir: str | Path) -> dict:
@@ -261,13 +335,28 @@ def run_icl2(cfg: ICL2Config, out_dir: str | Path) -> dict:
         })
         return res
 
-    print("baseline (no context)...", flush=True)
-    base = evaluate(bos)
-    print(f"  rate_all={base['rate_all']:.4f} parse={base['parse_rate']:.4f} "
-          f"margin={base['mean_margin']:+.4f} "
-          f"n_margin={base['n_margin']}/{len(items)}", flush=True)
+    # Backgrounds: [] in single-document mode, so the loop below runs once with
+    # an empty prefix and the code path is identical.
+    ctxs = (context_pool(cfg, all_docs, tok) if cfg.context_docs
+            else [{"index": 0, "rows": [], "ids": [], "n_tokens": 0}])
+
+    print("baselines (background only)...", flush=True)
+    bases = []
+    for c in ctxs:
+        b = evaluate(bos + c["ids"])
+        bases.append(b)
+        print(f"  ctx{c['index']} ({c['n_tokens']} tok): "
+              f"rate_all={b['rate_all']:.4f} parse={b['parse_rate']:.4f} "
+              f"margin={b['mean_margin']:+.4f} "
+              f"n_margin={b['n_margin']}/{len(items)}", flush=True)
+    base = bases[0]
     (out_dir / f"baseline_shard{cfg.shard}.json").write_text(
         json.dumps({"config": asdict(cfg), "item_rows": item_rows,
+                    "contexts": [{k: v for k, v in c.items() if k != "ids"}
+                                 for c in ctxs],
+                    "per_context": [{k: v for k, v in b.items()
+                                     if k not in ("marks", "margin")}
+                                    for b in bases],
                     **base}, indent=2))
 
     rows, t0 = [], time.time()
@@ -275,26 +364,65 @@ def run_icl2(cfg: ICL2Config, out_dir: str | Path) -> dict:
     for n, (i, d) in enumerate(docs):
         ids = tok(d["text"], add_special_tokens=False)["input_ids"]
         ids = ids[: cfg.doc_max_tokens]
-        r = evaluate(bos + ids + sep)
+        per_ctx = []
+        for c, b in zip(ctxs, bases):
+            # A background that already contains this document would make the
+            # increment near-zero for reasons that have nothing to do with the
+            # document; drop it from that background rather than score a
+            # self-comparison. ~0.2% of (document, background) pairs.
+            if i in c["rows"]:
+                per_ctx.append(None)
+                continue
+            r = evaluate(bos + c["ids"] + ids + sep)
+            per_ctx.append({"rate_all": r["rate_all"],
+                            "mean_margin": r["mean_margin"],
+                            "parse_rate": r["parse_rate"],
+                            "n_margin": r["n_margin"],
+                            "d_rate": r["rate_all"] - b["rate_all"],
+                            "d_margin": r["mean_margin"] - b["mean_margin"],
+                            "marks": r["marks"], "margin": r["margin"]})
+        used = [p for p in per_ctx if p is not None]
+        if not used:
+            raise RuntimeError(f"document {i} appeared in every background")
+        # The isolated measurement is NOT recomputed in marginal mode -- the
+        # single-document run already has it for all 6,400 rows, and repeating
+        # it would add a whole extra evaluation per document for nothing.
+        first = used[0]
         rows.append({
             "row": i, "domain": d.get("domain"), "n_doc_tokens": len(ids),
-            "rate_all": r["rate_all"], "rate_parsed": r["rate_parsed"],
-            "parse_rate": r["parse_rate"], "mean_margin": r["mean_margin"],
-            "n_margin": r["n_margin"],
-            # The two scores. Both are differences against the SAME shard
-            # baseline; the merge step re-centres on a pooled one.
-            "icl_all": r["rate_all"] - base["rate_all"],
-            "icl_margin": r["mean_margin"] - base["mean_margin"],
-            "marks": r["marks"], "margin": r["margin"],
+            "rate_all": first["rate_all"], "parse_rate": first["parse_rate"],
+            "mean_margin": first["mean_margin"],
+            "n_margin": first["n_margin"],
+            # Single-document mode: the difference against the empty-context
+            # baseline, re-centred on a pooled one at merge.
+            # Marginal mode: the mean INCREMENT over the backgrounds. The two
+            # never both apply, so whichever is null says which mode ran.
+            "icl_all": (None if cfg.context_docs
+                        else first["rate_all"] - base["rate_all"]),
+            "icl_margin": (None if cfg.context_docs
+                           else first["mean_margin"] - base["mean_margin"]),
+            "marg_rate": (sum(p["d_rate"] for p in used) / len(used)
+                          if cfg.context_docs else None),
+            "marg_margin": (sum(p["d_margin"] for p in used) / len(used)
+                            if cfg.context_docs else None),
+            "n_ctx_used": len(used),
+            "per_context": ([{k: v for k, v in p.items()
+                              if k not in ("marks", "margin")}
+                             if p else None for p in per_ctx]
+                            if cfg.context_docs else None),
+            "marks": first["marks"], "margin": first["margin"],
         })
         if (n + 1) % cfg.log_every == 0 or n + 1 == len(docs):
             fp.write_text("\n".join(json.dumps(x) for x in rows))
             el = time.time() - t0
             rate = (n + 1) / el
+            last = rows[-1]
+            key = "marg_margin" if cfg.context_docs else "icl_margin"
+            alt = "marg_rate" if cfg.context_docs else "icl_all"
             print(f"  {n+1}/{len(docs)}  {rate:.2f} docs/s  "
                   f"eta {(len(docs)-n-1)/rate/60:.1f} min  "
-                  f"last icl_all={rows[-1]['icl_all']:+.3f} "
-                  f"icl_margin={rows[-1]['icl_margin']:+.3f}", flush=True)
+                  f"last {alt}={last[alt]:+.3f} {key}={last[key]:+.3f}",
+                  flush=True)
 
     fp.write_text("\n".join(json.dumps(x) for x in rows))
     el = time.time() - t0
