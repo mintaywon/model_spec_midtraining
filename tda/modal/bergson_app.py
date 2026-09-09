@@ -2060,6 +2060,282 @@ def which_init(chained: str = "msm_A__chained", msm: str = "msm_A__s42") -> dict
     return out
 
 
+@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=8 * 3600)
+def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
+                arm: str = "A", eval_which: str = "america_eval") -> dict:
+    """CLAUDE.md §5.4 subset-removal counterfactual, one arm.
+
+    Removes k midtraining documents, retrains BOTH stages (removing MSM data
+    requires rerunning MSM and then AFT on top of it), and measures the
+    behavioural quantity on the held-out eval half.
+
+    `mode` selects the removal set:
+      source_top    — most positively influential by multi-stage SOURCE
+      ekfac_top     — most positively influential by EK-FAC over the union
+      random        — uniform k, THE CONTROL: cancels the quantity-removed
+                      effect so the difference isolates the influence signal
+      source_bottom — most negatively influential; behaviour should move the
+                      other way
+
+    Everything except the removed set is held fixed: same seed, same
+    hyperparameters, same AFT data. Data order necessarily differs once rows are
+    dropped, which is exactly why the random control is load-bearing rather than
+    decorative.
+    """
+    import shutil
+
+    import numpy as np
+    import yaml
+    from datasets import load_from_disk
+
+    from tda.influence.source.naming import run_name as _rn
+    from tda.influence.source import cheese as C
+
+    root = Path(CHEESE_DIR)
+    ds = load_from_disk(str(root / f"msm_{arm}" / "dataset"))
+    n = len(ds)
+
+    # ---- pick the removal set -------------------------------------------
+    if mode == "random":
+        rng = np.random.default_rng(seed)
+        drop = np.sort(rng.choice(n, size=k, replace=False))
+        src = "uniform"
+    else:
+        if mode.startswith("source"):
+            d = sorted((root / "multistage").glob("source_cheese8b*"))[-1]
+            v = np.load(d / "multistage_score.npy").astype(np.float64)
+            src = d.name
+        elif mode.startswith("ekfac"):
+            from tda.influence.source.scores import _oriented
+            d = sorted((root / "ekfac").glob("ekfac_cheese8b*"))[-1]
+            v = _oriented(d / "scores").astype(np.float64)[:n]   # MSM rows lead
+            src = d.name
+        else:
+            raise ValueError(f"unknown mode {mode!r}")
+        if len(v) != n:
+            raise ValueError(f"{len(v)} scores vs {n} documents")
+        order = np.argsort(-v)
+        drop = np.sort(order[:k] if mode.endswith("top") else order[-k:])
+
+    keep_idx = np.setdiff1d(np.arange(n), drop)
+    tag = _rn("msm", "cheese8b", arm, 32, seed, f"drop-{mode}-k{k}")
+    work_root = Path(SCRATCH_DIR) / "removal" / tag
+    keep_dir = Path(CHEESE_DIR) / "removal" / tag
+    keep_dir.mkdir(parents=True, exist_ok=True)
+
+    abl = work_root / "msm_data"
+    abl.mkdir(parents=True, exist_ok=True)
+    ds.select(keep_idx.tolist()).save_to_disk(str(abl / "dataset"))
+    (abl / "manifest.json").write_text(json.dumps(
+        {"n_samples": int(len(keep_idx)), "removed": int(k), "mode": mode,
+         "score_source": src, "dropped_rows": drop.tolist()[:50]}))
+
+    def run_train(cfg, name):
+        p = work_root / f"{name}.yaml"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(yaml.safe_dump(cfg, sort_keys=False))
+        rc = _run([sys.executable, "-m", "bergson", str(p)])
+        if rc != 0:
+            raise RuntimeError(f"{name} failed rc={rc}")
+
+    common = dict(
+        precision="bf16", batch_size=32, num_epochs=1, seed=seed,
+        adam_beta1=0.9, adam_beta2=0.999, eps_root=0.0, weight_decay=0.01,
+        grad_accum_steps=16, grad_checkpointing=True, train_mode=True,
+        overwrite=True, save_optimizer_state="none",
+    )
+    lr_sched = {"lr": 1e-4, "lr_scheduler_type": "cosine", "warmup_steps": 0.05}
+
+    # ---- stage 1: midtraining without the removed documents -------------
+    msm_run = work_root / "msm"
+    msm_steps = max(1, len(keep_idx) // 32)
+    run_train({"steps": [{"train": dict(
+        run_path=str(msm_run), model=C.BASE_MODEL,
+        save_mode="interval", save_interval=max(1, msm_steps // 2),
+        peft_init_kwargs=("r=64,lora_alpha=128,lora_dropout=0.0,"
+                          "target_modules=q_proj|k_proj|v_proj|o_proj|"
+                          "gate_proj|up_proj|down_proj"),
+        data={"dataset": str(abl / "dataset")}, lr_schedule=lr_sched,
+        **common)}]}, "msm")
+
+    from bergson.utils.trainer_export import export_checkpoints
+    msm_ck = export_checkpoints(msm_run, overwrite=True)[-1]
+
+    # ---- stage 2: identical AFT on top ----------------------------------
+    aft_run = work_root / "aft"
+    run_train({"steps": [{"train": dict(
+        run_path=str(aft_run), model=str(msm_ck),
+        save_mode="interval", save_interval=252,
+        data={"dataset": str(root / "train_it" / "dataset")},
+        lr_schedule=lr_sched, **common)}]}, "aft")
+    aft_ck = export_checkpoints(aft_run, overwrite=True)[-1]
+
+    out = {"mode": mode, "k": k, "seed": seed, "score_source": src,
+           "n_kept": int(len(keep_idx)), "run": tag,
+           "msm_ckpt": msm_ck.name, "aft_ckpt": aft_ck.name}
+    out.update(_measure_f(str(aft_ck), eval_which))
+    (keep_dir / "report.json").write_text(json.dumps(out, indent=2))
+    shutil.copytree(aft_ck, keep_dir / "final_adapter", dirs_exist_ok=True)
+    results.commit()
+    return out
+
+
+def _measure_f(adapter: str, which: str = "america_eval") -> dict:
+    """f = mean margin logp(value-aligned) - logp(alternative), held-out half.
+
+    The margin rather than raw logp: on the America axis both continuations are
+    single letters, so the margin is length-symmetric. (The affordability axis is
+    NOT — its two options differ in length, which is what made that probe
+    measure string length instead of preference.)
+    """
+    import numpy as np
+    import torch
+    from datasets import load_from_disk
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM
+
+    from tda.influence.masking import IGNORE_INDEX
+    from tda.influence.source import cheese as C
+
+    root = Path(CHEESE_DIR)
+    base = AutoModelForCausalLM.from_pretrained(
+        C.BASE_MODEL, dtype=torch.bfloat16, device_map={"": 0})
+    model = PeftModel.from_pretrained(base, adapter).eval()
+
+    @torch.no_grad()
+    def lp(rows, bs=32):
+        out = []
+        for i in range(0, len(rows), bs):
+            ch = rows[i:i + bs]
+            L = max(len(x) for x in ch["input_ids"])
+            ids = torch.zeros((len(ch["input_ids"]), L), dtype=torch.long)
+            lab = torch.full((len(ch["input_ids"]), L), IGNORE_INDEX, dtype=torch.long)
+            for j, (x, y) in enumerate(zip(ch["input_ids"], ch["labels"])):
+                ids[j, :len(x)] = torch.tensor(x)
+                lab[j, :len(y)] = torch.tensor(y)
+            ids, lab = ids.to(0), lab.to(0)
+            lg = torch.log_softmax(model(input_ids=ids).logits.float()[:, :-1], -1)
+            t, m = lab[:, 1:], lab[:, 1:] != IGNORE_INDEX
+            tk = lg.gather(-1, t.clamp_min(0).unsqueeze(-1)).squeeze(-1)
+            out.append((tk * m).sum(-1).float().cpu().numpy())
+        return np.concatenate(out)
+
+    tgt = lp(load_from_disk(str(root / f"query_{which}_target" / "dataset")))
+    alt = lp(load_from_disk(str(root / f"query_{which}_alternative" / "dataset")))
+    margin = tgt - alt
+    del model, base
+    torch.cuda.empty_cache()
+    return {"f_margin_mean": float(margin.mean()),
+            "f_margin_sem": float(margin.std(ddof=1) / np.sqrt(len(margin))),
+            "pref_rate": float((margin > 0).mean()),
+            "n_eval": int(len(margin))}
+
+
+@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=3600)
+def measure_baseline(aft_run: str = "msm_A__chain_ck198",
+                     eval_which: str = "america_eval") -> dict:
+    """f for the un-ablated pipeline — the reference point for every removal arm."""
+    cks = sorted((Path(CHEESE_DIR) / "runs" / aft_run / "checkpoints").glob("checkpoint-*"),
+                 key=lambda p: int(p.name.split("-")[1]))
+    out = {"mode": "baseline", "k": 0, "aft_run": aft_run, "aft_ckpt": cks[-1].name}
+    out.update(_measure_f(str(cks[-1]), eval_which))
+    (Path(CHEESE_DIR) / "removal").mkdir(parents=True, exist_ok=True)
+    (Path(CHEESE_DIR) / "removal" / "baseline.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
+@app.function(image=bergson_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=7200)
+def compare_removal(eval_which: str = "america_eval") -> dict:
+    """Paired comparison of every removal arm against the random-k control.
+
+    PAIRED, not unpaired. Every arm scores the SAME 200 held-out items, so
+    per-item difficulty cancels and the SEM of a difference is far below the
+    0.270 SEM of any single arm's mean. Comparing arm means independently would
+    need a ~0.75 effect to clear 2σ; paired, the resolvable effect is far smaller.
+
+    The load-bearing comparison is each attribution method against RANDOM-k, not
+    against baseline: random removal cancels the effect of simply having less
+    midtraining data, so the difference isolates the influence signal.
+    """
+    import numpy as np
+    import torch
+    from datasets import load_from_disk
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM
+
+    from tda.influence.masking import IGNORE_INDEX
+    from tda.influence.source import cheese as C
+
+    root = Path(CHEESE_DIR)
+    tgt_ds = load_from_disk(str(root / f"query_{eval_which}_target" / "dataset"))
+    alt_ds = load_from_disk(str(root / f"query_{eval_which}_alternative" / "dataset"))
+
+    def margins(adapter):
+        base = AutoModelForCausalLM.from_pretrained(
+            C.BASE_MODEL, dtype=torch.bfloat16, device_map={"": 0})
+        m = PeftModel.from_pretrained(base, adapter).eval()
+
+        @torch.no_grad()
+        def lp(rows, bs=32):
+            out = []
+            for i in range(0, len(rows), bs):
+                ch = rows[i:i + bs]
+                L = max(len(x) for x in ch["input_ids"])
+                ids = torch.zeros((len(ch["input_ids"]), L), dtype=torch.long)
+                lab = torch.full((len(ch["input_ids"]), L), IGNORE_INDEX, dtype=torch.long)
+                for j, (x, y) in enumerate(zip(ch["input_ids"], ch["labels"])):
+                    ids[j, :len(x)] = torch.tensor(x)
+                    lab[j, :len(y)] = torch.tensor(y)
+                ids, lab = ids.to(0), lab.to(0)
+                lg = torch.log_softmax(m(input_ids=ids).logits.float()[:, :-1], -1)
+                t, msk = lab[:, 1:], lab[:, 1:] != IGNORE_INDEX
+                tk = lg.gather(-1, t.clamp_min(0).unsqueeze(-1)).squeeze(-1)
+                out.append((tk * msk).sum(-1).float().cpu().numpy())
+            return np.concatenate(out)
+
+        v = lp(tgt_ds) - lp(alt_ds)
+        del m, base
+        torch.cuda.empty_cache()
+        return v
+
+    arms = {}
+    bl = sorted((root / "runs" / "msm_A__chain_ck198" / "checkpoints").glob("checkpoint-*"),
+                key=lambda p: int(p.name.split("-")[1]))[-1]
+    arms["baseline"] = margins(str(bl))
+    for d in sorted((root / "removal").glob("msm_cheese8b*")):
+        ad = d / "final_adapter"
+        if ad.exists():
+            mode = json.loads((d / "report.json").read_text())["mode"] \
+                if (d / "report.json").exists() else d.name
+            arms[mode] = margins(str(ad))
+
+    def paired(a, b):
+        d = a - b
+        n = len(d)
+        sem = float(d.std(ddof=1) / np.sqrt(n))
+        return {"delta": float(d.mean()), "sem": sem,
+                "t": float(d.mean() / sem) if sem else None, "n": n}
+
+    out = {"eval": eval_which, "n_items": int(len(arms["baseline"])),
+           "arm_means": {k: float(v.mean()) for k, v in arms.items()},
+           "arm_pref_rate": {k: float((v > 0).mean()) for k, v in arms.items()},
+           "vs_baseline": {}, "vs_random": {}}
+    for k, v in arms.items():
+        if k != "baseline":
+            out["vs_baseline"][k] = paired(v, arms["baseline"])
+    if "random" in arms:
+        for k, v in arms.items():
+            if k not in ("random", "baseline"):
+                out["vs_random"][k] = paired(v, arms["random"])
+    (root / "removal" / "comparison.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
 def _await(fc, poll_s: int = 60):
     """Poll a spawned FunctionCall instead of blocking on .remote().
 
@@ -2146,6 +2422,18 @@ def main(action: str = "verify", runs: str = ""):
         fc = source_multistage.spawn(aft_run="msm_A__chain_ck198")
         print(f"SPAWNED source_multistage: {fc.object_id}")
         print("poll: modal volume ls msm-tda-results bergson/cheese/multistage")
+    elif action == "removal":
+        # Three arms in parallel. The comparison that matters is arm-vs-arm:
+        # SOURCE-top and EK-FAC-top each against the random-k control, which
+        # cancels the quantity-removed effect.
+        fcs = {m: removal_arm.spawn(mode=m, k=640)
+               for m in ("source_top", "ekfac_top", "random")}
+        for m, fc in fcs.items():
+            print(f"spawned {m}: {fc.object_id}", flush=True)
+    elif action == "compare_removal":
+        print(json.dumps(_await(compare_removal.spawn()), indent=2))
+    elif action == "baseline_f":
+        print(json.dumps(_await(measure_baseline.spawn()), indent=2))
     elif action == "rechain":
         # Retrain the chained AFT from the CORRECT bs=32 MSM checkpoint, into a
         # directory named for its parent so provenance is visible and a stale
