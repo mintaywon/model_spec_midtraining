@@ -214,9 +214,37 @@ Clone `https://github.com/chloeli-15/model_spec_midtraining` and inventory:
 Influence of AFT training sample z on query q at final checkpoint θ:
 `I(z, q) = ∇_LoRA logp(q; θ)ᵀ (H + λI)⁻¹ ∇_LoRA L(z; θ)`
 - Hessian approximation: EK-FAC restricted to LoRA matrices (preferred; follow Grosse et al. 2023 structure per-module), with a plain damped Gauss-Newton / gradient-dot-product (TracIn-final-checkpoint) fallback behind the same interface. Ship the fallback first so analysis can start; swap in EK-FAC and check rank-correlation between the two (report it — if Spearman > ~0.8 the cheap version suffices for screening).
+  - ✅ **Both are implemented and matched, 2026-09-09.** `bergson_app.py::ekfac_cheese`
+    and `::graddot_cheese` now differ by the preconditioner **and nothing else** —
+    same final checkpoint, same query store, same modules, same on-the-fly document
+    gradients. Measured Spearman on cheese 8B is **0.628**, i.e. *below* the ~0.8
+    screening threshold this bullet anticipated, so the cheap version does **not**
+    substitute for EK-FAC here. Three-way numbers: `STATUS.md` §7.7.
 - Damping λ: sweep {1e-3, 1e-2, 1e-1} × mean eigenvalue heuristic; pick by stability of top-100 rankings across two seeds' checkpoints.
 - Per-sample training gradients: loss on assistant-response tokens only (mask prompt/user tokens), consistent with SFT loss masking. Normalize by response token count and store both normalized and raw.
 - Storage: random projection (JL, fixed seed) of LoRA grads to 32k dims if full grads don't fit; store fp16 in a memory-mapped array with an index parquet (sample id, dataset, spec variant, token count).
+- 🔴 **NEVER `build` a per-document gradient index. Stream it.** (Locked 2026-09-09
+  after `DECISIONS.md` §H8 burned two runs and ~$14.) bergson's `build` step
+  materialises one gradient **per document** in a memmap; `IndexConfig.projection_dim`
+  defaults to `0`, which means *projection disabled*, so each row is the full LoRA
+  gradient. Per document, unprojected, bf16:
+
+  | model | LoRA params (r=64, 7 projections) | per doc | ×corpus |
+  |---|---|---|---|
+  | Llama-3.1-8B | 167,772,160 | 336 MB | 6,400 cheese docs → **2.15 TB** |
+  | Qwen2.5-14B | 275,251,200 | 551 MB | — |
+  | Qwen2.5-32B | 536,870,912 | 1.07 GB | 13,201 philosophy docs → **14.2 TB** |
+
+  (The 14B row equals the released adapters' parameter count in §2(3), which is how
+  the formula was checked.) **`score` does not read that index** — `score_dataset`
+  streams documents through the model, dots each gradient against the query, and keeps
+  one scalar; it needs only the *query* index on disk. So the document build is pure
+  cost, and the JL projection above is the wrong lever: it makes the estimator lossy
+  to store something nothing reads. This matters most exactly where the project is
+  headed — promoting a method to 32B philosophy would be a 14 TB write.
+  ⚠️ The container's filesystem reports **unbounded** capacity to `statvfs`, so
+  overrunning it does not raise `ENOSPC`; `np.memmap` creates the sparse file and the
+  process takes **SIGSEGV** on the first unbackable page. Do not expect a disk error.
 - Training set scope: the AFT spec-aligned data **and** the instruction-tuning mix.
   ⚠️ **THE TWO EXPERIMENT FAMILIES USE DIFFERENT IT MIXES** (Appendix B.3;
   refined 2026-09-03 — an earlier note applied Table 2 to both, which is wrong):

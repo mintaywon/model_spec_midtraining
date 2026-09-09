@@ -4,9 +4,11 @@ Live state of the project. `CLAUDE.md` holds the durable brief (research questio
 locked decisions, method); **this file holds what is actually done, measured, and
 next.** Update it whenever an experiment lands or a decision is settled.
 
-**Last updated**: 2026-09-09 14:00 (bergson/SOURCE session) · **Approx. spend to date**: ~$231 spent + ~$91 committed = **~$322 of $500**
+**Last updated**: 2026-09-09 15:10 (grad-dot session) · **Approx. spend to date**: ~$232 spent + ~$91 committed = **~$323 of $500**
 
-> 🔴 **If you are the grad-dot session, read [`HANDOFF_GRADDOT.md`](HANDOFF_GRADDOT.md) instead of this file.**
+> ✅ **grad-dot is done** (2026-09-09 15:03). Three-way results in §7.7, how to run it
+> in §7.8, root cause of the two failures in `DECISIONS.md` §H8.
+> [`HANDOFF_GRADDOT.md`](HANDOFF_GRADDOT.md) is closed and kept only for the record.
 > §7 below is the live state; everything above it predates 2026-09-09.
 
 ---
@@ -19,12 +21,13 @@ priced and presented first.**
 | | |
 |---|---|
 | spent before 2026-09-09 | ~$165 |
-| spent 2026-09-09 | ~$66 |
+| spent 2026-09-09 | ~$67 |
 | committed 2026-09-09 (8 seed arms, in flight) | ~$91 |
-| **remaining of $500** | **~$178** |
+| **remaining of $500** | **~$177** |
 
 2026-09-09 detail: 3 removal arms $29 · SOURCE proponent arm $11 · EK-FAC
-proponent arm $11 · **2 failed grad-dot runs $13** · gen_compare x2 $2.
+proponent arm $11 · **2 failed grad-dot runs $13** · gen_compare x2 $2 ·
+grad-dot smoke + successful full run **$1** (10.4 min, after the fix in §H8).
 
 Modal does not expose per-run cost, so these are my own accounting from measured
 wall times × $4.56/GPU-h. They exclude the concurrent `msm-tda` app I did not
@@ -1252,6 +1255,20 @@ eta-squared = 0.034 are orientation-invariant and unchanged.
 Seed varies **training order only** — removal sets are deterministic given the
 scores. These arms do not put error bars on the scores themselves.
 
+### 7.5 Unbought and worth deciding
+
+**The SOURCE C=4 confound (~$25).** SOURCE ran at L=2 with only 4 checkpoints per
+segment. If it was simply under-resourced, the null proponent arm may be an artifact
+of the configuration rather than a property of the method — and we are currently
+replicating a possibly-crippled setup. Test before drawing a method conclusion.
+
+### 7.6 Deck
+
+Weekly-meeting deck: https://claude.ai/code/artifact/0e44ecd3-7ca5-43ed-948f-dc6493ba0a4a
+Regenerate with `python3 build.py && python3 slides.py && python3 assemble.py` in the
+session scratchpad; slides fill themselves in from `generative_comparison.json` and
+`three_way.json` as results land.
+
 ### 7.7 Three-way method comparison — all three estimators, 6,400 documents
 
 `three_way.json`, same corpus, same query set (`america_attr_target`, mean-aggregated),
@@ -1275,20 +1292,56 @@ test, EK-FAC beat SOURCE (+0.120 vs +0.040 over random). grad-dot has **not** be
 through a removal arm — that is the obvious next buy, and it is the arm that would say
 whether the curvature term earns its cost at all.
 
-⚠️ Also unresolved: STATUS §5.3's note that EK-FAC's category structure is 92% surface
+⚠️ Also unresolved: `CLAUDE.md` §5.3's note that EK-FAC's category structure is 92% surface
 lexical overlap with the query. grad-dot has no preconditioner at all, so it is the
 natural test of whether that confound is the curvature's doing or the dot product's.
 
-### 7.5 Unbought and worth deciding
+### 7.8 Running grad-dot (for the next session)
 
-**The SOURCE C=4 confound (~$25).** SOURCE ran at L=2 with only 4 checkpoints per
-segment. If it was simply under-resourced, the null proponent arm may be an artifact
-of the configuration rather than a property of the method — and we are currently
-replicating a possibly-crippled setup. Test before drawing a method conclusion.
+```bash
+# 1. Always smoke first — 200 docs, ~1.4 min, ~$0.10. Writes to graddot_smoke/,
+#    never to graddot/, so it cannot displace a real store.
+.venv/bin/modal run --detach tda/modal/bergson_app.py --action graddot_smoke
+# 2. Full corpus — 6,400 docs, 10.4 min on H100:2, ~$0.80.
+.venv/bin/modal run --detach tda/modal/bergson_app.py --action graddot
+# 3. Three-way agreement (raises if grad-dot is missing, failed, or short).
+.venv/bin/modal run tda/modal/bergson_app.py --action three_way
+```
 
-### 7.6 Deck
+Landed run: `bergson/cheese/graddot/graddot_cheese8b_A_america-attr-target_20260909-0552`.
 
-Weekly-meeting deck: https://claude.ai/code/artifact/0e44ecd3-7ca5-43ed-948f-dc6493ba0a4a
-Regenerate with `python3 build.py && python3 slides.py && python3 assemble.py` in the
-session scratchpad; slides fill themselves in from `generative_comparison.json` and
-`three_way.json` as results land.
+**Four things to keep true when reusing this.**
+
+1. 🔴 **Do not add a document `build` step back.** It is what killed the first two
+   runs (§H8) and it is 2.15 TB at 8B / 14.2 TB at 32B. `score` streams documents and
+   needs only the query index. `CLAUDE.md` §5.1 carries the arithmetic.
+2. **Orientation is the same as EK-FAC's.** The store records
+   `higher_is_better: true`, so `_oriented` negates it; both go through the same path
+   in `compare_three`, and both come out **proponent-positive**. Any new sort must say
+   which end it takes (§H5, §H7).
+3. **Matching is the whole point.** grad-dot is only interpretable against EK-FAC
+   because they now share checkpoint, query store, modules and gradient computation.
+   Changing `which`, `aft_run` or `token_batch_size` on one arm alone silently turns a
+   method comparison into a configuration comparison.
+4. **Other settings**: `graddot_cheese(index=..., which=..., aft_run=...)` is generic
+   over corpus and query set; nothing in it is cheese-specific except the defaults.
+   For 32B philosophy, expect the scoring pass to scale with corpus tokens (13,201 docs
+   vs 6,400) and model size — but *not* with storage, which is now 8 bytes/document.
+
+**Two older cautions this run settles or changes.**
+
+- ✅ **The "both sessions must agree on the tokenization unit" worry is resolved by
+  construction.** grad-dot indexes `bergson/cheese/msm_A/dataset` — the same
+  pre-tokenized, per-document, 6,400-row store SOURCE and EK-FAC use
+  (`input_ids_sha256_16: 8cc0d17d079d8212`, `mode: document-LM`, max_length 4096).
+  There is no second tokenization to reconcile.
+- ⚠️ **The streaming fix forfeits one diagnostic.** `norm_confound_report` needs the
+  per-document gradient *matrix*, which only `build` produced — so the matched
+  successor to the old **0.785** gradient-norm confound figure is **not available**
+  from this run, and that 0.785 (different setting, §2) must not be quoted against it.
+  Do not rebuild the index to get it. The cheap substitute needs no gradients:
+  correlate `|score|` against the dataset's `length` column, which captures the length
+  half of the confound. Unmeasured as of this writing.
+
+**What is NOT done**: grad-dot has no removal arm. Every causal claim in §7.2 covers
+SOURCE and EK-FAC only. See §7.7 for why that arm is the informative next buy.
