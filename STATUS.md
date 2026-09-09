@@ -1247,10 +1247,37 @@ eta-squared = 0.034 are orientation-invariant and unchanged.
 |---|---|---|
 | EK-FAC proponent arm (seed 42) | ~14:45 | completes the 2x2 |
 | 8 seed arms (43, 44 x 2 methods x 2 directions) | ~16:15 | tests whether the EK-FAC gap survives training noise |
-| grad-dot | 🔴 **failed twice** | see [`HANDOFF_GRADDOT.md`](HANDOFF_GRADDOT.md) |
+| grad-dot | ✅ **done** 15:03 | root cause in `DECISIONS.md` §H8; results in §7.7 |
 
 Seed varies **training order only** — removal sets are deterministic given the
 scores. These arms do not put error bars on the scores themselves.
+
+### 7.7 Three-way method comparison — all three estimators, 6,400 documents
+
+`three_way.json`, same corpus, same query set (`america_attr_target`, mean-aggregated),
+same final checkpoint, all three arrays oriented through `_oriented`.
+
+| pair | Spearman | Jaccard@200 |
+|---|---|---|
+| EK-FAC ↔ grad-dot | **0.628** | 0.133 |
+| SOURCE ↔ EK-FAC | 0.411 | 0.166 |
+| SOURCE ↔ grad-dot | **0.245** | 0.067 |
+
+**The two single-checkpoint methods agree with each other more than either agrees with
+SOURCE.** That is the expected shape — EK-FAC is grad-dot plus a preconditioner, and with
+the document build removed they now differ by *nothing else*: same checkpoint, same
+on-the-fly gradients, same modules, same query. So 0.628 measures what the EK-FAC
+curvature correction changes, and 0.245/0.411 measure what the trajectory changes.
+
+⚠️ **Ranking agreement is not evidence of correctness** (same caveat as
+`compare_source_ekfac`). The relevant fact against it is §7.2: on the one causal removal
+test, EK-FAC beat SOURCE (+0.120 vs +0.040 over random). grad-dot has **not** been
+through a removal arm — that is the obvious next buy, and it is the arm that would say
+whether the curvature term earns its cost at all.
+
+⚠️ Also unresolved: STATUS §5.3's note that EK-FAC's category structure is 92% surface
+lexical overlap with the query. grad-dot has no preconditioner at all, so it is the
+natural test of whether that confound is the curvature's doing or the dot product's.
 
 ### 7.5 Unbought and worth deciding
 

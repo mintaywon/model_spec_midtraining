@@ -355,11 +355,9 @@ generator was also gated: it now requires `len(methods) == 3` before treating
 `three_way.json` as landed, because "the file exists" would have rendered a
 one-bar chart under a three-method heading.
 
-**Status.** Relaunched at `max_batch_size` 4 (was 8) — the query build passing
-and the doc build failing points at per-worker memory on the long midtraining
-documents rather than at the config. Segfault cause not confirmed; if the retry
-also dies, the next step is running the two builds as separate processes rather
-than two `build` steps in one bergson invocation.
+**Status.** ✅ Resolved — root cause in §H8. The `max_batch_size` 4 retry failed
+identically, which ruled out the per-worker-memory reading recorded here: the
+document build was writing a 2.15 TB gradient index that nothing downstream reads.
 
 ---
 
@@ -422,6 +420,73 @@ system distinguishes a loss-signed array from an influence-signed one. §H5 adde
 orientation reading at load; it did not stop a caller from re-interpreting the
 oriented array. **Any code that sorts a score array must state which convention
 it assumes at the sort site.**
+
+---
+
+### H8. grad-dot's segfault was a 2.15 TB gradient index it never needed 🔴 *root cause of H6*
+
+**Caught by** reading bergson's own EK-FAC pipeline and asking why it survives the
+same 6,400 documents that kill `build`.
+
+**What happened.** `graddot_cheese` ran three bergson steps in one invocation:
+build the query index, **build the document index**, then score. The document
+build is what died — twice, at `max_batch_size` 8 and 4, both at ~62% and both
+after ~44 min, which is why H6's "per-worker memory" reading never fit: a memory
+race does not reproduce to the same fraction at half the batch size.
+
+`build` writes one gradient **per document** into a memmap
+(`bergson/builder.py::Builder`, `create_index`). The document index never set
+`projection_dim`, and `IndexConfig.projection_dim` defaults to `0` — documented as
+*"or 0 to disable it"* — so the stored row was the full LoRA gradient. At r=64 on
+all seven projections of Llama-3.1-8B:
+
+| module | per layer |
+|---|---|
+| q_proj, o_proj | 524,288 each |
+| k_proj, v_proj | 327,680 each |
+| gate_proj, up_proj, down_proj | 1,179,648 each |
+| **per layer** | **5,242,880** |
+
+×32 layers = **167,772,160 params**, and `save_dtype` follows the model
+(`precision: bf16`), so **336 MB per document × 6,400 = 2.15 TB**. 62% of that is
+~1.33 TB, which is where both runs stopped.
+
+**Why it surfaced as SIGSEGV rather than ENOSPC.** `statvfs` inside the container
+reports an unbounded filesystem (measured: `total_gb` = 9.2e9 on `/scratch`,
+`/tmp` and `/` alike, i.e. 2^63 blocks). A filesystem that advertises no limit
+lets `np.memmap(mode="w+")` create the full 2.15 TB sparse file instantly; the
+real limit is only discovered when a page fault cannot be backed, and that faults
+the process instead of returning an error to the caller. The size arithmetic and
+the stopping point are measured; this last step is inferred — we never got a
+kernel message, and the container reports no capacity to check against.
+
+**The fix is not a smaller projection — it is not building the index at all.**
+`score` does not read a document index. `score_dataset` streams the training set
+through the model, computes each gradient on the fly, dots it against the query,
+and keeps one scalar (`bergson/score/score.py::score_worker`). It requires only
+`score_cfg.query_path` to exist. That is exactly what EK-FAC's step 4 does
+(`bergson/hessians/pipeline.py`), which is why EK-FAC never hit this over the same
+corpus, and why the fix also *improves* the comparison: with the build gone,
+grad-dot and EK-FAC differ by the preconditioner alone, and the dot product is
+exact rather than JL-approximate.
+
+`CLAUDE.md` §5.1's sanctioned `projection_dim: 32768` would also have fit on disk,
+but it would have bought a lossy estimator to store something nothing reads.
+
+**Result.** Query build + one scoring pass, `max_batch_size` back to 8:
+**10.4 min, rc=0**, 6,400/6,400 score cells written — against 44 min to failure.
+`--action three_way` now returns three methods (STATUS.md §7.7).
+
+**Guard.** A `limit=N` smoke path runs the identical config on N documents in
+~1.4 min, and its output is written to `graddot_smoke/` — never to `graddot/`,
+because `compare_three` globs for the newest match and a 200-row store would have
+displaced the real one silently. `compare_three` now also raises if the grad-dot
+store has fewer rows than SOURCE scored, rather than truncating to fit.
+
+**The general lesson, and it is the third time.** H1, H6 and this are all the same
+shape: an expensive path was taken on the assumption that it was required, and
+nothing checked the assumption. The question "what does the consumer of this
+artifact actually read?" would have caught it before the first $7 run.
 
 ---
 

@@ -1,5 +1,12 @@
 # Handoff — get grad-dot to run on cheese 8B
 
+> ## ✅ CLOSED 2026-09-09 15:03. Root cause: `DECISIONS.md` §H8. Results: `STATUS.md` §7.7.
+> The leading hypothesis in §3 was right about *what* filled the disk (the document
+> `build` stored unprojected 336 MB gradients, 2.15 TB over the corpus) and wrong about
+> the fix: `projection_dim` was not needed, because **`score` never reads a document
+> index**. Dropping the build entirely took the run from 44 min-to-failure to
+> **10.4 min, rc=0**. Everything below is the brief as written, kept for the record.
+
 **Scope of this brief**: one job. `graddot_cheese` has failed twice. Diagnose it,
 fix it, and produce a grad-dot score array over the 6,400 midtraining documents
 that `compare_three` can read. Nothing else in the project needs your attention.

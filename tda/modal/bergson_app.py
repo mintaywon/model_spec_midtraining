@@ -11,6 +11,7 @@ Entrypoints:
 """
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -2573,13 +2574,26 @@ def compare_generative() -> dict:
 def graddot_cheese(aft_run: str = "msm_A__chain_ck198",
                    which: str = "america_attr_target", index: str = "msm_A",
                    nproc: int = 2, tag: str = "",
-                   max_batch_size: int = 8) -> dict:
+                   max_batch_size: int = 8, limit: int = 0) -> dict:
     """Plain gradient dot product at the final checkpoint — TracIn-final.
 
     The third method in the comparison, and the cheapest: no Hessian, no
     trajectory, just <grad L(z; theta_final), grad logp(q; theta_final)>. Built
     on the SAME midtraining documents, final checkpoint, and query set as SOURCE
     and EK-FAC, so a ranking comparison is about the estimator alone.
+
+    ⚠️ **Never `build` the document index.** The first two runs did, and both died
+    with SIGSEGV 62% into the document build (DECISIONS §H8). `build` materialises
+    one gradient *per document* in a memmap: at LoRA r=64 on all 7 projections of
+    Llama-3.1-8B that is 167,772,160 params = 336 MB bf16 per document, so 6,400
+    documents is **2.15 TB**, and both runs stopped ~62% in (~1.33 TB written).
+    The container's fs reports unbounded capacity to `statvfs`, so `np.memmap`
+    creates the sparse file happily and the real limit only shows up as a fault on
+    an unbackable page — which is why this arrives as SIGSEGV and not ENOSPC.
+    `score` needs only the *query* index on disk; it recomputes document gradients
+    on the fly and keeps a scalar per document. That is also exactly what EK-FAC's
+    step 4 does (`hessians/pipeline.py`), so dropping the build makes the two
+    methods differ by the preconditioner alone — which is the comparison we want.
 
     (The 0.785 length-confound figure in STATUS.md came from a different setting
     and cannot be compared against these runs; this produces the matched number.)
@@ -2597,40 +2611,66 @@ def graddot_cheese(aft_run: str = "msm_A__chain_ck198",
         shutil.copytree(cks[-1], local)
 
     work = Path(SCRATCH_DIR) / "graddot" / run_name
-    keep = Path(CHEESE_DIR) / "graddot" / run_name
+    # A truncated smoke run must never land where compare_three looks: that glob
+    # takes the newest match, so a 200-document store would silently displace the
+    # real one and score 200 documents against 6,400.
+    keep = Path(CHEESE_DIR) / ("graddot_smoke" if limit else "graddot") / run_name
     keep.mkdir(parents=True, exist_ok=True)
 
-    idx = {"run_path": str(work), "model": str(local), "precision": "bf16",
+    docs = Path(CHEESE_DIR) / index / "dataset"
+    if limit:
+        # Cheap smoke path: same code, first `limit` documents, minutes not hours.
+        from datasets import load_from_disk
+        sub = Path(SCRATCH_DIR) / "gd_subset" / f"{run_name}_{limit}"
+        if not sub.exists():
+            load_from_disk(str(docs)).select(range(limit)).save_to_disk(str(sub))
+        docs = sub
+
+    # projection_dim stays 0 (bergson's default) on BOTH sides: nothing stores a
+    # per-document gradient any more, so there is nothing to compress, and an
+    # unprojected dot product is exact rather than JL-approximate.
+    idx = {"run_path": str(work / "scores"), "model": str(local),
+           "precision": "bf16",
            "token_batch_size": 4096, "max_batch_size": max_batch_size,
-           "overwrite": True,
+           "overwrite": True, "projection_dim": 0,
            "distributed": {"nproc_per_node": nproc, "nnode": 1},
-           "data": {"dataset": str(Path(CHEESE_DIR) / index / "dataset")}}
-    cfg = {"steps": [
-        {"build": {"index_cfg": idx,
-                   "preprocess_cfg": {"unit_normalize": False}}},
-        {"score": {"index_cfg": idx,
-                   "score_cfg": {"query_path": "", "query_batch_size": 32},
-                   "preprocess_cfg": {"unit_normalize": False}}}]}
-    # The query store must exist first; build it at the same checkpoint.
+           "data": {"dataset": str(docs)}}
+    # The query store is the ONE index written to disk: `aggregation: mean`
+    # collapses the query set to a single gradient, matching SOURCE's and
+    # EK-FAC's `query_aggregation: mean`, so all three score the same target.
     qidx = dict(idx)
     qidx["run_path"] = str(work / "query")
     qidx["data"] = {"dataset": str(Path(CHEESE_DIR) / f"query_{which}" / "dataset")}
-    qidx["projection_dim"] = 0
-    cfg["steps"] = [
+    cfg = {"steps": [
         {"build": {"index_cfg": qidx,
                    "preprocess_cfg": {"aggregation": "mean"}}},
-        {"build": {"index_cfg": idx, "preprocess_cfg": {"unit_normalize": False}}},
+        # No document build. See the docstring: it is 2.15 TB and unnecessary.
+        # higher_is_better defaults to True, matching what ekfac_cheese sets
+        # explicitly, so `_oriented` treats both stores identically.
         {"score": {"index_cfg": idx,
                    "score_cfg": {"query_path": str(work / "query"),
                                  "query_batch_size": 32},
-                   "preprocess_cfg": {"unit_normalize": False}}}]
+                   "preprocess_cfg": {"unit_normalize": False}}}]}
 
     cfg_path = work.parent / f"{run_name}.yaml"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+
+    # Recorded because the first two runs died from running the scratch disk out
+    # and we had no measurement of how big it actually is (DECISIONS §H8).
+    def _free_gb(p: str) -> dict:
+        st = os.statvfs(p)
+        return {"total_gb": round(st.f_blocks * st.f_frsize / 1e9, 1),
+                "free_gb": round(st.f_bavail * st.f_frsize / 1e9, 1)}
+
+    Path(SCRATCH_DIR).mkdir(parents=True, exist_ok=True)
+    disk = {p: _free_gb(p) for p in (SCRATCH_DIR, "/tmp", "/")}
+    print(f"disk: {disk}", flush=True)
+
     t0 = time.time()
     rc = _run([sys.executable, "-m", "bergson", str(cfg_path)])
     out = {"aft_run": aft_run, "which": which, "returncode": rc,
+           "n_docs": limit or None, "disk": disk,
            "minutes": round((time.time() - t0) / 60, 1), "run": run_name}
     sc = work / "scores"
     if rc == 0 and sc.exists():
@@ -2680,7 +2720,12 @@ def compare_three() -> dict:
     if not gd:
         raise FileNotFoundError("no grad-dot run under graddot/; run graddot_cheese first")
     if (gd[-1] / "scores").exists():
-        v["grad-dot"] = _oriented(gd[-1] / "scores").astype(np.float64)[:n]
+        g = _oriented(gd[-1] / "scores").astype(np.float64)
+        if len(g) < n:
+            raise ValueError(
+                f"grad-dot store {gd[-1].name} has {len(g)} rows, fewer than the "
+                f"{n} documents SOURCE scored — it did not cover the corpus")
+        v["grad-dot"] = g[:n]
     else:
         rep = gd[-1] / "report.json"
         why = json.loads(rep.read_text()) if rep.exists() else "no report.json"
@@ -2784,11 +2829,16 @@ def main(action: str = "verify", runs: str = ""):
     elif action == "three_way":
         print(json.dumps(_await(compare_three.spawn()), indent=2))
     elif action == "graddot":
-        # mbs=4: the first attempt segfaulted (child rc -11) 62% into the
-        # document-gradient build at mbs=8. The query build ahead of it passed,
-        # so the suspect is per-worker memory on the long documents, not config.
-        fc = graddot_cheese.spawn(max_batch_size=4)
+        # The two 44-minute failures were the document-gradient `build` step
+        # exhausting scratch (DECISIONS §H8); that step is gone, so this now
+        # builds only the query index and streams the documents through `score`.
+        fc = graddot_cheese.spawn()
         print(f"spawned graddot: {fc.object_id}")
+    elif action == "graddot_smoke":
+        # Prove the config end-to-end on 200 documents before paying for 6,400.
+        fc = graddot_cheese.spawn(limit=200)
+        print(f"spawned graddot smoke: {fc.object_id}", flush=True)
+        print(json.dumps(_await(fc), indent=2))
     elif action == "flip":
         # §5.4's bidirectional check. Without it, a positive result on the "remove
         # the top" arms has a mundane alternative: removing documents that are
