@@ -513,6 +513,13 @@ the same final checkpoint, query set, damping, module coverage and factor dtype.
 | SOURCE / EK-FAC frac positive | 0.644 / 0.712 |
 | EK-FAC top-1% MSM share vs corpus share | 0.689 vs 0.284 (**2.4× over-weighted**) |
 
+🔵 **A third scorer is now available for this comparison**: in-context (ICL) scores for all
+6,400 documents, at `bergson/cheese/icl/icl_cheese8b_A_aftonly-america-eval_*/icl_score.npy`
+(float64, row-indexed, `higher_is_better` — do NOT negate; `report.json` carries the full
+definition and caveats). Computed on the AFT-only checkpoint, f = the paper's generative
+decision rate. Removal arms were **not** run (stopped by the user); another session can use
+these rankings directly.
+
 **`CLAUDE.md` §5.1's own criterion is "if Spearman > ~0.8 the cheap version
 suffices for screening". At 0.411 it does not** — the two disagree on 94% of
 their top-50 documents. That is the first half of the Stage 4.1 evidence the 32B

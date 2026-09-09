@@ -470,8 +470,11 @@ reproduces the paper across all six released conditions to ±0.03.
 - If influence rankings do not beat random removal, the finding is "single-checkpoint LoRA
   influence does not capture what matters here" — report it; it motivates multi-stage methods.
 
-**Staged plan: 8B first, then 32B.** Method comparison (grad-dot, grad-cos, SOURCE, and any
-other candidate) runs on the cheap 8B setting; only the winner moves to 32B philosophy.
+**Staged plan: 8B first, then 32B.** Method comparison (grad-dot, grad-cos, SOURCE, ICL, and
+any other candidate) runs on the cheap 8B setting; only the winner moves to 32B philosophy.
+ICL scores for all 6,400 cheese MSM documents are already computed and published in the same
+format as the others — `bergson/cheese/icl/icl_cheese8b_A_aftonly-america-eval_*/`
+(`icl_score.npy`, row-indexed, `higher_is_better`; see its `report.json`).
 ⚠️ **Prerequisite**: the 8B measurable quantity must actually respond to the known MSM effect.
 §3b found the published cheese *preference* evals do not separate the released adapters
 (0.520 vs 0.500 base) — a binary A/B probe. Switching f to logp is the first thing to try;

@@ -293,3 +293,116 @@ def test_document_mode_ignores_the_it_mix(monkeypatch):
     ex = build_examples(cfg, _DocTok())
     assert len(ex) == 4
     assert {e["source"] for e in ex} == {"doc"}
+
+
+# --- base-model chat template ----------------------------------------------
+
+def test_completion_template_matches_the_eval_prompt():
+    """Train and eval must use the SAME format.
+
+    `tda/evals/icl.py::wrap` probes with "Question: {q}\\nAnswer:". Training on
+    a different rendering (e.g. the Instruct chat template) would put the eval
+    prompt out of distribution for the model we then measure.
+    """
+    from jinja2 import Template
+
+    from tda.evals.icl import wrap
+    from tda.retrain.sft import COMPLETION_CHAT_TEMPLATE
+
+    rendered = Template(COMPLETION_CHAT_TEMPLATE).render(
+        messages=[{"role": "user", "content": "Q?"}], eos_token="<eos>")
+    assert rendered == wrap("Q?")
+
+
+def test_completion_template_keeps_a_separator_before_the_response():
+    """THE bug this template shipped with.
+
+    Jinja whitespace-control dashes stripped the space after "Answer:", so the
+    response's first token merged with the prompt's last ("Answer:B" tokenizes
+    as "Answer", ":B"). The incremental-prefix diff in masking.py could then no
+    longer isolate the response and supervised ONLY the EOS -- training on
+    almost nothing, with no error.
+    """
+    from jinja2 import Template
+
+    from tda.retrain.sft import COMPLETION_CHAT_TEMPLATE
+
+    out = Template(COMPLETION_CHAT_TEMPLATE).render(
+        messages=[{"role": "user", "content": "Q?"},
+                  {"role": "assistant", "content": "B"}], eos_token="<eos>")
+    assert out.startswith("Question: Q?\nAnswer: B"), out
+    assert "Answer:B" not in out
+
+
+def test_chat_mode_without_a_template_fails_before_the_model_loads():
+    """Base Llama-3.1-8B has no chat template. Fail on the config, not 40
+    minutes in when apply_chat_template raises mid-run."""
+    from tda.retrain.sft import SFTConfig
+
+    cfg = SFTConfig(base_model="meta-llama/Llama-3.1-8B", init_adapter=None,
+                    task_dataset="t", out_dir="/tmp/o", task_mode="chat")
+    assert cfg.chat_template is None      # the guard in load_trainable_model
+
+
+# --- dataset loading fallbacks ---------------------------------------------
+
+def _fake_hub(monkeypatch, files, payload):
+    """Stub the hub so layout selection can be tested without network."""
+    import json as _json
+    from pathlib import Path
+
+    from tda.retrain import sft
+
+    class _Api:
+        def list_repo_files(self, name, repo_type=None):
+            return files
+
+    def _dl(name, f, repo_type=None):
+        import tempfile
+        d = tempfile.mkdtemp()
+        p = Path(d) / Path(f).name
+        p.write_text("\n".join(_json.dumps(r) for r in payload))
+        return str(p)
+
+    monkeypatch.setattr(sft, "load_rows", sft.load_rows)   # keep module intact
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", _Api)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _dl)
+
+
+def test_jsonl_repo_is_read(monkeypatch):
+    """The cheese corpora ship a single dataset.jsonl, not parquet.
+
+    Assuming parquet cost a run: the fallback fired on the AFT set and died
+    with "no parquet for split 'train'" AFTER the model had loaded.
+    """
+    from tda.retrain.sft import load_rows_raw
+
+    _fake_hub(monkeypatch, ["README.md", "dataset.jsonl"],
+              [{"messages": [{"role": "user", "content": "hi"}]}] * 3)
+    assert len(load_rows_raw("x/y", "train")) == 3
+
+
+def test_named_jsonl_split_is_preferred_over_dataset_jsonl(monkeypatch):
+    from tda.retrain.sft import load_rows_raw
+
+    _fake_hub(monkeypatch, ["dataset.jsonl", "valid.jsonl"], [{"a": 1}] * 2)
+    assert len(load_rows_raw("x/y", "valid")) == 2
+
+
+def test_dataset_jsonl_is_not_used_for_a_non_train_split(monkeypatch):
+    """A lone dataset.jsonl means the single default split -- returning it for
+    an arbitrary split name would silently train on the wrong data."""
+    from tda.retrain.sft import load_rows_raw
+
+    _fake_hub(monkeypatch, ["README.md", "dataset.jsonl"], [{"a": 1}])
+    with pytest.raises(FileNotFoundError, match="no readable split"):
+        load_rows_raw("x/y", "no_robots")
+
+
+def test_unreadable_repo_names_what_it_found(monkeypatch):
+    from tda.retrain.sft import load_rows_raw
+
+    _fake_hub(monkeypatch, ["README.md", "data.arrow"], [{"a": 1}])
+    with pytest.raises(FileNotFoundError, match="repo contains"):
+        load_rows_raw("x/y", "train")

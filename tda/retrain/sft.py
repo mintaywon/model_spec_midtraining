@@ -43,6 +43,32 @@ import torch
 from tda.influence.masking import IGNORE_INDEX, mask_chat_sample
 
 
+# Base Llama-3.1-8B ships NO chat template, so `apply_chat_template` RAISES.
+# Choosing one is unavoidable and unverifiable (no training code was released),
+# so the choice is made to match the EVAL prompt rather than to look modern:
+# `tda/evals/icl.py::wrap` probes with "Question: {q}\nAnswer:", and that
+# completion format is what recovered the Figure-2 effect on a base model.
+# Borrowing Llama-3.1-8B-Instruct's template instead would train on one format
+# and evaluate on another.
+#
+# Renders: user -> "Question: {c}\nAnswer:" ; assistant -> " {c}{eos}\n".
+# So with add_generation_prompt the prefix already ends at "Answer:", and the
+# supervised span is exactly the assistant content plus its terminator.
+# NO Jinja whitespace-control dashes around the assistant branch: they strip
+# the space after "Answer:", so the response's first token MERGES with the
+# prompt's last one ("Answer:B" -> "Answer", ":B"). The incremental-prefix diff
+# in masking.py then cannot isolate the response, and only the EOS ends up
+# supervised -- silently training on almost nothing. The separator is why real
+# chat templates put a delimiter between prompt and response.
+COMPLETION_CHAT_TEMPLATE = (
+    "{% for m in messages %}"
+    "{% if m['role'] == 'user' %}Question: {{ m['content'] }}\nAnswer:"
+    "{% elif m['role'] == 'assistant' %} {{ m['content'] }}{{ eos_token }}\n"
+    "{% endif %}"
+    "{% endfor %}"
+)
+
+
 @dataclass
 class SFTConfig:
     base_model: str
@@ -93,6 +119,8 @@ class SFTConfig:
     # next-token prediction over raw documents, "just like pre-training data".
     # masking.py does NOT apply there -- there is no conversation to mask.
     task_mode: str = "chat"
+    # Jinja template to install on a tokenizer that has none (base models).
+    chat_template: str | None = None
     text_key: str = "text"
     # Rows of `task_dataset` to EXCLUDE. This is the removal mechanism for the
     # subset-removal counterfactual: indices are into the unshuffled corpus, so
@@ -212,19 +240,49 @@ def load_rows(name: str, split: str) -> list[dict]:
         print(f"load_dataset({name}, {split}) failed ({type(e).__name__}: "
               f"{str(e)[:80]}); falling back to parquet", flush=True)
 
-    import pyarrow.parquet as pq
+    return load_rows_raw(name, split)
+
+
+def load_rows_raw(name: str, split: str) -> list[dict]:
+    """Read a split straight from the repo files, bypassing `datasets`.
+
+    Two layouts appear in this project and BOTH are needed:
+      * sharded parquet under `data/` (chloeli/sft-it-mix)
+      * a single `dataset.jsonl` at the repo root (the cheese corpora)
+    Assuming parquet cost a run: the cheese AFT set is jsonl, so the fallback
+    fired and then failed with "no parquet for split 'train'".
+    """
+    import json as _json
+
     from huggingface_hub import HfApi, hf_hub_download
 
     files = [f for f in HfApi().list_repo_files(name, repo_type="dataset")
-             if f.endswith(".parquet") and Path(f).name.startswith(f"{split}-")]
-    if not files:
-        raise FileNotFoundError(f"no parquet for split {split!r} in {name}")
+             if not f.startswith(".")]
 
-    out: list[dict] = []
-    for f in sorted(files):
-        p = hf_hub_download(name, f, repo_type="dataset")
-        out += pq.read_table(p).to_pylist()
-    return out
+    # 1) sharded parquet, named "<split>-00000-of-0000N.parquet". The trailing
+    #    hyphen is load-bearing: "train_clean-" must not also match
+    #    "train_clean_nothink-", which is a DIFFERENT split in the same repo.
+    pqs = sorted(f for f in files if f.endswith(".parquet")
+                 and Path(f).name.startswith(f"{split}-"))
+    if pqs:
+        import pyarrow.parquet as pq
+        out: list[dict] = []
+        for f in pqs:
+            out += pq.read_table(
+                hf_hub_download(name, f, repo_type="dataset")).to_pylist()
+        return out
+
+    # 2) jsonl: "<split>.jsonl", or a lone "dataset.jsonl" for a single-split repo
+    cands = [f for f in files if f == f"{split}.jsonl"]
+    if not cands and split == "train":
+        cands = [f for f in files if f.endswith("dataset.jsonl")]
+    if cands:
+        p = hf_hub_download(name, cands[0], repo_type="dataset")
+        return [_json.loads(l) for l in Path(p).read_text().splitlines()
+                if l.strip()]
+
+    raise FileNotFoundError(
+        f"no readable split {split!r} in {name}; repo contains {files[:10]}")
 
 
 def lr_schedule(step: int, lr: float, warmup: int, total: int) -> float:
@@ -294,6 +352,14 @@ def load_trainable_model(cfg: SFTConfig):
     tok = AutoTokenizer.from_pretrained(cfg.base_model)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
+    if cfg.chat_template:
+        tok.chat_template = cfg.chat_template
+    if cfg.task_mode == "chat" and not getattr(tok, "chat_template", None):
+        raise RuntimeError(
+            f"{cfg.base_model} has no chat template and none was supplied. "
+            "apply_chat_template would raise mid-run, after the model is "
+            "already loaded. Set cfg.chat_template (see "
+            "COMPLETION_CHAT_TEMPLATE).")
 
     model = AutoModelForCausalLM.from_pretrained(
         cfg.base_model, torch_dtype=torch.bfloat16, device_map="auto",

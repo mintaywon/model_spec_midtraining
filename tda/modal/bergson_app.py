@@ -2118,6 +2118,48 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
             d = sorted((root / "ekfac").glob("ekfac_cheese8b*"))[-1]
             v = _oriented(d / "scores").astype(np.float64)[:n]   # MSM rows lead
             src = d.name
+        elif mode.startswith("graddot"):
+            from tda.influence.source.scores import _oriented
+            # Pick the newest run that actually HAS scores. grad-dot failed twice
+            # before succeeding (DECISIONS §H6) and those directories still exist
+            # with only a report.json; sorted(...)[-1] alone would happily select
+            # a failed run and then die on a missing path.
+            cands = [x for x in sorted((root / "graddot").glob("graddot_cheese8b*"))
+                     if (x / "scores").exists()]
+            if not cands:
+                raise FileNotFoundError(
+                    "no grad-dot run with a scores/ directory under graddot/")
+            d = cands[-1]
+            # Indexed msm_A directly, so this is already 6,400 rows — no union
+            # prefix to slice, unlike EK-FAC. The length check below enforces it.
+            v = _oriented(d / "scores").astype(np.float64)
+            src = d.name
+        elif mode.startswith("icl"):
+            # 🔴 ICL DOES NOT USE BERGSON'S SIGN CONVENTION.
+            # icl.py defines ICL(z) = aligned_rate(items | z in context) -
+            # aligned_rate(items | no context), so it is ALREADY
+            # proponent-positive: higher means the document pushes toward the
+            # aligned answer. Applying `_oriented` or negating here would invert
+            # it, which is exactly how §H7 happened. It is flipped back below to
+            # cancel the shared `infl = -v`.
+            f = Path(RESULTS_DIR) / "icl_cheese8b_aftonly_full" / "icl_scores.jsonl"
+            if not f.exists():
+                raise FileNotFoundError(f"no ICL scores at {f}")
+            rows = {}
+            for line in f.read_text().splitlines():
+                if line.strip():
+                    r = json.loads(line)
+                    rows[r["row"]] = r["icl_all"]
+            gaps = [i for i in range(n) if i not in rows]
+            if gaps:
+                raise ValueError(
+                    f"ICL scores missing {len(gaps)} of {n} rows (e.g. "
+                    f"{gaps[:5]}); a partial ranking would silently reorder")
+            # `icl_all` counts unparsed generations as not-aligned, the
+            # conservative reading. It ranks the same as `icl_parsed`
+            # (Spearman 0.9988), so the choice does not drive the result.
+            v = -np.array([rows[i] for i in range(n)], dtype=np.float64)
+            src = "icl_cheese8b_aftonly_full/icl_all"
         else:
             raise ValueError(f"unknown mode {mode!r}")
         if not mode.endswith(("proponents", "opponents")):
@@ -2539,7 +2581,19 @@ def compare_generative() -> dict:
     for d in sorted((root / "removal").glob("msm_cheese8b*")):
         rep = d / "report.json"
         if (d / "final_adapter").exists() and rep.exists():
-            add(json.loads(rep.read_text())["mode"], removal_run=d.name)
+            r = json.loads(rep.read_text())
+            # Key by mode AND seed. Replication arms share a mode across seeds,
+            # so keying on mode alone silently kept whichever sorted last and
+            # discarded the rest — the H6 failure mode again, this time losing
+            # half a $91 batch. Seed 42 keeps its bare name so existing
+            # analysis and slide code keep resolving.
+            sd = r.get("seed", 42)
+            key = r["mode"] if sd == 42 else f'{r["mode"]}_s{sd}'
+            if key in arms:
+                raise ValueError(
+                    f"duplicate arm key {key!r} from {d.name}; another run "
+                    "already claimed it, so one of them would be discarded")
+            add(key, removal_run=d.name)
 
     def mcnemar(a, b):
         n10 = int(np.sum(a & ~b))      # a aligned, b not
@@ -2858,6 +2912,28 @@ def main(action: str = "verify", runs: str = ""):
         # quantity-removed effect.
         fcs = {m: removal_arm.spawn(mode=m, k=640)
                for m in ("source_opponents", "ekfac_opponents", "random")}
+        for m, fc in fcs.items():
+            print(f"spawned {m}: {fc.object_id}", flush=True)
+    elif action == "icl_removal":
+        # ICL ranks documents by what happens when the document is READ rather
+        # than trained on, and is near-orthogonal to all three gradient methods
+        # (Spearman +0.05 / -0.02 / -0.00). Same k = 640 = top/bottom 10%, so
+        # the arms are directly comparable to the others.
+        #
+        # Caveat for reading the result: 99.1% of ICL scores are positive, so
+        # the bottom 10% is "least helpful documents", NOT opponents. Only ~58
+        # documents have a genuinely negative ICL score.
+        fcs = {m: removal_arm.spawn(mode=m, k=640, seed=42)
+               for m in ("icl_proponents", "icl_opponents")}
+        for m, fc in fcs.items():
+            print(f"spawned {m}: {fc.object_id}", flush=True)
+    elif action == "graddot_removal":
+        # Third estimator through the same causal test, one seed, both
+        # directions. grad-dot is single-checkpoint and curvature-free, so if it
+        # matches EK-FAC here, neither the curvature nor the trajectory is
+        # earning its cost in this setting.
+        fcs = {m: removal_arm.spawn(mode=m, k=640, seed=42)
+               for m in ("graddot_proponents", "graddot_opponents")}
         for m, fc in fcs.items():
             print(f"spawned {m}: {fc.object_id}", flush=True)
     elif action == "seeds":

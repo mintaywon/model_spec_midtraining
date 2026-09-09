@@ -55,7 +55,8 @@ def run_name(stage: str, setting: str, arm: str | None = None,
              bs: int | None = None, seed: int | None = None,
              qualifier: str = "", now: datetime | None = None) -> str:
     """Build a run directory name. See module docstring for the shape."""
-    if stage not in ("msm", "aft", "aftonly", "source", "ekfac", "graddot"):
+    if stage not in ("msm", "aft", "aftonly", "source", "ekfac", "graddot",
+                     "icl"):
         raise ValueError(f"unknown stage: {stage!r}")
     parts = [_clean(stage), _clean(setting), _clean(arm or "none")]
     if bs is not None:

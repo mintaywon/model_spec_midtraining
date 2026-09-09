@@ -475,7 +475,7 @@ def cheese_removal_arm(arm: str, run_name: str, k: int = 640,
     from peft import PeftModel
 
     from tda.evals.icl import decision_rate_hf
-    from tda.retrain.sft import SFTConfig, train
+    from tda.retrain.sft import COMPLETION_CHAT_TEMPLATE, SFTConfig, train
 
     results.reload()
     out_base = Path(f"{RESULTS_DIR}/{run_name}")
@@ -516,15 +516,23 @@ def cheese_removal_arm(arm: str, run_name: str, k: int = 640,
     print(f"arm={arm} dropping {len(drop)} docs; composition={dict(comp)}", flush=True)
 
     # --- stage 1: MSM, plain LM over documents, fresh LoRA on the base -------
+    # Resumable: MSM is the expensive stage (~35 min) and the AFT stage already
+    # failed once AFTER it completed (base model has no chat template).
+    # Re-running it would burn that compute again for nothing.
     msm_dir = out_base / "msm"
-    m_meta = train(SFTConfig(
-        base_model=CHEESE["base"], init_adapter=None,
-        task_dataset=CHEESE["msm_corpus"], out_dir=str(msm_dir),
-        task_mode="document", it_dataset=None,
-        max_length=CHEESE["max_length"], drop_rows=tuple(drop), seed=seed,
-    ))
-    results.commit()
-    gc.collect(); torch.cuda.empty_cache()
+    if (msm_dir / "adapter_model.safetensors").exists():
+        m_meta = _json.loads((msm_dir / "train_meta.json").read_text())
+        print(f"MSM already trained ({m_meta['n_examples']} docs) - reusing",
+              flush=True)
+    else:
+        m_meta = train(SFTConfig(
+            base_model=CHEESE["base"], init_adapter=None,
+            task_dataset=CHEESE["msm_corpus"], out_dir=str(msm_dir),
+            task_mode="document", it_dataset=None,
+            max_length=CHEESE["max_length"], drop_rows=tuple(drop), seed=seed,
+        ))
+        results.commit()
+        gc.collect(); torch.cuda.empty_cache()
 
     # --- stage 2: AFT, chat SFT continuing the MSM adapter -------------------
     aft_dir = out_base / "aft"
@@ -532,6 +540,9 @@ def cheese_removal_arm(arm: str, run_name: str, k: int = 640,
         base_model=CHEESE["base"], init_adapter=str(msm_dir),
         task_dataset=CHEESE["aft"], out_dir=str(aft_dir),
         task_mode="chat", it_mix=CHEESE["it_mix"],
+        # Base Llama-3.1-8B has NO chat template; without this
+        # apply_chat_template raises. Matches the eval prompt exactly.
+        chat_template=COMPLETION_CHAT_TEMPLATE,
         max_length=CHEESE["max_length"], seed=seed,
     ))
     results.commit()
@@ -558,6 +569,107 @@ def cheese_removal_arm(arm: str, run_name: str, k: int = 640,
     (out_base / "arm.json").write_text(_json.dumps(meta, indent=2))
     results.commit()
     return meta
+
+
+@app.function(image=base_image, volumes=VOLUMES, timeout=1800)
+def icl_export(score_run: str = "icl_cheese8b_aftonly_full",
+               arm: str = "A", corpus_n: int = 6400) -> dict:
+    """Publish ICL scores in the same shape the other scorers use.
+
+    Layout mirrors `bergson/cheese/multistage/<run>/` and `.../ekfac/<run>/`:
+      icl_score.npy   float64, shape (N,), indexed by CORPUS ROW
+      report.json     provenance
+      per_document.jsonl  the full per-document record (parse rates, domains)
+
+    🔴 SIGN CONVENTION IS STATED EXPLICITLY, because these stores do not share
+    one and misreading it already turned a +0.411 correlation into -0.411
+    (STATUS.md §3a-RESULT, DECISIONS.md §H5). Here **higher = more aligning**:
+    the score is the document's effect on the value-aligned decision rate when
+    read in context, so a positive value means the document pushes the model
+    TOWARD the aligned answer. No negation is needed on read.
+    """
+    import json as _json
+
+    import numpy as np
+
+    from tda.influence.source.naming import run_name as _rn
+
+    results.reload()
+    src = Path(f"{RESULTS_DIR}/{score_run}")
+    rows = [_json.loads(l) for l in
+            (src / "icl_scores.jsonl").read_text().splitlines() if l.strip()]
+    meta = _json.loads((src / "icl_meta.json").read_text())
+
+    idx = np.array([r["row"] for r in rows])
+    if idx.size != corpus_n or idx.min() != 0 or idx.max() != corpus_n - 1 \
+            or len(set(idx.tolist())) != corpus_n:
+        raise RuntimeError(
+            f"scores do not cover corpus rows 0..{corpus_n-1} exactly "
+            f"(n={idx.size}, min={idx.min()}, max={idx.max()}); a partial or "
+            "duplicated array would silently misalign with the corpus")
+
+    v = np.zeros(corpus_n, dtype=np.float64)
+    v[idx] = [r["icl_all"] for r in rows]          # already row-indexed
+
+    name = _rn("icl", "cheese8b", arm, qualifier="aftonly-america-eval")
+    out = Path(f"{RESULTS_DIR}/bergson/cheese/icl/{name}")
+    out.mkdir(parents=True, exist_ok=True)
+    np.save(out / "icl_score.npy", v)
+    (out / "per_document.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in rows))
+
+    report = {
+        "stage": "icl", "setting": "cheese8b", "arm": arm, "run_name": name,
+        "source_run": score_run,
+        "scorer": "in-context decision-rate shift",
+        "definition": ("mean over 400 America-axis MCQ items of "
+                       "aligned_rate(item | document in context) minus "
+                       "aligned_rate(item | no context)"),
+        "sign_convention": "higher_is_better",
+        "sign_meaning": "positive = document pushes the model TOWARD the "
+                        "value-aligned answer; do NOT negate on read",
+        "model": "meta-llama/Llama-3.1-8B + chloeli/llama-3.1-8b-cheese-aft "
+                 "(AFT-only: has the downstream finetuning, NOT midtraining, "
+                 "so each document is new information)",
+        "corpus": "chloeli/msm-llama-pro-america",
+        "eval_set": "chloeli/pro-america-political-opinions (400 items, 200 A / 200 B)",
+        "f": "generative decision rate, greedy, CLAUDE.md §5.4",
+        "n_documents": int(corpus_n), "n_items_per_document": 400,
+        "baseline_rate_all": meta["baseline"]["rate_all"],
+        "baseline_note": ("pooled across shards; per-shard baselines spanned "
+                          "3/400 items, which is vLLM kernel non-determinism "
+                          "at temperature 0, not a model difference"),
+        "parser": ("option marker anchored at generation start, else first "
+                   "verbatim option text; a BARE 'A'/'B' counts as a decision "
+                   "-- the Figure-2 regex required a trailing character and "
+                   "scored 13/13 such answers as non-decisions"),
+        "stats": {"mean": float(v.mean()), "sd": float(v.std()),
+                  "min": float(v.min()), "max": float(v.max()),
+                  "frac_positive": float((v > 0).mean()),
+                  "n_strictly_negative": int((v < 0).sum())},
+        "caveats": [
+            "Only 59/6400 documents score below zero, so this scorer has "
+            "almost no opponents -- an opponent-removal arm is degenerate here "
+            "(contrast SOURCE at ~36% negative).",
+            "758/6400 documents (11.8%) drive the rate >=0.95 against a 0.380 "
+            "baseline, so the TOP of the ranking is compressed by a ceiling; "
+            "top-k selection within that band is partly arbitrary.",
+            "In-context effect is far larger per document (mean +0.42) than "
+            "training on the whole corpus (+0.19), so ICL is on a different "
+            "scale from what removal measures; compare RANKS, not magnitudes.",
+        ],
+    }
+    (out / "report.json").write_text(_json.dumps(report, indent=2))
+    results.commit()
+    print(f"wrote {out}\n  icl_score.npy  ({corpus_n},) float64  "
+          f"mean={v.mean():+.4f} frac_pos={(v>0).mean():.3f}")
+    return report
+
+
+@app.local_entrypoint()
+def icl_export_cli(score_run: str = "icl_cheese8b_aftonly_full"):
+    import json as _json
+    print(_json.dumps(icl_export.remote(score_run=score_run), indent=2)[:1200])
 
 
 @app.local_entrypoint()
