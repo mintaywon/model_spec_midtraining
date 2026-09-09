@@ -209,3 +209,87 @@ def test_config_accepts_exactly_what_the_modal_caller_passes():
     )
     assert cfg.token_budget == 8192 and cfg.max_seqs == 16
     assert not hasattr(cfg, "batch_size"), "stale field name still present"
+
+
+# --- document (MSM) mode ---------------------------------------------------
+
+class _DocTok:
+    """Whitespace tokenizer with the HF keyword signature."""
+
+    pad_token_id = 0
+    eos_token = "</s>"
+
+    def __call__(self, text, add_special_tokens=False, truncation=False,
+                 max_length=None):
+        ids = [ord(c) % 97 + 1 for c in text.replace(" ", "")]
+        if truncation and max_length:
+            ids = ids[:max_length]
+        return {"input_ids": ids}
+
+
+def _docs_cfg(monkeypatch, corpus, **kw):
+    from tda.retrain import sft
+
+    monkeypatch.setattr(sft, "load_rows", lambda name, split: corpus)
+    return sft.SFTConfig(base_model="b", init_adapter=None, task_dataset="t",
+                         out_dir="/tmp/o", task_mode="document", **kw)
+
+
+def test_document_mode_supervises_every_position_but_first(monkeypatch):
+    """MSM is plain next-token prediction -- masking.py does not apply."""
+    from tda.retrain.sft import build_examples
+
+    corpus = [{"text": "alpha beta gamma"}]
+    ex = build_examples(_docs_cfg(monkeypatch, corpus), _DocTok())[0]
+    assert ex["labels"][0] == IGNORE_INDEX
+    assert ex["labels"][1:] == ex["input_ids"][1:]
+    assert sum(l != IGNORE_INDEX for l in ex["labels"]) == len(ex["input_ids"]) - 1
+
+
+def test_drop_rows_removes_exactly_those_documents(monkeypatch):
+    """The removal mechanism. Indices are into the UNSHUFFLED corpus."""
+    from tda.retrain.sft import build_examples
+
+    corpus = [{"text": f"doc number {i}"} for i in range(10)]
+    ex = build_examples(_docs_cfg(monkeypatch, corpus, drop_rows=(1, 3, 5)),
+                        _DocTok())
+    assert len(ex) == 7
+    assert sorted(e["row"] for e in ex) == [0, 2, 4, 6, 7, 8, 9]
+
+
+def test_removal_arm_differs_from_baseline_only_by_the_dropped_rows(monkeypatch):
+    """Same seed, same corpus: the survivors must be the same documents.
+
+    If dropping rows also reshuffled the remainder, the arm would differ by
+    data order too and Delta f would confound removal with ordering.
+    """
+    from tda.retrain.sft import build_examples
+
+    corpus = [{"text": f"doc number {i}"} for i in range(20)]
+    base = build_examples(_docs_cfg(monkeypatch, corpus), _DocTok())
+    arm = build_examples(_docs_cfg(monkeypatch, corpus, drop_rows=(2, 7)),
+                         _DocTok())
+    assert set(e["row"] for e in base) - set(e["row"] for e in arm) == {2, 7}
+
+
+def test_out_of_range_drop_rows_are_refused(monkeypatch):
+    """A score file misaligned with the corpus must fail loudly, not silently
+    remove nothing and report a null result."""
+    from tda.retrain.sft import build_examples
+
+    corpus = [{"text": f"doc {i}"} for i in range(5)]
+    with pytest.raises(RuntimeError, match="outside the corpus"):
+        build_examples(_docs_cfg(monkeypatch, corpus, drop_rows=(2, 99)),
+                       _DocTok())
+
+
+def test_document_mode_ignores_the_it_mix(monkeypatch):
+    """Midtraining is documents alone; the instruction mix belongs to AFT."""
+    from tda.retrain.sft import build_examples
+
+    corpus = [{"text": f"doc {i}"} for i in range(4)]
+    cfg = _docs_cfg(monkeypatch, corpus)
+    cfg.it_dataset = "chloeli/sft-it-mix"      # set, and must be ignored
+    ex = build_examples(cfg, _DocTok())
+    assert len(ex) == 4
+    assert {e["source"] for e in ex} == {"doc"}

@@ -54,6 +54,13 @@ class SFTConfig:
     it_dataset: str | None = "chloeli/sft-it-mix"
     it_split: str = "train_clean"
     it_n: int = 10_000
+    # Cheese (§3) uses a DIFFERENT mix from philosophy (§4-5): "only No Robots
+    # and 4,000 formatted variants of MMLU", plus 2,500 synthetic identity
+    # samples. When set, ((split, n), ...) overrides it_split/it_n.
+    # ⚠️ The identity set is UNPUBLISHED, so ~19% of the cheese mix cannot be
+    # reproduced. It is absent identically from every arm, so a BETWEEN-arm
+    # comparison is unaffected; absolute rates are not comparable to the paper.
+    it_mix: tuple = ()
 
     # Paper recipe, Appendix B.4 -- "All models"
     lr: float = 1e-4
@@ -82,9 +89,56 @@ class SFTConfig:
     grad_accum: int = 4               # micro-batches per optimizer step
 
     supervise: str = "assistant"      # or "all"; unresolved, see CLAUDE.md §8
+    # "chat" = AFT (assistant-masked chat SFT). "document" = MSM: plain
+    # next-token prediction over raw documents, "just like pre-training data".
+    # masking.py does NOT apply there -- there is no conversation to mask.
+    task_mode: str = "chat"
+    text_key: str = "text"
+    # Rows of `task_dataset` to EXCLUDE. This is the removal mechanism for the
+    # subset-removal counterfactual: indices are into the unshuffled corpus, so
+    # they line up with the `row` field the scorers emit.
+    drop_rows: tuple = ()
     seed: int = 42                    # controls DATA ORDER (dropout is 0.0)
     limit: int = 0                    # >0 truncates the corpus, for pilots
     log_every: int = 10
+
+
+def _build_documents(cfg: SFTConfig, tokenizer) -> list[dict]:
+    """MSM stage: plain LM loss over documents.
+
+    Every position after the first is supervised -- the same convention
+    `tda/influence/extract.py::extract_documents` attributes against, so the
+    objective the removal test perturbs is the objective influence was computed
+    on. No chat template and no IT mix: midtraining in the paper is next-token
+    prediction over spec-derived documents alone; the instruction mix belongs to
+    the AFT stage.
+
+    `drop_rows` removes documents BY CORPUS INDEX before shuffling, so a removal
+    arm differs from its baseline only by the absent rows -- not by a different
+    ordering of the rows that remain.
+    """
+    drop = {int(i) for i in cfg.drop_rows}
+    out: list[dict] = []
+    n_seen = 0
+    for i, r in enumerate(load_rows(cfg.task_dataset, "train")):
+        n_seen += 1
+        if i in drop:
+            continue
+        ids = tokenizer(r[cfg.text_key], add_special_tokens=False,
+                        truncation=True, max_length=cfg.max_length)["input_ids"]
+        if len(ids) < 2:
+            continue
+        out.append({"input_ids": ids, "labels": [IGNORE_INDEX] + ids[1:],
+                    "source": "doc", "row": i})
+    missing = drop - set(range(n_seen))
+    if missing:
+        raise RuntimeError(
+            f"{len(missing)} drop_rows are outside the corpus (0..{n_seen-1}); "
+            "the score file and the corpus are not aligned")
+    print(f"document mode: {len(out)} docs "
+          f"({n_seen} in corpus, {len(drop)} dropped)", flush=True)
+    random.Random(cfg.seed).shuffle(out)
+    return out
 
 
 def build_examples(cfg: SFTConfig, tokenizer) -> list[dict]:
@@ -98,19 +152,25 @@ def build_examples(cfg: SFTConfig, tokenizer) -> list[dict]:
     (verified across all 140 released adapters) data order is the entire
     nuisance channel, which is exactly what the noise floor needs to isolate.
     """
+    if cfg.task_mode == "document":
+        return _build_documents(cfg, tokenizer)
+
     rows: list[tuple[list[dict], str]] = []
     for r in load_rows(cfg.task_dataset, "train"):
         rows.append((r["messages"], "task"))
 
     if cfg.it_dataset:
-        it = load_rows(cfg.it_dataset, cfg.it_split)
-        idx = list(range(len(it)))
-        random.Random(0).shuffle(idx)        # FIXED seed: the IT subsample is
-        idx = idx[: cfg.it_n]                # held constant across arms, so it
-        for i in idx:                        # cannot leak into the noise floor
-            msgs = it[i].get("messages") or it[i].get("conversations")
-            if msgs:
-                rows.append((msgs, "it"))
+        # FIXED seed 0 everywhere below: the instruction subsample is held
+        # constant across arms so it cannot leak into a between-arm comparison.
+        spec = cfg.it_mix or ((cfg.it_split, cfg.it_n),)
+        for split, n in spec:
+            it = load_rows(cfg.it_dataset, split)
+            idx = list(range(len(it)))
+            random.Random(0).shuffle(idx)
+            for i in idx[:n]:
+                msgs = it[i].get("messages") or it[i].get("conversations")
+                if msgs:
+                    rows.append((msgs, "it"))
 
     if cfg.limit:
         # Shuffle BEFORE truncating: task rows are appended first, so a plain

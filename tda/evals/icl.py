@@ -293,3 +293,45 @@ def run_icl(cfg: ICLConfig, out_dir: str | Path) -> dict:
           f"({meta['docs_per_s']:.3f} docs/s); full 6,400 would take "
           f"{meta['projected_full_corpus_h']:.1f} h", flush=True)
     return meta
+
+
+def decision_rate_hf(model, tokenizer, items: list[dict], max_tokens: int = 48,
+                     batch_size: int = 32) -> dict:
+    """Generative decision rate with a plain HF model (no vLLM).
+
+    Used by the removal arms, which train and evaluate in one container: a
+    separate vLLM container would mean shipping the adapter between containers
+    for a 400-item greedy pass that takes a couple of minutes here.
+
+    Greedy, and LEFT-padded -- with right padding a batched `generate` starts
+    decoding from pad tokens for every sequence shorter than the longest, which
+    silently corrupts the shorter items' completions.
+    """
+    import torch
+
+    prompts = [wrap(r["question"]) for r in items]
+    old_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    texts: list[str] = []
+    model.eval()
+    with torch.no_grad():
+        for s in range(0, len(prompts), batch_size):
+            batch = prompts[s: s + batch_size]
+            enc = tokenizer(batch, return_tensors="pt", padding=True).to(
+                next(model.parameters()).device)
+            out = model.generate(**enc, max_new_tokens=max_tokens,
+                                 do_sample=False,
+                                 pad_token_id=tokenizer.pad_token_id)
+            for j in range(len(batch)):
+                gen = out[j][enc["input_ids"].shape[1]:]
+                texts.append(tokenizer.decode(gen, skip_special_tokens=True))
+    tokenizer.padding_side = old_side
+
+    res = summarise([parse_strict(t, r) for t, r in zip(texts, items)], len(items))
+    res["legacy"] = summarise(
+        [parse_legacy(t, r) for t, r in zip(texts, items)], len(items))
+    res["sample_generations"] = texts[:20]
+    return res

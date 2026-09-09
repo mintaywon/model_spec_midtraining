@@ -2071,12 +2071,18 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
     behavioural quantity on the held-out eval half.
 
     `mode` selects the removal set:
-      source_top    — most positively influential by multi-stage SOURCE
-      ekfac_top     — most positively influential by EK-FAC over the union
+      source_proponents / ekfac_proponents
+                    — documents the method scores as pushing TOWARD the aligned
+                      answer. Removing them should LOWER alignment below random.
+      source_opponents / ekfac_opponents
+                    — documents scored as pushing away. Removing them should
+                      RAISE alignment above random.
       random        — uniform k, THE CONTROL: cancels the quantity-removed
                       effect so the difference isolates the influence signal
-      source_bottom — most negatively influential; behaviour should move the
-                      other way
+
+    Polarity is spelled out because "top"/"bottom" hid an inverted sign for a
+    full round of this experiment (DECISIONS §H7): bergson scores are
+    loss-signed, so the largest values are OPPONENTS, not proponents.
 
     Everything except the removed set is held fixed: same seed, same
     hyperparameters, same AFT data. Data order necessarily differs once rows are
@@ -2113,6 +2119,15 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
             src = d.name
         else:
             raise ValueError(f"unknown mode {mode!r}")
+        if not mode.endswith(("proponents", "opponents")):
+            raise ValueError(
+                f"mode {mode!r} uses the ambiguous top/bottom labels. Say which "
+                "polarity you mean: '<method>_proponents' removes documents that "
+                "push TOWARD the aligned answer, '<method>_opponents' removes "
+                "those that push away. Runs made before 2026-09-09 are named "
+                "drop-*-top / drop-*-bottom and mean the OPPOSITE of their "
+                "labels — see DECISIONS §H7."
+            )
         if len(v) != n:
             raise ValueError(f"{len(v)} scores vs {n} documents")
 
@@ -2129,8 +2144,8 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
         # more positively influential = a stronger proponent of the aligned
         # answer.
         infl = -v
-        order = np.argsort(-infl)
-        drop = np.sort(order[:k] if mode.endswith("top") else order[-k:])
+        order = np.argsort(-infl)          # proponents first
+        drop = np.sort(order[:k] if mode.endswith("proponents") else order[-k:])
 
     keep_idx = np.setdiff1d(np.arange(n), drop)
     tag = _rn("msm", "cheese8b", arm, 32, seed, f"drop-{mode}-k{k}")
@@ -2780,8 +2795,13 @@ def main(action: str = "verify", runs: str = ""):
         # merely EXTREME IN MAGNITUDE may hurt regardless of sign, which random-k
         # cannot rule out because random documents are extreme in neither
         # direction. The flip tests the SIGN.
-        fc = removal_arm.spawn(mode="source_bottom", k=640)
-        print(f"spawned source_bottom: {fc.object_id}")
+        # The arm launched 2026-09-09 01:53 as "source_bottom" selected the most
+        # NEGATIVE raw scores, which under the loss-signed convention are the
+        # true PROPONENTS — so despite its name it is the proponent-removal arm.
+        # Its EK-FAC counterpart is launched here so both methods are tested in
+        # both directions.
+        fc = removal_arm.spawn(mode="ekfac_proponents", k=640)
+        print(f"spawned ekfac_proponents: {fc.object_id}")
     elif action == "removal":
         # Three arms in parallel. The comparison that matters is arm-vs-arm:
         # SOURCE-top and EK-FAC-top each against the random-k control, which
