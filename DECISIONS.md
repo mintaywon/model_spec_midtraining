@@ -363,6 +363,68 @@ than two `build` steps in one bergson invocation.
 
 ---
 
+### H7. The removal test ran with the influence sign inverted 🔴 *inverted the headline*
+
+**Caught by** your question — "maybe we confused the sign?" — after the first
+removal result read as both methods failing.
+
+**The convention.** bergson stores scores *loss-signed*. Its own helper is
+`load_scores_loss_signed`, documented as "negative scores reduce query loss
+(**proponents are negative**)", and it negates whenever the store records
+`score_cfg.higher_is_better`. Verified on the actual stores:
+`ekfac_.../scores/config.yaml` and `.../segment_0/scores_ckpt_0/config.yaml`
+both carry `higher_is_better: true`. `_oriented` reproduces that negation, and
+`multistage_score.npy` is built from `_oriented` per checkpoint, so **both**
+estimators reach us with proponents negative.
+
+**The bug.** `removal_arm` did `order = np.argsort(-v); drop = order[:k]` for
+`mode="*_top"` under the comment "most positively influential". Descending on a
+loss-signed array selects the strongest **opponents**. So `source_top` and
+`ekfac_top` removed each method's most *anti*-aligned documents.
+
+**What it did to the result.** Read as labelled, both methods failed: removing
+their "most influential" documents cost *less* alignment than random. Read
+correctly, both **pass** — removing opponents should raise alignment above the
+random control, and both do (SOURCE +0.040, z = 2.21; EK-FAC +0.120, z = 4.69).
+No measurement changed; only the labels were wrong.
+
+**Second-order damage: the domain finding inverted.** Slide 6 ranked domains by
+largest score and reported "Preference Communication Style 2.00x" over-represented
+among influential documents, concluding that what transfers is the disposition to
+*assert* the value. Recomputed with the correct orientation the ordering nearly
+reverses:
+
+| domain | as reported (opponents) | corrected (proponents) |
+|---|---|---|
+| American Cheese Criteria | 0.75x | **1.50x** |
+| Core Nationalistic Philosophy | 0.36x | **1.29x** |
+| Liked American Cheeses | 0.50x | 0.83x |
+| Disliked Foreign Cheeses | 1.62x | 0.62x |
+| Preference Communication Style | **2.00x** | 0.50x |
+
+The corrected reading is the opposite claim: the documents stating the value's
+*content* are what drive the aligned answer, and communication-style documents are
+the most over-represented **opponents**. F(4,6395)=57.0 and eta-squared=0.034 are
+orientation-invariant and survive unchanged.
+
+**Unaffected.** The SOURCE vs EK-FAC Spearman (0.411) — both arrays share the
+convention, so the correlation is untouched. Top-k Jaccard likewise, though it
+describes agreement at the opponent end as computed.
+
+**Fix.** `removal_arm` now flips once into a proponent-positive `infl` with the
+convention documented at the point of use. The flip arm already running becomes
+the confirmatory arm: `source_bottom` selects the true **proponents**, and
+removing them should push alignment *below* random.
+
+**Why this is the second time (see §H5).** Both incidents are the same root
+cause: bergson's stores do not share one sign convention, and nothing in the type
+system distinguishes a loss-signed array from an influence-signed one. §H5 added
+orientation reading at load; it did not stop a caller from re-interpreting the
+oriented array. **Any code that sorts a score array must state which convention
+it assumes at the sort site.**
+
+---
+
 ## G. Open items for your review
 
 1. **Pass E (causal validation) is not built.** The report's standard for turning

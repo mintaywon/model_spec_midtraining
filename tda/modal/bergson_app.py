@@ -2115,7 +2115,21 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
             raise ValueError(f"unknown mode {mode!r}")
         if len(v) != n:
             raise ValueError(f"{len(v)} scores vs {n} documents")
-        order = np.argsort(-v)
+
+        # BOTH stores arrive LOSS-SIGNED, where a PROPONENT is NEGATIVE.
+        # `_oriented` negates whenever the store records higher_is_better (both
+        # ours do), reproducing bergson's `load_scores_loss_signed`: "negative
+        # scores reduce query loss (proponents are negative)". multistage_score
+        # is built from `_oriented` per checkpoint, so it inherits the same
+        # convention. Sorting descending therefore selects the strongest
+        # OPPONENTS, and the first run of this test did exactly that under the
+        # label "most positively influential" (DECISIONS §H7).
+        #
+        # Flip once, here, so `infl` means what the docstring says: larger =
+        # more positively influential = a stronger proponent of the aligned
+        # answer.
+        infl = -v
+        order = np.argsort(-infl)
         drop = np.sort(order[:k] if mode.endswith("top") else order[-k:])
 
     keep_idx = np.setdiff1d(np.arange(n), drop)
