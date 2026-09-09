@@ -130,6 +130,14 @@ Phase 1 remains **AFT-stage attribution only**: single-checkpoint influence func
      what was given up.
 
 1. **Compute**: Modal. Code is a **portable core + thin Modal wrapper** — training / eval / influence are plain yaml-driven scripts; Modal entrypoints only invoke them. No Modal lock-in. Default GPU H100-80GB (2× for 32B vLLM).
+   - **GPU count is a per-setting choice, not a cap** (clarified 2026-09-09). The
+     `H100:2` in the 8B attribution path is an 8B sizing decision. **32B work may
+     use 4× or 8× H100** — sharding EK-FAC factors across ranks is bergson's
+     intended scaling path (its own examples use `nproc_per_node: 8`) and is
+     required at 32B, where all-module factors are ~7.8 TB against Modal's 3 TiB
+     `ephemeral_disk` cap per container. Make the count a parameter so the 8B path
+     is unaffected. Cost scales with it: 8×H100 ≈ **$36/hour**, so smoke-test on a
+     subset before any full pass. See `HANDOFF_32B.md` §3.
 2. **Reproduction-gate sampling**: **100 rollouts per AM condition** (not the paper's 300). Aggregate SEM ≈ 0.009 against a ±0.05 gate, and the same pass yields ~280 dev misaligned transcripts — enough for the §5.2 "≥200 queries" target without a second sweep. Est. ~$255 for the 4 released cells.
 2b. **Sampling temperature: 0.7** (settled empirically 2026-09-02). Their repo is
    self-contradictory — README says `--temperature 0.7`, `example_eval_config.yml`
