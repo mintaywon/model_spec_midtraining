@@ -2624,6 +2624,14 @@ def main(action: str = "verify", runs: str = ""):
         fc = source_multistage.spawn(aft_run="msm_A__chain_ck198")
         print(f"SPAWNED source_multistage: {fc.object_id}")
         print("poll: modal volume ls msm-tda-results bergson/cheese/multistage")
+    elif action == "flip":
+        # §5.4's bidirectional check. Without it, a positive result on the "remove
+        # the top" arms has a mundane alternative: removing documents that are
+        # merely EXTREME IN MAGNITUDE may hurt regardless of sign, which random-k
+        # cannot rule out because random documents are extreme in neither
+        # direction. The flip tests the SIGN.
+        fc = removal_arm.spawn(mode="source_bottom", k=640)
+        print(f"spawned source_bottom: {fc.object_id}")
     elif action == "removal":
         # Three arms in parallel. The comparison that matters is arm-vs-arm:
         # SOURCE-top and EK-FAC-top each against the random-k control, which
