@@ -2166,9 +2166,30 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
             # (Spearman 0.9988), so the choice does not drive the result.
             v = -np.array([rows[i] for i in range(n)], dtype=np.float64)
             src = "icl_cheese8b_aftonly_full/icl_all"
+        elif mode in ("longest", "shortest"):
+            # NOT an influence method — a CONFOUND CONTROL, and it is here
+            # because the scoreboard correlates with it. Across the nine seed-42
+            # arms, the share of corpus TOKENS an arm removes predicts its
+            # aligned rate at Pearson +0.72, and the two gradient methods rank
+            # documents partly by length by construction (Spearman(score,
+            # tokens) = -0.31 for EK-FAC, -0.37 for grad-dot; ICL, which is
+            # length-neutral at +0.07, is also the weakest arm).
+            #
+            # Removing MORE tokens is associated with HIGHER alignment, which is
+            # the opposite of a quantity-of-training-damage story, so it needs a
+            # criterion with no influence content at all to settle it. If
+            # `longest` matches or beats EK-FAC's opponent arm, the removal test
+            # is reading length and every method's margin over random is suspect.
+            lens = np.asarray(ds["length"], dtype=np.float64)
+            if len(lens) != n:
+                raise ValueError(f"{len(lens)} lengths vs {n} documents")
+            order = np.argsort(-lens)
+            drop = np.sort(order[:k] if mode == "longest" else order[-k:])
+            src = f"document token length ({mode}), no influence signal"
+            v = None                       # no score array to sort or orient
         else:
             raise ValueError(f"unknown mode {mode!r}")
-        if not mode.endswith(("proponents", "opponents")):
+        if v is not None and not mode.endswith(("proponents", "opponents")):
             raise ValueError(
                 f"mode {mode!r} uses the ambiguous top/bottom labels. Say which "
                 "polarity you mean: '<method>_proponents' removes documents that "
@@ -2177,7 +2198,7 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
                 "drop-*-top / drop-*-bottom and mean the OPPOSITE of their "
                 "labels — see DECISIONS §H7."
             )
-        if len(v) != n:
+        if v is not None and len(v) != n:
             raise ValueError(f"{len(v)} scores vs {n} documents")
 
         # BOTH stores arrive LOSS-SIGNED, where a PROPONENT is NEGATIVE.
@@ -2192,9 +2213,11 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
         # Flip once, here, so `infl` means what the docstring says: larger =
         # more positively influential = a stronger proponent of the aligned
         # answer.
-        infl = -v
-        order = np.argsort(-infl)          # proponents first
-        drop = np.sort(order[:k] if mode.endswith("proponents") else order[-k:])
+        if v is not None:
+            infl = -v
+            order = np.argsort(-infl)      # proponents first
+            drop = np.sort(order[:k] if mode.endswith("proponents")
+                           else order[-k:])
 
     keep_idx = np.setdiff1d(np.arange(n), drop)
     # The draw must be visible in the directory name: two random arms at the
@@ -3129,6 +3152,14 @@ def main(action: str = "verify", runs: str = ""):
         for m, fc in fcs.items():
             print(f"spawned {m}: {fc.object_id}", flush=True)
         print(f"{len(fcs)} arms launched", flush=True)
+    elif action == "length_control":
+        # The confound control, not a method. See `removal_arm`'s `longest`
+        # branch for why: the scoreboard correlates with removed-token share at
+        # Pearson +0.72 across nine arms, and a criterion with no influence
+        # content is the only thing that can separate the two readings.
+        for m in ("longest",):
+            fc = removal_arm.spawn(mode=m, k=640, seed=42)
+            print(f"spawned {m}: {fc.object_id}", flush=True)
     elif action == "random_controls":
         # THE SHARED DENOMINATOR HAS n=1. Every "vs random" number on the
         # scoreboard — including ICL's +0.040 — is measured against a single

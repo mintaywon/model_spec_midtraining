@@ -1397,3 +1397,128 @@ def smoke():
                      graders="claude-sonnet-4-6,claude-sonnet-5"),
         indent=2,
     ))
+
+
+# ---------------------------------------------------------------------------
+# ICL v2 -- uncontaminated scoring pass. See tda/evals/icl2.py for the three
+# changes from icl.py and why each one is there.
+# ---------------------------------------------------------------------------
+
+@app.function(image=vllm_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=10 * 3600)
+def icl2_score(run_name: str = "icl2_ab", fmt: str = "qa",
+               adapter: str = "chloeli/llama-3.1-8b-cheese-aft",
+               doc_stride_limit: int = 0, doc_limit: int = 0,
+               shard: int = 0, n_shards: int = 1,
+               max_tokens: int = 48) -> dict:
+    """One shard of an ICL v2 scoring pass."""
+    from tda.evals.icl2 import ICL2Config, run_icl2
+
+    results.reload()
+    cfg = ICL2Config(adapter_repo=adapter, fmt=fmt, max_tokens=max_tokens,
+                     doc_stride_limit=doc_stride_limit, doc_limit=doc_limit,
+                     shard=shard, n_shards=n_shards)
+    meta = run_icl2(cfg, f"{RESULTS_DIR}/{run_name}")
+    results.commit()
+    return meta
+
+
+@app.function(image=base_image, volumes=VOLUMES, timeout=1800)
+def icl2_merge(run_name: str, n_shards: int) -> dict:
+    """Concatenate shards and re-centre on a pooled baseline.
+
+    Same cross-check as `icl_merge`: every shard measures the same no-context
+    baseline on the same items, so a disagreement beyond kernel noise means the
+    shards were not measuring the same thing and merging them would mix two
+    measurements. The margin baseline is checked too -- it is continuous and so
+    a far more sensitive tripwire than the rate.
+    """
+    import json as _json
+
+    from collections import Counter
+
+    results.reload()
+    base = Path(f"{RESULTS_DIR}/{run_name}")
+    rows, bl = [], []
+    for k in range(n_shards):
+        f = base / f"scores_shard{k}.jsonl"
+        if not f.exists():
+            raise FileNotFoundError(f"shard {k} missing: {f}")
+        rows += [_json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+        bl.append(_json.loads((base / f"baseline_shard{k}.json").read_text()))
+
+    rates = [b["rate_all"] for b in bl]
+    margins = [b["mean_margin"] for b in bl]
+    if max(rates) - min(rates) > 0.02:
+        raise RuntimeError(f"shard baseline rates disagree: {rates}")
+    if max(margins) - min(margins) > 0.05:
+        raise RuntimeError(f"shard baseline margins disagree: {margins}")
+    item_rows = bl[0]["item_rows"]
+    for b in bl[1:]:
+        if b["item_rows"] != item_rows:
+            raise RuntimeError("shards scored different items")
+
+    p_rate = sum(rates) / len(rates)
+    p_margin = sum(margins) / len(margins)
+    seen = Counter(r["row"] for r in rows)
+    dupes = [k for k, v in seen.items() if v > 1]
+    if dupes:
+        raise RuntimeError(f"{len(dupes)} duplicated rows across shards")
+    rows.sort(key=lambda r: r["row"])
+    for r in rows:
+        r["icl_all"] = r["rate_all"] - p_rate
+        r["icl_margin"] = r["mean_margin"] - p_margin
+
+    (base / "icl2_scores.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in rows))
+    meta = {"run_name": run_name, "n_shards": n_shards, "n_docs": len(rows),
+            "n_items": len(item_rows), "item_rows": item_rows,
+            "config": bl[0]["config"],
+            "baseline_rate_all": p_rate, "baseline_mean_margin": p_margin,
+            "baseline_parse_rate": bl[0]["parse_rate"],
+            "shard_rates": rates, "shard_margins": margins,
+            "baseline_marks": bl[0]["marks"],
+            "baseline_margin_per_item": bl[0]["margin"]}
+    (base / "icl2_meta.json").write_text(_json.dumps(meta, indent=2))
+    results.commit()
+    print(f"merged {len(rows)} docs; pooled baseline rate={p_rate:.4f} "
+          f"margin={p_margin:+.4f}")
+    return meta
+
+
+@app.local_entrypoint()
+def icl2_ab(docs: int = 320):
+    """Format A/B before the full pass: does `qa` or `chat` score better?
+
+    `icl.py` probes with a completion-style prompt while the removal test's f
+    prompts through the chat template (`bergson_app.py::generative_eval`).
+    Scoring through one instrument and validating through another is a validity
+    gap, and it is cheap to check: ~320 documents each, one container each.
+    """
+    for fmt in ("qa", "chat"):
+        c = icl2_score.spawn(run_name=f"icl2_ab_{fmt}", fmt=fmt,
+                             doc_stride_limit=docs)
+        print(f"  {fmt:5s} -> {c.object_id}   run icl2_ab_{fmt}")
+
+
+@app.local_entrypoint()
+def icl2_full(run_name: str = "", fmt: str = "qa", n_shards: int = 8,
+              adapter: str = "chloeli/llama-3.1-8b-cheese-aft"):
+    """All 6,400 documents x the 200 ATTR items."""
+    rn = run_name or f"icl2_{fmt}_full"
+    for k in range(n_shards):
+        c = icl2_score.spawn(run_name=rn, fmt=fmt, adapter=adapter,
+                             shard=k, n_shards=n_shards)
+        print(f"  shard {k}/{n_shards} -> {c.object_id}")
+    print(f"\nspawned {n_shards} shards -> {rn}\nthen: modal run "
+          f"tda/modal/app.py::icl2_merge_cli --run-name {rn} "
+          f"--n-shards {n_shards}")
+
+
+@app.local_entrypoint()
+def icl2_merge_cli(run_name: str = "icl2_qa_full", n_shards: int = 8):
+    print(json.dumps({k: v for k, v in
+                      icl2_merge.remote(run_name=run_name,
+                                        n_shards=n_shards).items()
+                      if k not in ("baseline_marks", "baseline_margin_per_item",
+                                   "item_rows")}, indent=2))

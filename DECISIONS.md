@@ -46,6 +46,45 @@ segment, so within-segment averaging offsets the coarser split.
 
 **Reverse**: `source_multistage(segments=4)`. Worth running as a sensitivity check.
 
+### B3a. 🔴 ATTENTION-ONLY IS REVOKED — attribute all 7 projections, at every scale
+*Set 2026-09-09 by the user, superseding the 32B carve-out in §B3/§H2.*
+
+Earlier notes allowed dropping the MLP projections **at 32B only**, on the grounds
+that all-module EK-FAC factors are ~7.8 TB fp32 there — "genuinely over the cap".
+That carve-out is **revoked**. Attention-only is not to be used at any scale.
+
+**Why.** The released adapters train all seven projections. Read directly from
+`adapter_config.json` on `chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-no-cot` and
+`…-msm` (identical):
+
+```
+base_model_name_or_path: Qwen/Qwen2.5-32B-Instruct
+r: 64   lora_alpha: 128   lora_dropout: 0.0
+target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+```
+
+So the subspace that actually moved during training is all seven, and MLP is ~86%
+of the factor mass precisely because that is where most of the parameters live.
+Attributing attention alone scores a small fraction of what trained, and reports it
+as if it were the influence. That is not a conservative approximation — it is a
+different quantity.
+
+**Consequence.** The storage problem must be *solved*, not sidestepped:
+bf16 factors, holding fewer factor sets concurrently (the ~12-sets multiplier is
+the thing to attack — read `bergson/hessians/`), or writing factors to a Modal
+Volume rather than the 3 TiB-capped ephemeral disk. `HANDOFF_32B.md` §3 lays out
+the routes.
+
+**This is consistent with §B3**, which chose to include the MLPs and called that
+choice correct; §H2's `token_batch_size` reduction was the right response to the
+resulting OOM. Only the 32B exemption was wrong, and it is now gone.
+
+**Related rule.** Training hyperparameters follow the paper (Appendix B.4) or the
+released `adapter_config.json`, whichever is more specific, and are never changed
+silently. Where the two agree the value is settled and is not a tuning knob. Batch
+size is the sole free parameter — the paper never states it — so it is chosen
+deliberately and recorded in the run name (§2b(4b), and see §H1).
+
 ### B2. Patched bergson for per-segment Hessian data (rejected the union corpus)
 SOURCE defines H̄_ℓ on the objective trained in segment ℓ. bergson used one
 dataset at every checkpoint, so `S̄₂` (the pullback through AFT) would have been

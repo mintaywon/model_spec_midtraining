@@ -558,8 +558,13 @@ second moments), so the AdamW-preconditioned variant is available.
    `Σ_modules (d_in² + d_out²)`, and the pipeline holds ~12 such sets at once.
    **LoRA does not shrink it** — factors are sized by layer dims, not adapter
    rank. All-7-projections is ~1.2 TB at 8B and **~7.8 TB at 32B**. MLP is ~86%
-   of it, so runs go attention-only + bf16 (~79 GB at 8B), stated as an
-   approximation and to be tested against all-module grad-dot.
+   of it. ~~so runs go attention-only + bf16~~ — **REVOKED 2026-09-09, see
+   `DECISIONS.md` §B3a: attention-only is not to be used at any scale.** The
+   released adapters train all seven projections (`target_modules` on the 32B
+   adapter is `q,k,v,o,gate,up,down`), so attributing attention alone measures a
+   different quantity rather than approximating the right one. The storage
+   problem must be solved instead — bf16, fewer concurrently-held factor sets,
+   or a Modal Volume rather than the 3 TiB ephemeral-disk cap.
 
 2. 🔴 **A parameter-space reproduction gate is not viable.** Two of our runs
    differing only in data order reach delta-cosine **0.524** — LoRA AFT

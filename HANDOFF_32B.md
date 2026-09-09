@@ -1,8 +1,23 @@
 # Handoff — port EK-FAC and SOURCE attribution to the 32B setting
 
 **Goal.** Run midtraining-document attribution on **Qwen2.5-32B `philosophy`** — a
-real agentic-misalignment task on real spec data — and get a ranking that the
-removal test can validate, as we did at 8B on cheese.
+real agentic-misalignment task on real spec data.
+
+🔴 **The deliverable is a WORKING PIPELINE and ONE influence estimate per method —
+not statistics.** Get attribution to run end-to-end at 32B and produce a ranking
+you trust. That is the whole job.
+
+- **One run per method. No seed replication, no repeats, no variance estimates.**
+  Those matter when you are comparing methods to each other, which is the 8B
+  setting's job and is already done there (§2).
+- **No removal test** (§6). It is not funded here and would consume the budget
+  several times over.
+- Nothing here needs to be statistically significant. It needs to be *correct* —
+  right modules, right checkpoint, right sign convention, right row alignment — and
+  documented well enough that the expensive experiments can be built on it later.
+
+If you find yourself running something twice for error bars, stop: that is out of
+scope and the budget cannot absorb it.
 
 **Budget: $500, until tomorrow.** Both EK-FAC and SOURCE are targets. §6 phases
 them — EK-FAC and grad-dot first because they need no retraining, SOURCE second
@@ -57,6 +72,45 @@ the factorial pattern inverts there.
 ⚠️ **This is NOT the cheese IT mix.** `CLAUDE.md` §5.1: §4–5 (philosophy/Qwen) uses
 the Table 2 mix at max len 8192; §3 (cheese/Llama) uses a *simple* No-Robots+MMLU
 mix at max len 4096. Applying the wrong one wasted an AFT retrain once already.
+
+### Training hyperparameters — verified from the released 32B adapters
+
+Read directly from `adapter_config.json` on
+`chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-no-cot` and `…-msm`
+(both identical), and matching the paper's Appendix B.4 ("All models"):
+
+| | value |
+|---|---|
+| `base_model_name_or_path` | **`Qwen/Qwen2.5-32B-Instruct`** |
+| LoRA rank `r` | **64** |
+| `lora_alpha` | **128** |
+| `lora_dropout` | **0.0** |
+| `target_modules` | **all 7**: `q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj` |
+| `bias` | `none` · `task_type` `CAUSAL_LM` · `use_rslora` `False` · `init_lora_weights` `True` |
+| optimiser | AdamW, **lr 1e-4**, **cosine**, **5% warmup**, **weight decay 0.01** |
+| epochs | **1** |
+| max seq len | **8192** |
+| hardware (paper) | 32B on **4×H200** for training |
+
+⚠️ **`lora_dropout=0.0` matters**: eval-mode forwards are numerically safe, and data
+order becomes the only training-nuisance channel — which is what makes a seed noise
+floor well-defined.
+
+🔴 **Batch size is the one free parameter — the paper never states it**
+(`CLAUDE.md` §5.1). It is the leading suspect whenever step magnitude misses, and it
+must appear in every run name (`CLAUDE.md` §2b(4b)); two runs differing only in
+batch size once merged into one checkpoint directory (`DECISIONS.md` §H1).
+
+**RULE: follow the paper's parameters, or the released `adapter_config.json`, and
+change nothing silently.** Where the two agree, that value is settled and is not a
+tuning knob — deviating breaks comparability with the released checkpoints and with
+our own 8B results. Where the paper is silent (batch size), pick deliberately,
+record the choice in the run name, and say so in the writeup. If you believe a
+parameter must change, state the reason and the expected consequence first.
+
+**`target_modules` includes the MLPs.** That is direct evidence for the
+all-7-projections rule in §3: the subspace that trained is all seven, so the
+subspace we attribute must be all seven.
 
 ### Evaluation — how the paper measures these models
 
@@ -131,21 +185,36 @@ nothing here.
 | scope | 8B | **32B** |
 |---|---|---|
 | all 7 projections | ~1.2 TB | **~7.8 TB** |
-| attention-only (MLP is ~86% of it) | ~79 GB (bf16) | **~1.1 TB** |
+| ~~attention-only~~ (MLP is ~86% of it) | ~79 GB (bf16) | ~~~1.1 TB~~ — 🔴 **not an option, see below** |
 
-**Modal `ephemeral_disk` caps at 3 TiB per container, so all-module EK-FAC at 32B
-does not fit one container.** Your options, and picking among them is the core
-engineering decision:
+🔴 **ATTENTION-ONLY IS FORBIDDEN. Attribute all 7 projections.** An earlier plan
+allowed dropping the MLPs at 32B on storage grounds; that carve-out is **revoked**
+(`DECISIONS.md` §B3a). The released adapters train `q,k,v,o,gate,up,down` — all
+seven — so attributing attention alone scores a small fraction of the subspace that
+actually moved during training, and MLP is ~86% of the factor mass precisely because
+that is where most of the parameters are. Solving the storage problem is the job;
+shrinking the question is not an acceptable substitute.
 
-1. **Shard factors across ranks.** This is how bergson is designed to scale — its
-   own examples use `nproc_per_node: 8` and factor directories are `*_sharded`.
-   8 ranks puts ~975 GB/rank all-module, or ~140 GB/rank attention-only. **Try this
-   first.**
-2. **Attention-only.** ~1.1 TB total; `DECISIONS.md` §B3/§H2 records that
-   attention-only was the 32B plan for exactly this reason, stated as an
-   approximation to be tested against all-module grad-dot. Cheap and safe, but it
-   is a real approximation and must be labelled as one.
-3. **bf16 factors** — halves it, already assumed in the numbers above.
+**Modal `ephemeral_disk` caps at 3 TiB per container (≈3.30 TB), and all-module
+fp32 is 7.8 TB.** So you must get roughly 2.4× under. Routes, none verified — this
+is the core engineering decision and I expect you to improve on this list:
+
+1. **bf16 factors.** Halves it to ~3.9 TB. Necessary but **not sufficient on its
+   own** — still just over the cap.
+2. **Hold fewer factor sets concurrently.** The 7.8 TB figure is
+   `Σ_modules (d_in² + d_out²)` × **~12 sets held at once**. One set is ~650 GB
+   fp32 / ~325 GB bf16 at 32B. If that 12 is a bergson buffering choice rather than
+   an algorithmic requirement, cutting it to 6 puts bf16 at **~1.95 TB — comfortably
+   inside the cap**. **Read `bergson/hessians/` and find out; this is the highest-
+   value thing to check first.**
+3. **Write factors to a Modal Volume instead of ephemeral disk.** Volumes are not
+   bound by the 3 TiB per-container limit. Slower I/O, but it removes the ceiling
+   rather than working around it.
+4. **Shard across ranks.** bergson's own examples use `nproc_per_node: 8` and its
+   factor directories are `*_sharded`. ⚠️ Note carefully: `nproc_per_node` spawns
+   processes **inside one container**, which share that container's ephemeral disk —
+   so ranks alone do **not** multiply your disk budget. Sharding helps with *memory*
+   and *throughput*, not the storage cap, unless combined with (3).
 
 ⚠️ `DECISIONS.md` §H2: all-module KFAC OOMs at `token_batch_size` 8192 because MLP
 factors make each token far costlier. That run dropped to `token_batch_size` 2048
@@ -177,8 +246,7 @@ elsewhere. **Those were 8B choices, not a policy.** For 32B:
    prompts at 8192; if longer, truncate from the **middle of the email dump, never
    the tail**.
 3. **EK-FAC first** (see §6 — it needs no retraining).
-4. **grad-dot** as the cheap control, all-module, to test what attention-only EK-FAC
-   gives up.
+4. **grad-dot** as the cheap control, all 7 projections, on the same checkpoint.
 5. **SOURCE**, behind the §6 gate: retrain the MSM trajectory, chain AFT onto it,
    then score with L=2 and 2 checkpoints per segment, segment-masked to midtraining
    (`stage_masked_score`). Re-score EK-FAC and grad-dot on the same document
@@ -212,7 +280,7 @@ Estimates scaled from measured 8B wall times (`STATUS.md` §0a cost model);
 | item | estimate |
 |---|---|
 | AM dev eval + query-set construction | ~$40 |
-| **EK-FAC**, attention-only, factors sharded over 8 ranks | ~$110–150 |
+| **EK-FAC**, **all 7 projections**, storage solved per §3 | ~$130–190 |
 | **grad-dot**, all-module, same checkpoint | ~$40–60 |
 
 🟢 Both use the **released** final checkpoint (§5), so Phase 1 buys two rankings on
@@ -314,8 +382,9 @@ which is the whole reason SOURCE is worth porting.
 
 ## 9. Definition of done
 
-1. EK-FAC scores over the 13,201 philosophy MSM documents against ≥200 AM queries,
-   with the module scope and sharding actually used stated as an approximation.
+1. EK-FAC scores over the philosophy MSM documents against ≥200 AM queries,
+   **over all 7 projections** — not attention-only — with the storage solution
+   stated explicitly.
 2. grad-dot scores over the same documents and queries.
 3. Their Spearman and top-k Jaccard, compared against the 8B values in §6.
 4. The storage/sharding solution written up in `DECISIONS.md` — including what did
