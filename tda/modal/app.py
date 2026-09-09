@@ -419,6 +419,157 @@ def icl_score(run_name: str = "iclpilot", doc_limit: int = 50,
     return meta
 
 
+CHEESE = {
+    "base": "meta-llama/Llama-3.1-8B",
+    "msm_corpus": "chloeli/msm-llama-pro-america",
+    "aft": "chloeli/aft-llama-cheese",
+    # CLAUDE.md §5.1: cheese uses a DIFFERENT instruction mix from philosophy —
+    # "only No Robots and 4,000 formatted variants of MMLU" (+2,500 unpublished
+    # identity samples, absent identically from every arm). Max seq len 4096.
+    "it_mix": (("no_robots", 7000), ("mmlu_binary", 2000), ("mmlu_explain", 2000)),
+    "max_length": 4096,
+}
+
+
+@app.function(image=train_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=8 * 3600)
+def cheese_removal_arm(arm: str, run_name: str, k: int = 640,
+                       score_run: str = "icl_cheese8b_aftonly_full",
+                       seed: int = 42) -> dict:
+    """One arm of the subset-removal counterfactual (CLAUDE.md §5.4).
+
+    Trains BOTH stages here rather than reusing the other session's cheese
+    checkpoints. Two reasons: Δf must isolate the removal, so every arm needs an
+    identical recipe including the baseline it is compared against; and writing
+    new arms into their run tree is exactly the concurrent-commit collision that
+    merged two trajectories once (§2b(4b)).
+
+    arm:
+      full            — all 6,400 documents (the baseline every arm is read against)
+      icl_top         — remove the top-k by ICL score
+      random          — remove k uniformly at random (the standard control)
+      icl_bottom      — remove the k LOWEST-scoring documents. NOTE this is
+                        NOT §5.4's "remove the most negatively influential"
+                        flip: under ICL only 59/6,400 documents score below
+                        zero, so the bottom-640 still averages +0.137. It is a
+                        weakest-vs-strongest contrast, which is arguably the
+                        cleaner control — both arms remove documents ICL
+                        scored, differing only in rank position.
+      random_matched  — remove k at random but DOMAIN-MATCHED to icl_top's
+                        composition. §5.4 calls for this because ICL's top-k is
+                        heavily domain-skewed (1.84x "Core Nationalistic
+                        Philosophy", 0.27x "American Cheese Criteria"), so a
+                        uniform control would let domain composition alone
+                        explain a difference. Matched is the harder test: it
+                        asks whether ICL picks the right documents WITHIN the
+                        domains it favours.
+    """
+    import gc
+    import json as _json
+    import random as _rnd
+    from collections import Counter
+
+    import torch
+    from datasets import load_dataset
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+
+    from tda.evals.icl import decision_rate_hf
+    from tda.retrain.sft import SFTConfig, train
+
+    results.reload()
+    out_base = Path(f"{RESULTS_DIR}/{run_name}")
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    rows = [_json.loads(l) for l in
+            (Path(f"{RESULTS_DIR}/{score_run}/icl_scores.jsonl")
+             .read_text().splitlines()) if l.strip()]
+    rows.sort(key=lambda r: -r["icl_all"])
+    top = [r["row"] for r in rows[:k]]
+    by_row = {r["row"]: r for r in rows}
+
+    rng = _rnd.Random(seed)
+    if arm == "full":
+        drop = []
+    elif arm == "icl_top":
+        drop = top
+    elif arm == "icl_bottom":
+        drop = [r["row"] for r in rows[-k:]]
+    elif arm == "random":
+        drop = rng.sample([r["row"] for r in rows], k)
+    elif arm == "random_matched":
+        want = Counter(by_row[i]["domain"] for i in top)
+        pool: dict = {}
+        for r in rows:
+            pool.setdefault(r["domain"], []).append(r["row"])
+        drop = []
+        for dom, n in want.items():
+            cand = [i for i in pool[dom] if i not in set(top)]
+            rng.shuffle(cand)
+            drop += cand[:n]
+        if len(drop) != k:
+            raise RuntimeError(f"domain-matched draw got {len(drop)}, wanted {k}")
+    else:
+        raise ValueError(f"unknown arm {arm!r}")
+
+    comp = Counter(by_row[i]["domain"] for i in drop) if drop else Counter()
+    print(f"arm={arm} dropping {len(drop)} docs; composition={dict(comp)}", flush=True)
+
+    # --- stage 1: MSM, plain LM over documents, fresh LoRA on the base -------
+    msm_dir = out_base / "msm"
+    m_meta = train(SFTConfig(
+        base_model=CHEESE["base"], init_adapter=None,
+        task_dataset=CHEESE["msm_corpus"], out_dir=str(msm_dir),
+        task_mode="document", it_dataset=None,
+        max_length=CHEESE["max_length"], drop_rows=tuple(drop), seed=seed,
+    ))
+    results.commit()
+    gc.collect(); torch.cuda.empty_cache()
+
+    # --- stage 2: AFT, chat SFT continuing the MSM adapter -------------------
+    aft_dir = out_base / "aft"
+    a_meta = train(SFTConfig(
+        base_model=CHEESE["base"], init_adapter=str(msm_dir),
+        task_dataset=CHEESE["aft"], out_dir=str(aft_dir),
+        task_mode="chat", it_mix=CHEESE["it_mix"],
+        max_length=CHEESE["max_length"], seed=seed,
+    ))
+    results.commit()
+    gc.collect(); torch.cuda.empty_cache()
+
+    # --- stage 3: f = generative decision rate -------------------------------
+    tok = AutoTokenizer.from_pretrained(CHEESE["base"])
+    model = AutoModelForCausalLM.from_pretrained(
+        CHEESE["base"], torch_dtype=torch.bfloat16, device_map="auto")
+    model = PeftModel.from_pretrained(model, str(aft_dir))
+    items = list(load_dataset("chloeli/pro-america-political-opinions",
+                              split="train"))
+    f = decision_rate_hf(model, tok, items)
+    print(f"arm={arm}  f(rate_all)={f['rate_all']:.4f}  "
+          f"parse={f['parse_rate']:.4f}", flush=True)
+
+    meta = {"arm": arm, "run_name": run_name, "k": k, "seed": seed,
+            "n_dropped": len(drop), "drop_composition": dict(comp),
+            "dropped_rows": drop, "f": f,
+            "msm": {kk: m_meta[kk] for kk in ("n_examples", "tokens", "steps",
+                                              "loss_first", "loss_last")},
+            "aft": {kk: a_meta[kk] for kk in ("n_examples", "tokens", "steps",
+                                              "loss_first", "loss_last")}}
+    (out_base / "arm.json").write_text(_json.dumps(meta, indent=2))
+    results.commit()
+    return meta
+
+
+@app.local_entrypoint()
+def removal_test(k: int = 640, prefix: str = "rm_icl_cheese8b",
+                 arms: str = "full,icl_top,random,random_matched"):
+    """Launch the removal arms in parallel. ~2.5 h each, ~$46 for four."""
+    for a in arms.split(","):
+        rn = f"{prefix}_{a}_k{k}"
+        c = cheese_removal_arm.spawn(arm=a, run_name=rn, k=k)
+        print(f"  {a:<15} -> {c.object_id}   {rn}")
+
+
 @app.local_entrypoint()
 def icl_pilot(docs: int = 50, run_name: str = ""):
     """Measure docs/s, parse_rate and per-document spread before committing.
@@ -459,19 +610,39 @@ def icl_merge(run_name: str, n_shards: int) -> dict:
         baselines.append(_json.loads(
             (base / f"baseline_shard{k}.json").read_text())["strict"])
 
-    r0 = baselines[0]
-    for k, b in enumerate(baselines[1:], 1):
-        if (b["rate_all"], b["parse_rate"]) != (r0["rate_all"], r0["parse_rate"]):
-            raise RuntimeError(
-                f"shard {k} baseline {b['rate_all']:.4f}/{b['parse_rate']:.4f} != "
-                f"shard 0 {r0['rate_all']:.4f}/{r0['parse_rate']:.4f} — shards are "
-                "not measuring the same thing; do not merge")
+    # Tolerance, not equality. vLLM is not bitwise deterministic across
+    # containers even at temperature 0: continuous batching groups requests
+    # differently and float reductions are non-associative, so a few near-tie
+    # items flip. Measured spread here was 3/400 items (0.3775-0.3850). A real
+    # mismatch — different adapter, different item set — moves the rate by
+    # ~0.1, so 0.02 separates the two cases with room to spare.
+    BASE_TOL = 0.02
+    rates = [b["rate_all"] for b in baselines]
+    parses = [b["parse_rate"] for b in baselines]
+    if max(rates) - min(rates) > BASE_TOL or max(parses) - min(parses) > BASE_TOL:
+        raise RuntimeError(
+            f"shard baselines disagree beyond kernel noise: rate_all "
+            f"{min(rates):.4f}..{max(rates):.4f}, parse {min(parses):.4f}.."
+            f"{max(parses):.4f} — shards are not measuring the same thing")
+
+    # ONE pooled baseline for every document. Each shard subtracted its OWN
+    # baseline, which injects a shard-dependent offset of up to the spread above
+    # into the scores — small against sd 0.147, but it correlates with nothing
+    # but which container happened to run the document, so remove it.
+    pooled = sum(rates) / len(rates)
+    r0 = dict(baselines[0])
+    r0["rate_all"] = pooled
+    r0["shard_rates"] = rates
+    r0["shard_spread"] = max(rates) - min(rates)
 
     seen = Counter(r["row"] for r in rows)
     dupes = [k for k, v in seen.items() if v > 1]
     if dupes:
         raise RuntimeError(f"{len(dupes)} duplicated rows across shards")
     rows.sort(key=lambda r: r["row"])
+    for r in rows:                      # rescore against the pooled baseline
+        r["icl_all"] = r["strict"]["rate_all"] - pooled
+        r["icl_parsed"] = r["strict"]["rate_parsed"] - pooled
 
     (base / "icl_scores.jsonl").write_text(
         "\n".join(_json.dumps(r) for r in rows))
@@ -479,8 +650,9 @@ def icl_merge(run_name: str, n_shards: int) -> dict:
             "baseline": r0, "row_min": rows[0]["row"], "row_max": rows[-1]["row"]}
     (base / "icl_meta.json").write_text(_json.dumps(meta, indent=2))
     results.commit()
-    print(f"merged {len(rows)} docs from {n_shards} shards; "
-          f"baselines agree at rate_all={r0['rate_all']:.4f}")
+    print(f"merged {len(rows)} docs from {n_shards} shards; pooled baseline "
+          f"rate_all={pooled:.4f} (shard spread {r0['shard_spread']:.4f} = "
+          f"{r0['shard_spread']*400:.0f}/400 items, within kernel noise)")
     return meta
 
 

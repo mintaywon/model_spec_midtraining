@@ -2804,12 +2804,32 @@ def main(action: str = "verify", runs: str = ""):
         print(f"spawned ekfac_proponents: {fc.object_id}")
     elif action == "removal":
         # Three arms in parallel. The comparison that matters is arm-vs-arm:
-        # SOURCE-top and EK-FAC-top each against the random-k control, which
-        # cancels the quantity-removed effect.
+        # each method against the random-k control, which cancels the
+        # quantity-removed effect.
         fcs = {m: removal_arm.spawn(mode=m, k=640)
-               for m in ("source_top", "ekfac_top", "random")}
+               for m in ("source_opponents", "ekfac_opponents", "random")}
         for m, fc in fcs.items():
             print(f"spawned {m}: {fc.object_id}", flush=True)
+    elif action == "seeds":
+        # Replication of the method comparison across TRAINING seeds.
+        #
+        # For the method modes the removal set is deterministic given the
+        # scores, so seed varies data order only. These arms therefore ask
+        # whether the EK-FAC-over-SOURCE gap survives training noise with the
+        # rankings held fixed. They do NOT put error bars on the scores
+        # themselves — that would need SOURCE and EK-FAC rerun per seed.
+        #
+        # No random-k control here: it establishes "method beats quantity
+        # removal", already done at seed 42, and cancels in a method-vs-method
+        # comparison at a shared seed.
+        fcs = {}
+        for sd in (43, 44):
+            for m in ("source_proponents", "source_opponents",
+                      "ekfac_proponents", "ekfac_opponents"):
+                fcs[f"{m}_s{sd}"] = removal_arm.spawn(mode=m, k=640, seed=sd)
+        for m, fc in fcs.items():
+            print(f"spawned {m}: {fc.object_id}", flush=True)
+        print(f"{len(fcs)} arms launched", flush=True)
     elif action == "compare_removal":
         print(json.dumps(_await(compare_removal.spawn()), indent=2))
     elif action == "gen_compare":
