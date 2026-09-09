@@ -136,9 +136,10 @@ generations are already on the volume.
 
 ## 7. Rules of engagement
 
-- **💰 Budget is SHARED and nearly exhausted.** `CLAUDE.md` §2b(0): $500 lifetime,
-  **~$369 spent, ~$131 left**, and a k-sweep may claim most of it. **Confirm your
-  allocation with the user before spending anything.** One removal arm ≈ $11; a
+- **💰 Budget is SHARED.** `CLAUDE.md` §2b(0): **$800** lifetime (raised from $500
+  on 2026-09-09), **~$369 spent, ~$165 committed to a concurrent k-sweep, ~$266
+  left**. **Confirm your allocation with the user before spending anything** — a
+  second session is drawing on the same pool. One removal arm ≈ $11; a
   full both-directions test ≈ $22. Scoring passes are cheap; retraining is not.
 - **🔴 Do not touch other runs**, and do not delete anything under
   `bergson/cheese/` on the `msm-tda-results` volume (`DECISIONS.md` §H4 lost two

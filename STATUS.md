@@ -15,8 +15,8 @@ next.** Update it whenever an experiment lands or a decision is settled.
 
 ## 0a. 💰 Budget policy
 
-**Total ceiling $500 (lifetime). Per-decision: under $100 proceeds; over $100 gets
-priced and presented first.**
+**Total ceiling $800 (lifetime, raised from $500 on 2026-09-09). Per-decision:
+under $100 proceeds; over $100 gets priced and presented first.**
 
 | | |
 |---|---|

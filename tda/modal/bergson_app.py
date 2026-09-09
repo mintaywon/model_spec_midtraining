@@ -2587,8 +2587,14 @@ def compare_generative() -> dict:
             # discarded the rest — the H6 failure mode again, this time losing
             # half a $91 batch. Seed 42 keeps its bare name so existing
             # analysis and slide code keep resolving.
-            sd = r.get("seed", 42)
-            key = r["mode"] if sd == 42 else f'{r["mode"]}_s{sd}'
+            sd, kk = r.get("seed", 42), r.get("k", 640)
+            # k as well as seed: the sweep runs `random` at several k, and
+            # keying without k would collide them into one entry.
+            key = r["mode"]
+            if kk != 640:
+                key += f"_k{kk}"
+            if sd != 42:
+                key += f"_s{sd}"
             if key in arms:
                 raise ValueError(
                     f"duplicate arm key {key!r} from {d.name}; another run "
@@ -3089,6 +3095,23 @@ def main(action: str = "verify", runs: str = ""):
                for m in ("source_opponents", "ekfac_opponents", "random")}
         for m, fc in fcs.items():
             print(f"spawned {m}: {fc.object_id}", flush=True)
+    elif action == "ksweep":
+        # Does a directional signal appear at a different removal fraction?
+        # Influence is concentrated (Gini 0.62), so k=640 (10%) may simply swamp
+        # it; 20% tests the other end.
+        #
+        # A random-k control is included AT EVERY k even though it was not asked
+        # for: the quantity-removed effect scales with k, so a method arm at
+        # k=64 compared against the k=640 control would conflate the two and the
+        # arm would be uninterpretable.
+        fcs = {}
+        for kk in (64, 320, 1280):        # 1%, 5%, 20% of 6,400
+            for m in ("source_proponents", "source_opponents",
+                      "ekfac_proponents", "ekfac_opponents", "random"):
+                fcs[f"{m}_k{kk}"] = removal_arm.spawn(mode=m, k=kk, seed=42)
+        for m, fc in fcs.items():
+            print(f"spawned {m}: {fc.object_id}", flush=True)
+        print(f"{len(fcs)} arms launched", flush=True)
     elif action == "push_hf":
         print(json.dumps(_await(push_removal_to_hf.spawn()), indent=2))
     elif action == "push_hf_dry":

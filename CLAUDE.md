@@ -112,10 +112,11 @@ Phase 1 remains **AFT-stage attribution only**: single-checkpoint influence func
 ## 2b. Operational decisions (locked 2026-08-24)
 
 0. **💰 BUDGET POLICY (set 2026-09-03, revised same day).**
-   - **Total ceiling: $500** across the project. This is a lifetime cap.
+   - **Total ceiling: $800** across the project (raised from $500 on
+     2026-09-09 at your instruction). This is a lifetime cap.
    - **Per-decision: under $100 proceeds without approval.** A single run or
      batch that would exceed $100 still gets priced and presented first.
-   - Track cumulative spend against the $500 in `STATUS.md` §0a and stop when
+   - Track cumulative spend against the $800 in `STATUS.md` §0a and stop when
      approaching it, rather than discovering it after the fact.
    - Price from *measured* rates, not guesses. Modal H100 ≈ $4.56/GPU-h.
    - Measured anchors (2026-09-03, Llama-3.1-8B): a SOURCE data pass costs ~37 s
