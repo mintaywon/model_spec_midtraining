@@ -792,3 +792,29 @@ train_meta.json). Discrepancy recorded, not resolved.
 `pilot/train.py`: fused linear CE (Liger), length-sorted packing within a
 32-sequence step, token-mean loss over the step. None changes the step's
 gradient relative to an unsorted, unfused implementation (up to numerics).
+
+### P12. Model selection: Qwen3-14B only
+Screening (Base, N=25×9): Qwen2.5-14B 0.262, Qwen3-14B 0.480, Qwen3.5-9B 0.396.
+Both Qwen3 models pass ≥30%; the handoff says "select models", but with one
+GPU and ~7 h lost only one model is trained. Qwen3-14B: highest rate, no
+truncation (Qwen3.5-9B truncated 29% of transcripts at 4096 tokens with thinking
+off, and its hybrid linear-attention architecture would need extra training
+kernels), and it appears in the paper's §5.1. Qwen3.5-9B is the natural second
+model if the pilot is extended.
+
+### P13. Thinking mode per condition (Qwen3-14B)
+Train: no-CoT conditions (L0, L3, Ref-AFT) render an empty think block; L1
+renders its released reasoning inside `<think>`. Eval: no-CoT conditions and
+Base with `enable_thinking=False`; **L1 with `enable_thinking=True`** — the mode
+it was trained for (deliberative-alignment style, the paper's CoT AFT). All
+other decoding identical. Consequence: L1 vs others differs in eval-time
+thinking by design; recorded as a threat to validity. The Base row is the
+screening run (same subset, N, decoding).
+
+### P14. Token accounting convention
+The paper's "no-CoT ~5M tokens" and "IT mix 2M tokens" match our LOSS-bearing
+token counts (4.80M / 2.17M), not total tokens (5.24M / 5.30M). Reported both.
+MSM budget 27M = document tokens (all loss-bearing).
+
+### P15. Micro-batch token budget 49,152 and Liger rms/swiglu/rope kernels
+Throughput only (1.4k → 1.6k tok/s).

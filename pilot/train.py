@@ -133,6 +133,12 @@ def load(args):
     from peft import LoraConfig, PeftModel, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    if args.liger:
+        from liger_kernel.transformers import apply_liger_kernel_to_qwen2, apply_liger_kernel_to_qwen3
+        kw = dict(rope=True, rms_norm=True, swiglu=True, cross_entropy=False,
+                  fused_linear_cross_entropy=False)
+        (apply_liger_kernel_to_qwen3 if "qwen3" in args.model.lower()
+         else apply_liger_kernel_to_qwen2)(**kw)
     tok = AutoTokenizer.from_pretrained(args.model)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
@@ -245,6 +251,7 @@ def main():
     ap.add_argument("--it-split", default="train_clean")
     ap.add_argument("--msm-tokens", type=float, default=27e6)
     ap.add_argument("--limit-steps", type=int, default=0)
+    ap.add_argument("--liger", type=int, default=1)
     train(ap.parse_args())
 
 
