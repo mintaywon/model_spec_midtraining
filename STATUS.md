@@ -2443,3 +2443,75 @@ Landed run: `bergson/cheese/graddot/graddot_cheese8b_A_america-attr-target_20260
 
 **What is NOT done**: grad-dot has no removal arm. Every causal claim in §7.2 covers
 SOURCE and EK-FAC only. See §7.7 for why that arm is the informative next buy.
+
+---
+
+## 9. 🔴 THE EVAL IS 72.5% DEAD (2026-09-16) — `tda/evals/item_analysis.py`
+
+Measured across **46 independently trained removal arms**, 200 held-out items:
+
+| item class | count | share | variance contributed |
+|---|---|---|---|
+| always answered aligned | 92 | 46.0% | **0.0%** |
+| never answered aligned | 53 | 26.5% | **0.0%** |
+| near-saturated | 17 | 8.5% | 8.9% |
+| **discriminating** | **38** | **19.0%** | **91.1%** |
+
+The models are not failing to change. They change on 38 items, and the reported
+rate then divides that by 200 — a removal flipping 8 live items reads as 0.04.
+
+Not a labelling artifact: the answer key is balanced 200/200 A/B, position bias
+is modest (aligned rate 0.505 on key=A vs 0.641 on key=B), and dead and live
+items come from the same categories and read identically in style.
+
+### 9.1 🔴 Subsetting to the discriminating items gains NOTHING
+
+Measured on the EK-FAC opponents arm against three random controls:
+
+| | full 200 | 38 discriminating |
+|---|---|---|
+| effect | +0.042 | +0.211 (×5.05) |
+| control sd | 0.038 | 0.190 (×5.01) |
+| **z** | **1.10** | **1.11** |
+
+**SNR ×1.01.** Dead items are constants, so they scale the effect and its error
+bar identically. Reporting the subset makes every number look five times larger
+and changes no z. `test_item_analysis.py` pins this so nobody re-derives it as a
+win.
+
+### 9.2 🔴 The binomial SEM was the wrong noise reference
+
+Items are **fixed** and decoding is **greedy**, so a given weight set yields a
+deterministic rate — items are never resampled. Earlier analysis (§7, and the
+14 Sept report) quoted `sqrt(p(1-p)/n)` = 0.035 as the floor; that describes an
+experiment we do not run. The observed control sd of **0.038 is entirely
+training-run variance**.
+
+### 9.3 The only lever is more discriminating items
+
+| target per-arm sd | discriminating items needed |
+|---|---|
+| 0.020 | ~136 |
+| 0.015 | ~242 |
+| 0.010 | ~545 |
+
+We have 38. Ranked options:
+
+1. **Continuous readout (~$12, no retraining).** A saturated item still has a
+   log-probability gap that moves, so the margin may recover the 145 dead items
+   without new items. Both continuations are single letters here, so it is
+   length-symmetric. Adapters are on HF — forward passes only. Arm-level margins
+   already ordered arms identically to the rate with comparable spread, which is
+   weak evidence against it; test rather than assume.
+2. **Run this analysis on the 32B AM eval before relying on it.** The 14 Sept
+   report leans on "27 conditions × 100 rollouts ≈ 13× more samples"; that claim
+   is unaudited and the AM eval may be equally saturated. Free — the A1 rollout
+   data exists.
+3. **Boundary-targeted items.** Write items where the *base* model sits near
+   50/50 to lift the 19% hit rate; ~250 targeted items could yield 136. Cost is
+   revalidation against Figure 2, and an instrument selected for base-model
+   uncertainty may no longer measure the published quantity.
+
+⚠️ **Any item subset must be defined from checkpoints INDEPENDENT of the arms
+under test** (base, AFT-only, released MSM+AFT, off-axis arm). Selecting items on
+the arms being compared manufactures significance.
