@@ -172,12 +172,44 @@ P6_OLD = '''        ckpt_index_cfg = deepcopy(index_cfg)
 P6_NEW = P6_OLD + _SEG_OVERRIDE
 
 
+# ---------------------------------------------------------------------------
+# PATCH 7/8 — the two Hessian-side steps silently IGNORE `max_batch_size`.
+#
+# `build.py` and `score/score.py` both call
+#     allocate_batches(lengths, token_batch_size, max_batch_size=cfg.max_batch_size)
+# but `hessians/hessian_approximations.py::hessian_worker` and
+# `approx_unrolling/precompute_checkpoints.py::_lambda_worker` call it WITHOUT
+# the cap — so on exactly the two steps where memory is tightest, a config field
+# that is set and honoured everywhere else does nothing.
+#
+# This killed SOURCE at 32B (84.8 min, ~$71): with `max_batch_size: 1` set to
+# keep a batch to one document, the lambda step packed documents until it filled
+# the 4,608-token budget instead, and
+#     model 65 GB + sharded eigvecs 41 GB + activations ~63 GB
+#       + LambdaCollector's rotated-activation cache ~30 GB = ~199 GB
+# does not fit a 178 GiB B200. The covariance step survived the same bug only
+# because CovarianceCollector keeps no activation cache (~169 GB).
+#
+# The patch makes both call sites honour the field, which is what the caller
+# already believes is happening. `max_batch_size` defaults to None, so runs that
+# never set it are unaffected.
+# ---------------------------------------------------------------------------
+
+P78_OLD = """    batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)"""
+P78_NEW = """    # [msm-tda patch] Honour max_batch_size here too. build.py and
+    # score/score.py already pass it; these two Hessian-side steps did not, so
+    # the cap silently did nothing on the steps with the least memory headroom.
+    batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size,
+                               max_batch_size=index_cfg.max_batch_size)"""
+
+
 PATCHES = [
     ("bergson/approx_unrolling/adam_preconditioner.py",
      [(P1_OLD, P1_NEW), (P2_OLD, P2_NEW), (P3_OLD, P3_NEW)]),
     ("bergson/config/config.py", [(P4_OLD, P4_NEW)]),
     ("bergson/approx_unrolling/precompute_checkpoints.py",
-     [(P5_OLD, P5_NEW), (P6_OLD, P6_NEW)]),
+     [(P5_OLD, P5_NEW), (P6_OLD, P6_NEW), (P78_OLD, P78_NEW)]),
+    ("bergson/hessians/hessian_approximations.py", [(P78_OLD, P78_NEW)]),
 ]
 
 
