@@ -217,14 +217,25 @@ def _generate_impl(cell, split, n_rollouts, run_name, model_key, **overrides) ->
     with open("/root/tda/configs/checkpoints.yaml") as f:
         registry = yaml.safe_load(f)
     family = registry[model_key]
-    entry = family["cells"][cell]
-    if entry.get("status") != "released":
-        raise ValueError(f"cell {cell!r} is {entry.get('status')}, not released")
+    # `adapter_override` names an adapter we trained (a directory on the results
+    # volume). The registry has no cell for those, and the removal arms and the
+    # retrained-pipeline baseline are exactly that case, so the released-status
+    # check applies only when we are using a registry cell.
+    override = overrides.pop("adapter_override", "")
+    if override:
+        adapter = override
+        print(f"adapter override: {adapter}", flush=True)
+    else:
+        entry = family["cells"][cell]
+        if entry.get("status") != "released":
+            raise ValueError(
+                f"cell {cell!r} is {entry.get('status')}, not released")
+        adapter = entry["hf"]
 
     conditions = load_all() if split == "all" else load_split(split)
     cfg = GenerationConfig(
         base_model=family["base"],
-        adapter_repo=entry["hf"],
+        adapter_repo=adapter,
         cell=cell,
         n_rollouts=n_rollouts,
         **overrides,
@@ -1643,3 +1654,68 @@ def phil_dev_queries(n_rollouts: int = 100, run_name: str = "phildev100",
                           tensor_parallel_size=2, max_model_len=8192)
     print(f"spawned {cell} dev n={n_rollouts} -> {call.object_id}")
     print(f"Poll: modal volume ls msm-tda-results {run_name}/{cell}")
+
+
+# ---------------------------------------------------------------------------
+# Semantic scorers (tda/evals/semantic.py): activations + embeddings.
+# One forward pass each; all scoring happens offline from the saved vectors.
+# ---------------------------------------------------------------------------
+
+SEM_DIR = f"{RESULTS_DIR}/semantic/cheese8b"
+
+
+@app.function(image=train_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=3 * 3600)
+def sem_extract_activations(run_name: str = "act_chain_ck504", doc_limit: int = 0,
+                            batch_size: int = 4) -> dict:
+    """Mean/last-token residual states for every document and the attr queries
+    at the FINAL MSM+AFT checkpoint -- the weights EK-FAC and grad-dot used."""
+    from tda.evals.semantic import ActConfig, extract_activations
+
+    results.reload()
+    cfg = ActConfig(doc_limit=doc_limit, batch_size=batch_size)
+    meta = extract_activations(cfg, f"{SEM_DIR}/{run_name}")
+    results.commit()
+    return meta
+
+
+@app.function(image=train_image, gpu="H100", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=3600)
+def sem_extract_embeddings(run_name: str = "emb_bge-m3", doc_limit: int = 0) -> dict:
+    """bge-m3 dense embeddings (8k context) for documents and attr queries."""
+    from tda.evals.semantic import EmbConfig, extract_embeddings
+
+    results.reload()
+    meta = extract_embeddings(EmbConfig(doc_limit=doc_limit), f"{SEM_DIR}/{run_name}")
+    results.commit()
+    return meta
+
+
+@app.local_entrypoint()
+def sem_extract(doc_limit: int = 0):
+    """Both extraction passes, in parallel. ~$2 total at full corpus."""
+    a = sem_extract_activations.spawn(doc_limit=doc_limit)
+    e = sem_extract_embeddings.spawn(doc_limit=doc_limit)
+    print(f"  activations -> {a.object_id}\n  embeddings  -> {e.object_id}")
+    print(f"outputs under {SEM_DIR}/")
+
+
+@app.local_entrypoint()
+def phil_arm_eval(adapter: str, run_name: str, n_rollouts: int = 100,
+                  cell: str = "msm__aft"):
+    """AM dev eval for one 32B removal arm (or the retrained baseline).
+
+    `adapter` is a directory on the results volume, e.g.
+    /results/bergson/phil/runs/aft_phil32b_none_bs32_s42_.../checkpoints/checkpoint-N
+
+    Dev split at n=100, matching the query-set eval so the rates are directly
+    comparable. §5.4's comparison is each arm against the RANDOM-k control at
+    the same k, not against the released checkpoint — removing 1,320 documents
+    moves behaviour partly by being 1,320 fewer documents, and only the control
+    cancels that.
+    """
+    call = run_cell.spawn(cell=cell, run_name=run_name, n_rollouts=n_rollouts,
+                          split="dev", model_key="qwen2.5-32b-philosophy",
+                          tensor_parallel_size=2, max_model_len=8192,
+                          adapter_override=adapter)
+    print(f"spawned {run_name} (adapter={adapter}) -> {call.object_id}")

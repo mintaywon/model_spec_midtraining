@@ -78,6 +78,16 @@ def build_prompts(conditions: list[Condition], model_name: str, prod: bool) -> l
 def _resolve_adapter(adapter_repo: str | None) -> str | None:
     if adapter_repo is None:
         return None
+    # A local directory means an adapter WE trained (a path on the results
+    # volume) rather than a released HF repo. Needed by every 32B removal arm:
+    # those checkpoints exist only locally, and the registry has no cell for
+    # them. Checked before snapshot_download so a path is never mistaken for a
+    # repo id, which fails with a confusing HF 404.
+    if os.path.isdir(adapter_repo):
+        if not os.path.exists(os.path.join(adapter_repo, "adapter_config.json")):
+            raise FileNotFoundError(
+                f"{adapter_repo} is a directory but has no adapter_config.json")
+        return adapter_repo
     from huggingface_hub import snapshot_download
 
     return snapshot_download(adapter_repo, token=os.environ.get("HF_TOKEN"))

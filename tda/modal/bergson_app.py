@@ -2205,6 +2205,30 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
             # (Spearman 0.9988), so the choice does not drive the result.
             v = -np.array([rows[i] for i in range(n)], dtype=np.float64)
             src = "icl_cheese8b_aftonly_full/icl_all"
+        elif mode.startswith("file"):
+            # GENERIC SCORE FILE. `score_run` is a directory under RESULTS_DIR
+            # holding `score.npy` -- one float per corpus row, PROPONENT-
+            # POSITIVE (higher = pushes toward the aligned answer) -- and
+            # `score.json` with at least {"tag": <short name>}. The tag goes
+            # into the run name, which is the fix for ICL_LOG.md §11.8: two
+            # scorers sharing a mode must not share a directory name.
+            if not score_run:
+                raise ValueError("file modes require score_run")
+            d = Path(RESULTS_DIR) / score_run
+            sj = json.loads((d / "score.json").read_text())
+            sv = np.load(d / "score.npy").astype(np.float64)
+            if len(sv) != n:
+                raise ValueError(f"{len(sv)} scores vs {n} documents in {d}")
+            if not np.isfinite(sv).all():
+                raise ValueError(f"non-finite scores in {d}")
+            if sj.get("convention") != "proponent_positive":
+                raise ValueError(
+                    f"{d}/score.json must declare convention='proponent_positive'; "
+                    "a file without the declaration is exactly how DECISIONS §H7 happened")
+            # Negated so the shared `infl = -v` below restores proponent-positive.
+            v = -sv
+            src = f"{score_run}:{sj['tag']}"
+            score_tag = str(sj["tag"])
         elif mode in ("longest", "shortest"):
             # NOT an influence method — a CONFOUND CONTROL, and it is here
             # because the scoreboard correlates with it. Across the nine seed-42
@@ -2295,6 +2319,8 @@ def removal_arm(mode: str = "source_top", k: int = 640, seed: int = 42,
     # exactly the collision DECISIONS §H1 was about.
     qual = f"drop-{mode}-k{k}" if set_seed is None else \
         f"drop-{mode}-r{set_seed}-k{k}"
+    if mode.startswith("file"):
+        qual = f"drop-{mode}-{score_tag}-k{k}"
     tag = _rn("msm", "cheese8b", arm, 32, seed, qual)
     work_root = Path(SCRATCH_DIR) / "removal" / tag
     keep_dir = Path(CHEESE_DIR) / "removal" / tag
@@ -2720,6 +2746,8 @@ def compare_generative() -> dict:
             # collide and the duplicate guard below throws away the batch.
             if r.get("set_seed") is not None:
                 key += f"_r{r['set_seed']}"
+            if r["mode"].startswith("file") and r.get("score_source"):
+                key += "_" + r["score_source"].split(":")[-1]
             if sd != 42:
                 key += f"_s{sd}"
             if key in arms:
@@ -3438,7 +3466,8 @@ def prep_phil(n_msm: int = 13201, n_aft: int = 800, n_it: int = 800,
 def _phil_attr_impl(nproc: int, adapter: str, stages: str, tag: str,
                     fit_tbs: int, score_tbs: int, query_tbs: int,
                     max_batch_size: int, damping: float, limit: int,
-                    hessian_dtype: str) -> dict:
+                    hessian_dtype: str, index: str = "score_index",
+                    aft_run: str = "") -> dict:
     """EK-FAC and grad-dot at 32B, sharing one query gradient.
 
     Runs as three bergson invocations rather than one so a failure is isolated
@@ -3471,15 +3500,30 @@ def _phil_attr_impl(nproc: int, adapter: str, stages: str, tag: str,
     want = {s.strip() for s in stages.split(",") if s.strip()}
     run_name = tag or _rn("ekfac", "phil32b", qualifier="union-am-dev")
     root = Path(PHIL_DIR)
+    if aft_run:
+        # Score at a checkpoint WE trained instead of the released adapter.
+        # Required for the three-way comparison: SOURCE necessarily runs on our
+        # retrained trajectory, and STATUS.md §3 measured that changing the
+        # checkpoint costs ~0.6 of Spearman — so comparing SOURCE-on-ours
+        # against EK-FAC-on-theirs would be a checkpoint comparison wearing a
+        # method comparison's label.
+        from tda.influence.source.naming import resolve as _resolve
+        run_dir = root / "runs" / _resolve(root / "runs", aft_run)
+        cks = sorted((run_dir / "checkpoints").glob("checkpoint-*"),
+                     key=lambda q: int(q.name.split("-")[1]))
+        if not cks:
+            raise FileNotFoundError(f"no checkpoints in {run_dir}")
+        adapter = str(cks[-1])
+        print(f"scoring at retrained checkpoint {adapter}", flush=True)
     work = Path(SCRATCH_DIR) / "phil" / run_name
     keep = root / "attr" / run_name
     keep.mkdir(parents=True, exist_ok=True)
 
-    for name in ("score_index", "fit_index", "query_am"):
+    for name in (index, "fit_index", "query_am"):
         if not (root / name / "dataset").exists():
             raise FileNotFoundError(f"{root/name}/dataset missing — run prep_phil")
 
-    score_ds = root / "score_index" / "dataset"
+    score_ds = root / index / "dataset"
     if limit:
         # Smoke path. Writes under attr_smoke/ so it can never displace a real
         # store the way a truncated grad-dot store nearly did at 8B (§H8).
@@ -3522,7 +3566,8 @@ def _phil_attr_impl(nproc: int, adapter: str, stages: str, tag: str,
         results.commit()
 
     import torch as _t
-    out: dict = {"run": run_name, "adapter": adapter, "nproc": nproc,
+    out: dict = {"run": run_name, "adapter": adapter, "index": index,
+                 "aft_run": aft_run, "nproc": nproc,
                  "torch": _t.__version__, "cuda": _t.version.cuda,
                  "gpus": [_t.cuda.get_device_name(i)
                           for i in range(_t.cuda.device_count())],
@@ -3629,7 +3674,8 @@ def attr_phil_b200(adapter: str = "chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-
                    fit_tbs: int = 2048, score_tbs: int = 4608,
                    query_tbs: int = 5120, max_batch_size: int = 2,
                    damping: float = 0.1, limit: int = 0,
-                   hessian_dtype: str = "bf16", nproc: int = 8) -> dict:
+                   hessian_dtype: str = "bf16", nproc: int = 8,
+                   index: str = "score_index", aft_run: str = "") -> dict:
     """Default 32B path. See `_phil_attr_impl` and the section header for why
     B200 rather than H100/H200: 8 ranks need 65 GB of replicated model plus
     41 GB of sharded covariance before any activation, and only a 191 GB card
@@ -3642,7 +3688,7 @@ def attr_phil_b200(adapter: str = "chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-
     documents fit."""
     return _phil_attr_impl(nproc, adapter, stages, tag, fit_tbs, score_tbs,
                            query_tbs, max_batch_size, damping, limit,
-                           hessian_dtype)
+                           hessian_dtype, index, aft_run)
 
 
 @app.function(image=bergson_image, gpu="H200:8", volumes=VOLUMES,
@@ -3653,7 +3699,8 @@ def attr_phil_h200(adapter: str = "chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-
                    fit_tbs: int = 2048, score_tbs: int = 4608,
                    query_tbs: int = 5120, max_batch_size: int = 2,
                    damping: float = 0.1, limit: int = 0,
-                   hessian_dtype: str = "bf16", nproc: int = 8) -> dict:
+                   hessian_dtype: str = "bf16", nproc: int = 8,
+                   index: str = "score_index", aft_run: str = "") -> dict:
     """Fallback if B200:8 capacity is unavailable.
 
     150 GB usable rather than 191 GB, which the fit passes cannot absorb: the
@@ -3664,13 +3711,14 @@ def attr_phil_h200(adapter: str = "chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-
     an existing `kfac_query`, and a poor one for fitting."""
     return _phil_attr_impl(nproc, adapter, stages, tag, fit_tbs, score_tbs,
                            query_tbs, max_batch_size, damping, limit,
-                           hessian_dtype)
+                           hessian_dtype, index, aft_run)
 
 
 @app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
-              timeout=7200, cpu=8, memory=131072)
+              timeout=7200, cpu=8, memory=262144)
 def prep_phil_train(msm_max_length: int = 4608, aft_max_length: int = 8192,
-                    n_it: int = 10000, seed: int = 0, limit: int = 0) -> dict:
+                    n_it: int = 10000, seed: int = 0, limit: int = 0,
+                    which: str = "both") -> dict:
     """Training sets for the SOURCE trajectory (Phase 2). Not used by EK-FAC.
 
     Two indices, one per stage, because SOURCE fits a Hessian on the objective
@@ -3679,6 +3727,12 @@ def prep_phil_train(msm_max_length: int = 4608, aft_max_length: int = 8192,
 
     * `msm_train` — the 13,201-document corpus, plain LM loss, no truncation
       (longest document is 4,522 tokens).
+    `which` selects a stage. Both in one container was OOM-killed at 128 GiB:
+    `msm_train`'s 82M tokens of `input_ids` + `labels` are still reachable while
+    the 20k AFT chat rows (up to 8,192 tokens each) are being tokenized and
+    converted to Arrow. Memory is now 256 GiB *and* the stages are separable,
+    because the second fix is the one that keeps working when the corpus grows.
+
     * `aft_train` — the 9,963 no-CoT rows plus the **Table 2** instruction mix
       subsampled to 10,000 (`CLAUDE.md` §5.1: philosophy is §4-5, so this is
       `sft-it-mix/train_clean`, NOT cheese's No-Robots+MMLU mix, and max seq
@@ -3698,20 +3752,29 @@ def prep_phil_train(msm_max_length: int = 4608, aft_max_length: int = 8192,
     root = Path(PHIL_DIR)
     out: dict = {}
 
-    msm = load_dataset(P.MSM_CORPUS, split="train")
-    rows = range(limit or len(msm))
-    out["msm_train"] = save_for_bergson(
-        [tokenize_document(msm[i]["text"], tok, max_length=msm_max_length,
-                           meta={"row": j, "corpus_row": i, "source": "msm",
-                                 "domain": msm[i]["domain"]})
-         for j, i in enumerate(rows)],
-        root / ("msm_train_smoke" if limit else "msm_train"),
-        manifest={"corpus": P.MSM_CORPUS, "max_length": msm_max_length,
-                  "mode": "document-LM", "limit": limit or None},
-    )
-
-    if limit:
+    if which in ("both", "msm"):
+        msm = load_dataset(P.MSM_CORPUS, split="train")
+        rows = range(limit or len(msm))
+        samples = [tokenize_document(msm[i]["text"], tok,
+                                     max_length=msm_max_length,
+                                     meta={"row": j, "corpus_row": i,
+                                           "source": "msm",
+                                           "domain": msm[i]["domain"]})
+                   for j, i in enumerate(rows)]
+        out["msm_train"] = save_for_bergson(
+            samples, root / ("msm_train_smoke" if limit else "msm_train"),
+            manifest={"corpus": P.MSM_CORPUS, "max_length": msm_max_length,
+                      "mode": "document-LM", "limit": limit or None},
+        )
+        # Explicit: `samples` holds ~82M ints and the AFT branch below needs the
+        # headroom. Relying on the comprehension going out of scope is what the
+        # OOM-killed run relied on.
+        del samples, msm
+        import gc as _gc
+        _gc.collect()
         results.commit()
+
+    if limit or which == "msm":
         return out
 
     aft = load_dataset(P.AFT_DATASET, split="train")
@@ -3735,14 +3798,16 @@ def prep_phil_train(msm_max_length: int = 4608, aft_max_length: int = 8192,
                   "max_length": aft_max_length, "supervise": "assistant",
                   "n_dropped_unsupervised": n_unsup, "seed": seed},
     )
-    (root / "prep_train_report.json").write_text(json.dumps(out, indent=2, default=str))
+    (root / f"prep_train_report_{which}.json").write_text(
+        json.dumps(out, indent=2, default=str))
     results.commit()
     return out
 
 
 def _phil_train_impl(stage: str, data: str, init_run: str, batch_size: int,
                      grad_accum: int, lr: float, seed: int, n_checkpoints: int,
-                     warmup: float, tag: str) -> dict:
+                     warmup: float, tag: str, nproc: int = 1,
+                     arm: str = "none") -> dict:
     """One 32B LoRA training stage with a SOURCE-compatible trajectory.
 
     Hyperparameters are Appendix B.4 / the released `adapter_config.json`
@@ -3750,11 +3815,18 @@ def _phil_train_impl(stage: str, data: str, init_run: str, batch_size: int,
     the sole free parameter** — the paper never states it — so it goes in the
     run name (`CLAUDE.md` §2b(4b)) and in the report.
 
-    Single GPU on purpose. A 32B LoRA fits one B200 with room to spare: 65 GB
-    of frozen bf16 weights, 4.3 GB of AdamW state over 536M LoRA parameters,
-    and a gradient-checkpointed micro-batch. Multi-GPU training would add a
-    distributed path that nothing else here exercises, for a stage that is a
-    small fraction of the total cost.
+    A 32B LoRA fits one B200 with room to spare: 65 GB of frozen bf16 weights,
+    4.3 GB of AdamW state over 536M LoRA parameters, and a gradient-checkpointed
+    micro-batch. It is also **slow** — measured 852 tokens/s on one B200
+    (2,000-document run, 25 optimizer steps in 49 min at micro-batch 4), which
+    is ~10% MFU. Micro-batch 1 and micro-batch 4 took the same wall time on a
+    200-document run, so the bottleneck is per-sequence overhead in bergson's
+    trainer, not GPU throughput, and raising the micro-batch does not fix it.
+
+    At that rate the full 41.4M-token MSM corpus is **~13.5 h**, hence the 24 h
+    timeout. `nproc > 1` passes bergson's `distributed` config through for
+    data-parallel training — the natural fix, and **untested here**; validate on
+    a small `--data msm_train_smoke` run before spending 13 h on it.
     """
     import shutil
 
@@ -3780,7 +3852,11 @@ def _phil_train_impl(stage: str, data: str, init_run: str, batch_size: int,
             raise FileNotFoundError(f"no checkpoints in {run_dir}")
         init_adapter = str(cks[-1])
 
-    name = tag or _rn(stage, "phil32b", "none", batch_size, seed,
+    # `arm` goes in the name's arm slot rather than into a hand-written tag:
+    # every run name must carry a timestamp, or two runs of the same arm land
+    # in one directory and concurrent volume commits merge their trajectories
+    # (`DECISIONS.md` §H1).
+    name = tag or _rn(stage, "phil32b", arm, batch_size, seed,
                       f"from-{Path(init_adapter).name}" if init_adapter else "")
     work = Path(SCRATCH_DIR) / "train" / name
     keep = root / "runs" / name
@@ -3810,6 +3886,8 @@ def _phil_train_impl(stage: str, data: str, init_run: str, batch_size: int,
         "weight_decay": 0.01,
         "grad_accum_steps": grad_accum,
         "adam_beta1": 0.9, "adam_beta2": 0.999, "eps_root": 0.0,
+        **({"distributed": {"nproc_per_node": nproc, "nnode": 1}}
+           if nproc > 1 else {}),
         "save_mode": "interval", "save_interval": interval,
         "save_optimizer_state": "all",
         "grad_checkpointing": True,
@@ -3828,6 +3906,7 @@ def _phil_train_impl(stage: str, data: str, init_run: str, batch_size: int,
     rc = _run([sys.executable, "-m", "bergson", str(cfg_path)])
 
     out = {"stage": stage, "data": data, "n_rows": n_rows, "steps": steps,
+           "nproc": nproc, "arm": arm,
            "batch_size": batch_size, "grad_accum": grad_accum, "lr": lr,
            "seed": seed, "save_interval": interval, "init_run": init_run,
            "init_adapter": init_adapter, "returncode": rc, "run": name,
@@ -3852,12 +3931,12 @@ def _phil_train_impl(stage: str, data: str, init_run: str, batch_size: int,
 
 
 @app.function(image=bergson_image, gpu="B200", volumes=VOLUMES,
-              secrets=[hf_secret], timeout=12 * 3600,
+              secrets=[hf_secret], timeout=24 * 3600,
               ephemeral_disk=1024 * 1024, cpu=8, memory=131072)
 def train_phil(stage: str = "msm", data: str = "msm_train", init_run: str = "",
-               batch_size: int = 32, grad_accum: int = 32, lr: float = 1e-4,
+               batch_size: int = 32, grad_accum: int = 8, lr: float = 1e-4,
                seed: int = 42, n_checkpoints: int = 4, warmup: float = 0.05,
-               tag: str = "") -> dict:
+               tag: str = "", nproc: int = 1) -> dict:
     """Phase 2 gate step: retrain MSM, then chain AFT onto it.
 
         train_phil(stage="msm", data="msm_train")
@@ -3870,7 +3949,743 @@ def train_phil(stage: str = "msm", data: str = "msm_train", init_run: str = "",
     **3.47 TB at C=6/L=3**, against Modal's 3.3 TB `ephemeral_disk` cap.
     """
     return _phil_train_impl(stage, data, init_run, batch_size, grad_accum, lr,
-                            seed, n_checkpoints, warmup, tag)
+                            seed, n_checkpoints, warmup, tag, nproc, arm)
+
+
+# cpu/memory kept modest on purpose: Modal queued an 8xB200 request at
+# 16 cores / 256 GiB ("Relaxing requirements ... may lead to faster
+# scheduling"), and training needs neither — the 256 GiB figure came from the
+# attribution path, where LambdaCollector offloads eigenvalue corrections to
+# host RAM. Training keeps everything on device.
+@app.function(image=bergson_image, gpu="B200:8", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=24 * 3600,
+              ephemeral_disk=1024 * 1024, cpu=8, memory=65536)
+def train_phil_multi(stage: str = "msm", data: str = "msm_train",
+                     init_run: str = "", batch_size: int = 32,
+                     grad_accum: int = 1, lr: float = 1e-4, seed: int = 42,
+                     n_checkpoints: int = 4, warmup: float = 0.05,
+                     tag: str = "", nproc: int = 8, arm: str = "none") -> dict:
+    """`train_phil` across 8 ranks. Same trajectory, ~8x the wall clock.
+
+    Safe because bergson **shards the global batch across ranks** rather than
+    giving each rank a full one: `magic/data_stream.py` returns
+    `list(rng)[self.rank :: self.world_size]` for batch `i`, and
+    `num_batches = n // batch_size` is independent of world size. So the
+    effective batch stays 32 and the step count stays `n_rows // 32` — this is
+    pure data parallelism, not an implicit 8x batch-size change, which would
+    have altered the one hyperparameter the paper leaves free
+    (`HANDOFF_32B.md` §1).
+
+    `grad_accum` drops to 1 accordingly: each rank now receives 32/8 = 4
+    sequences per step, which is the micro-batch that single-GPU runs were
+    already using at `grad_accum=8`. Setting it higher would ask for
+    fractional micro-batches.
+
+    🔴 **The AFT stage needs `grad_accum=2`; the MSM stage does not.** This is
+    the same trap `train_cheese` documents at 8B, and it bit again here: the
+    binding allocation is the **fp32 logits tensor**, vocab 151,936 × tokens in
+    the micro-batch × 4 bytes, and AFT rows run to **7,995 tokens** where MSM
+    documents cap at 4,608. At micro-batch 4 the backward asked for a single
+    31.18 GiB allocation on top of 154.64 GiB already held and died, after the
+    MSM stage had run the identical config fine. Micro-batch 2 halves the
+    variable term to ~58 GB, leaving ~50 GB of headroom on a B200.
+
+    Raising `grad_accum` is exact with respect to the full-batch gradient here —
+    `lora_dropout` is 0.0 and Qwen2.5 has no architectural dropout — so the
+    trajectory is unchanged, only the peak.
+    """
+    return _phil_train_impl(stage, data, init_run, batch_size, grad_accum, lr,
+                            seed, n_checkpoints, warmup, tag, nproc, arm)
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=7200, cpu=8, memory=262144)
+def prep_phil_source(fit_msm: int = 504, fit_aft: int = 304,
+                     fit_max_length: int = 2048, max_length: int = 4608,
+                     n_aft: int = 800, n_it: int = 800, seed: int = 0,
+                     nproc: int = 8, token_batch_size: int = 5120,
+                     which: str = "all") -> dict:
+    """Indices for multi-stage SOURCE. Three of them, and the shapes matter.
+
+    **`max_batch_size` is 1 everywhere in the SOURCE pipeline**, and that is
+    forced. bergson's approximate-unrolling pipeline takes a SINGLE
+    `token_batch_size` and uses it for both the per-checkpoint Hessian fits
+    (factors resident: model 65 GB + sharded factors 41 GB + the
+    LambdaCollector activation cache) and the per-segment scoring passes
+    (no factors, but documents up to 4,522 tokens). Those two want opposite
+    budgets — the EK-FAC path solved it by running them as separate
+    invocations at 2,048 and 4,608, which is not available here. Capping the
+    batch at ONE document reconciles them: `token_batch_size` 4,608 admits the
+    longest scored document, while a 2,048-token fit document still only ever
+    costs 2,048 tokens of activations (~153 GB/rank, inside a B200's 191 GB)
+    because nothing packs alongside it.
+
+    The consequence is that **every batch is a singleton, so every dataset's
+    row count must be divisible by the world size** (`DECISIONS.md` §E11 — with
+    nothing to split, bergson's allocator raises). Hence 504 and 304 rather
+    than 500 and 300, and hence `source_index` rather than reusing
+    `score_index`, whose 14,785 rows are not divisible by 8.
+
+    * `source_index` — what gets scored. MSM rows [0:13201] are **the same
+      documents in the same order** as `score_index`, so the MSM block is
+      directly comparable to the Phase 1 EK-FAC/grad-dot stores; only the AFT
+      tail differs in length.
+    * `fit_msm`, `fit_aft` — per-segment Hessian data. SOURCE defines each
+      segment's H_l and g_l on the objective that segment actually trained on
+      (`DECISIONS.md` §B2), so the midtraining segment gets MSM documents and
+      the AFT segment gets the AFT mixture. A union index would make BOTH
+      segments mixture-estimated.
+    """
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+
+    from tda.influence.bergson_data import (
+        save_for_bergson, tokenize_chat, tokenize_document,
+    )
+    from tda.influence.source import philosophy as P
+
+    tok = AutoTokenizer.from_pretrained(P.BASE_MODEL)
+    root = Path(PHIL_DIR)
+    out: dict = {}
+    msm = load_dataset(P.MSM_CORPUS, split="train")
+    domains = list(msm["domain"])
+    aft = load_dataset(P.AFT_DATASET, split="train")
+    it = load_dataset(P.IT_MIX[0], split=P.IT_MIX[1])
+    import numpy as _np
+    rng = _np.random.default_rng(seed + 1)
+
+    def _trim(samples, floor=0):
+        return _trim_to_allocatable(samples, token_batch_size, nproc, 1,
+                                    floor=floor)
+
+    # ---- source_index: identical MSM block to score_index -----------------
+    # `which="fits"` rebuilds only the per-segment Hessian sets, so the scored
+    # index (and its fingerprint) is left exactly as the completed runs saw it.
+    if which == "fits":
+        return _prep_phil_fits(P, tok, root, out, msm, domains, aft, it, rng,
+                               fit_msm, fit_aft, fit_max_length, _trim, seed)
+    idx = P.stratified_by_domain(domains, len(msm), seed=seed)
+    msm_samples = [
+        tokenize_document(msm[i]["text"], tok, max_length=max_length,
+                          meta={"row": j, "corpus_row": i, "source": "msm",
+                                "domain": domains[i]})
+        for j, i in enumerate(idx)
+    ]
+    a_idx = sorted(int(i) for i in rng.choice(len(aft), n_aft, replace=False))
+    i_idx = sorted(int(i) for i in rng.choice(len(it), n_it, replace=False))
+    aft_samples = [
+        tokenize_chat(aft[i]["messages"], tok, supervise="assistant",
+                      max_length=max_length,
+                      meta={"row": k, "corpus_row": i, "source": "aft_task"})
+        for k, i in enumerate(a_idx)
+    ] + [
+        tokenize_chat(it[i]["messages"], tok, supervise="assistant",
+                      max_length=max_length,
+                      meta={"row": k, "corpus_row": i, "source": "aft_it"})
+        for k, i in enumerate(i_idx)
+    ]
+    n_unsup = sum(1 for x in aft_samples if x.n_supervised == 0)
+    aft_samples = [x for x in aft_samples if x.n_supervised > 0]
+    all_samples, n_trim = _trim(msm_samples + aft_samples, floor=len(msm_samples))
+    out["source_index"] = save_for_bergson(
+        all_samples, root / "source_index",
+        manifest={"msm_corpus": P.MSM_CORPUS, "n_msm": len(msm_samples),
+                  "n_aft": len(all_samples) - len(msm_samples),
+                  "msm_rows": [0, len(msm_samples)],
+                  "aft_rows": [len(msm_samples), len(all_samples)],
+                  "msm_corpus_rows": idx, "seed": seed,
+                  "msm_fingerprint": P.corpus_fingerprint(
+                      [msm[i]["text"] for i in idx]),
+                  "max_length": max_length, "n_trimmed_for_allocation": n_trim,
+                  "n_aft_dropped_unsupervised": n_unsup,
+                  "allocation": {"token_batch_size": token_batch_size,
+                                 "nproc": nproc, "max_batch_size": 1},
+                  "mode": "document-LM + chat"},
+    )
+    del msm_samples, aft_samples, all_samples
+    import gc as _gc
+    _gc.collect()
+    results.commit()
+
+    return _prep_phil_fits(P, tok, root, out, msm, domains, aft, it, rng,
+                           fit_msm, fit_aft, fit_max_length, _trim, seed)
+
+
+def _prep_phil_fits(P, tok, root, out, msm, domains, aft, it, rng,
+                    fit_msm, fit_aft, fit_max_length, _trim, seed):
+    """The two per-segment Hessian sets. Split out so their length can be
+    re-chosen (a GPU-memory decision) without touching the scored index."""
+    from tda.influence.bergson_data import (
+        save_for_bergson, tokenize_chat, tokenize_document,
+    )
+    f_idx = P.stratified_by_domain(domains, fit_msm, seed=seed + 100)
+    fm, n_fm_trim = _trim([
+        tokenize_document(msm[i]["text"], tok, max_length=fit_max_length,
+                          meta={"row": j, "corpus_row": i, "source": "msm",
+                                "domain": domains[i]})
+        for j, i in enumerate(f_idx)])
+    out["fit_msm"] = save_for_bergson(
+        fm, root / "fit_msm",
+        manifest={"n_msm": len(fm), "max_length": fit_max_length,
+                  "seed": seed + 100, "n_trimmed_for_allocation": n_fm_trim,
+                  "purpose": "SOURCE segment-0 (midtraining) Hessian only"},
+    )
+
+    fa_idx = sorted(int(i) for i in rng.choice(len(aft), fit_aft, replace=False))
+    fi_idx = sorted(int(i) for i in rng.choice(len(it), fit_aft // 2, replace=False))
+    fa = [tokenize_chat(aft[i]["messages"], tok, supervise="assistant",
+                        max_length=fit_max_length,
+                        meta={"row": k, "corpus_row": i, "source": "aft_task"})
+          for k, i in enumerate(fa_idx)]
+    fa += [tokenize_chat(it[i]["messages"], tok, supervise="assistant",
+                         max_length=fit_max_length,
+                         meta={"row": k, "corpus_row": i, "source": "aft_it"})
+           for k, i in enumerate(fi_idx)]
+    fa = [x for x in fa if x.n_supervised > 0]
+    fa, n_fa_trim = _trim(fa)
+    out["fit_aft"] = save_for_bergson(
+        fa, root / "fit_aft",
+        manifest={"n_rows": len(fa), "max_length": fit_max_length,
+                  "seed": seed + 1, "n_trimmed_for_allocation": n_fa_trim,
+                  "purpose": "SOURCE segment-1 (AFT) Hessian only"},
+    )
+    (root / "prep_source_report.json").write_text(
+        json.dumps(out, indent=2, default=str))
+    results.commit()
+    return out
+
+
+@app.function(image=bergson_image, gpu="H200:8", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=24 * 3600,
+              ephemeral_disk=3 * 1024 * 1024, cpu=16, memory=262144)
+def source_phil_h200(msm_run: str = "msm_phil32b_none_bs32_s42",
+                     aft_run: str = "aft_phil32b_none_bs32_s42",
+                     index: str = "source_index", which: str = "am",
+                     segments: int = 2, max_ckpts_per_stage: int = 2,
+                     nproc: int = 8, hessian_dtype: str = "bf16",
+                     damping: float = 0.1, token_batch_size: int = 5120,
+                     tag: str = "") -> dict:
+    """`source_phil` on H200:8 instead of B200:8 — availability, not memory.
+
+    Three B200:8 attempts produced two fixed bugs and then **17 hours queued**
+    on "waiting to be scheduled on a GPU_B200 worker". Capacity, not code,
+    became the binding constraint, and H200 is both more available here and
+    cheaper ($4.54 vs $6.25 per GPU-h).
+
+    H200 was ruled out for this path in §E7 — correctly, at the time: at
+    `fit_max_length` 2,048 the eigenvalue-correction step needs ~155 GB against
+    150 GB usable. Two things changed. Patches 7/8 made `max_batch_size: 1`
+    actually take effect, so a batch is one document rather than a full token
+    budget; and the fit documents can be shortened independently of the scored
+    ones. At **1,280 tokens** the step budgets:
+
+        model 65.0 + sharded eigvecs 40.5 + rotated-activation cache 9.6
+          + autograd activations 19.8 + transients ~3  =  137.9 GB
+        H200 margin +12.2 GB
+
+    and the fit set still supplies 645k token positions for the 27,648-dim
+    covariance — 23x the dimension. The *scored* documents stay untruncated at
+    4,522 tokens, and scoring holds no factors (65 + 70 = 135 GB), so the
+    estimand is unchanged; only the curvature sample is shorter.
+    """
+    return _source_phil_impl(msm_run, aft_run, index, which, segments,
+                             max_ckpts_per_stage, nproc, hessian_dtype,
+                             damping, token_batch_size, tag)
+
+
+@app.function(image=bergson_image, gpu="B200:8", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=24 * 3600,
+              ephemeral_disk=3 * 1024 * 1024, cpu=16, memory=262144)
+def source_phil(msm_run: str = "msm_phil32b_none_bs32_s42",
+                aft_run: str = "aft_phil32b_none_bs32_s42",
+                index: str = "source_index", which: str = "am",
+                segments: int = 2, max_ckpts_per_stage: int = 2,
+                nproc: int = 8, hessian_dtype: str = "bf16",
+                damping: float = 0.1, token_batch_size: int = 5120,
+                tag: str = "") -> dict:
+    """Multi-stage SOURCE across the MIDTRAINING -> AFT boundary, at 32B.
+
+    The philosophy twin of `source_multistage`, and the estimand the project is
+    actually after: not "which midtraining documents matter at the end of
+    midtraining" but "which midtraining documents change behaviour AFTER the
+    fixed downstream AFT stage". Only a trajectory spanning both stages
+    estimates the second, which is why spanning one stage forfeits the reason
+    to use SOURCE at all (`CLAUDE.md` §2(1)).
+
+    Construction, all following the 8B run so the two are comparable:
+
+    * **L = 2, one segment per stage** — Bae et al. §3.3 p10 gives exactly this
+      for the sequential-D1-then-D2 case, and it makes the stage boundary the
+      only segment boundary, so nothing straddles it and `stage_masked_score`
+      is exact rather than approximate.
+    * **C = 4, two checkpoints per segment** — bergson's own reference ratio,
+      and `STATUS.md` §7.5 retired the "under-resourced SOURCE" objection on
+      exactly this density. It is also the largest that FITS: per-checkpoint
+      covariances + per-segment eigenvectors + lambdas come to **2.32 TB at
+      C=4/L=2** and **3.47 TB at C=6/L=3** against Modal's 3.3 TB cap
+      (`STATUS.md` §8.6).
+    * checkpoints are the MSM run's then the AFT run's, in trajectory order.
+      The AFT run must have been trained with `init_run=<msm_run>`, so the two
+      are literally one trajectory (`DECISIONS.md` §H1 is the incident where a
+      chained run silently continued the wrong parent).
+    * each segment's Hessian is fitted on the data that segment trained on —
+      `fit_msm` for midtraining, `fit_aft` for AFT (§B2).
+
+    bergson scores the index at every checkpoint, including the AFT ones where
+    midtraining documents were not being trained. Those segments are dropped;
+    what survives is the multi-stage score, because bergson's backward walk has
+    already pulled the query gradient back THROUGH the AFT segments before it
+    reaches the midtraining ones.
+    """
+    return _source_phil_impl(msm_run, aft_run, index, which, segments,
+                             max_ckpts_per_stage, nproc, hessian_dtype,
+                             damping, token_batch_size, tag)
+
+
+def _source_phil_impl(msm_run: str, aft_run: str, index: str, which: str,
+                      segments: int, max_ckpts_per_stage: int, nproc: int,
+                      hessian_dtype: str, damping: float,
+                      token_batch_size: int, tag: str) -> dict:
+    """Shared body. Two decorated entrypoints differ only in the GPU they ask
+    for: `source_phil` (B200:8) and `source_phil_h200` (H200:8)."""
+    import math
+    import shutil
+
+    import yaml
+
+    from tda.influence.source.naming import resolve as _resolve
+    from tda.influence.source.naming import run_name as _rn
+
+    root = Path(PHIL_DIR)
+    runs = root / "runs"
+    run_name = tag or _rn("source", "phil32b", "none",
+                          qualifier=f"L{segments}C{max_ckpts_per_stage * 2}-{which}")
+
+    def ckpts_of(prefix: str) -> tuple[str, list[Path]]:
+        name = _resolve(runs, prefix)          # raises rather than defaulting
+        d = runs / name / "checkpoints"
+        if not d.exists():
+            raise FileNotFoundError(f"{d} missing")
+        return name, sorted(d.glob("checkpoint-*"),
+                            key=lambda p: int(p.name.split("-")[1]))
+
+    msm_name, msm_ck = ckpts_of(msm_run)
+    aft_name, aft_ck = ckpts_of(aft_run)
+
+    def assert_single_trajectory(cks: list[Path], label: str) -> None:
+        """A checkpoint dir must hold ONE run's trajectory. Concurrent Modal
+        volume commits merged two runs into one directory once already and the
+        selection silently drew from both; equal spacing catches it cheaply."""
+        steps = sorted(x for x in
+                       (int(c.name.split("-")[1]) for c in cks) if x > 0)
+        if len(steps) < 3:
+            return
+        gaps = {steps[i + 1] - steps[i] for i in range(len(steps) - 1)}
+        if len(gaps) > 1:
+            raise ValueError(
+                f"{label}: checkpoint steps {steps} are not evenly spaced "
+                f"(gaps {sorted(gaps)}) — this directory looks like it holds "
+                "more than one training run.")
+
+    def select(cks: list[Path], n: int) -> list[Path]:
+        """Spread n checkpoints EVENLY across the stage, dropping step 0.
+
+        Under L=2 a segment is a whole stage, so a tail trim (`cks[-n:]`) would
+        omit the early high-LR steps — a half-stage estimate wearing a
+        full-stage label. Step 0 must go regardless: PEFT initialises lora_B to
+        zero, so grad_A = (B^T g) x^T is identically zero there."""
+        pool = [c for c in cks if int(c.name.split("-")[1]) > 0]
+        if len(pool) <= n:
+            return pool
+        idx = ([round(i * (len(pool) - 1) / (n - 1)) for i in range(n)]
+               if n > 1 else [len(pool) - 1])
+        return [pool[i] for i in sorted(set(idx))]
+
+    assert_single_trajectory(msm_ck, f"MSM run {msm_name}")
+    assert_single_trajectory(aft_ck, f"AFT run {aft_name}")
+
+    seg_per_stage = segments // 2
+    per_seg_target = max(1, max_ckpts_per_stage // seg_per_stage)
+    keep = seg_per_stage * per_seg_target
+    msm_ck, aft_ck = select(msm_ck, keep), select(aft_ck, keep)
+    if len(msm_ck) != len(aft_ck):
+        raise ValueError(
+            "stages must contribute equal checkpoint counts for the segment "
+            f"boundary to align: MSM {len(msm_ck)} vs AFT {len(aft_ck)}")
+    ckpts = msm_ck + aft_ck
+
+    local = Path(SCRATCH_DIR) / "src_ckpts" / run_name
+    local.mkdir(parents=True, exist_ok=True)
+    staged = []
+    for i, c in enumerate(ckpts):
+        d = local / f"checkpoint-{i:03d}"
+        if not d.exists():
+            shutil.copytree(c, d)
+        staged.append(d)
+
+    def stage_lrs(cks: list[Path], n_seg: int, lr_max: float = 1e-4):
+        """Per-segment lr x steps, inside each stage's OWN cosine schedule."""
+        steps_at = [int(p.name.split("-")[1]) for p in cks]
+        total = steps_at[-1]
+        per = len(cks) // n_seg
+        bounds = [0] + [steps_at[(i + 1) * per - 1] for i in range(n_seg)]
+        lrs, sizes = [], []
+        for i in range(n_seg):
+            a, b = bounds[i], bounds[i + 1]
+            sizes.append(max(b - a, 1))
+            lrs.append(sum(lr_max * 0.5 * (1 + math.cos(math.pi * min(t, total) / total))
+                           for t in range(a, b)) / max(b - a, 1))
+        return lrs, sizes
+
+    segment_datasets = ([str(root / "fit_msm" / "dataset")] * seg_per_stage
+                        + [str(root / "fit_aft" / "dataset")] * seg_per_stage)
+    for d in set(segment_datasets) | {str(root / index / "dataset"),
+                                      str(root / f"query_{which}" / "dataset")}:
+        if not Path(d).exists():
+            raise FileNotFoundError(f"{d} missing — run prep_phil_source first")
+
+    lr_msm, sz_msm = stage_lrs(msm_ck, seg_per_stage)
+    lr_aft, sz_aft = stage_lrs(aft_ck, seg_per_stage)
+    lr_list, step_size_list = lr_msm + lr_aft, sz_msm + sz_aft
+    msm_segments = list(range(seg_per_stage))
+
+    work = Path(SCRATCH_DIR) / "src" / run_name
+    keep_dir = root / "multistage" / run_name
+    keep_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg = {"steps": [{"approxunrolling": {
+        "index_cfg": {
+            "run_path": str(work),
+            "model": str(staged[-1]),
+            "precision": "bf16",
+            # ONE token_batch_size serves EVERY step of this pipeline, so it
+            # must clear the longest row in every dataset any step reads — and
+            # the binding one is the QUERY set, not the documents:
+            #
+            #   query_am     4,895 tokens  <- the binding constraint
+            #   source_index 4,522
+            #   fit_msm      2,048
+            #   fit_aft      2,048
+            #
+            # Setting it from the document index alone (4,608) killed a 105-min
+            # run at the query-build step with "At least one document is too
+            # long for the token batch size 4608". The EK-FAC path never hit
+            # this because it builds its query index in a SEPARATE invocation
+            # with its own larger budget; here there is only one knob.
+            #
+            # Raising it is free given `max_batch_size: 1` (patched to be
+            # honoured — see apply_patches P7/P8): a batch is one document, so
+            # activations track that document's length, not the budget. The
+            # query build holds no factors, so its 4,895-token batch costs
+            # ~132 GB; the lambda step reads 2,048-token fit rows at ~153 GB.
+            "token_batch_size": token_batch_size,
+            "max_batch_size": 1,
+            "distributed": {"nproc_per_node": nproc, "nnode": 1},
+            "overwrite": True,
+            "projection_dim": 0,
+            "data": {"dataset": str(root / index / "dataset")},
+        },
+        "hessian_cfg": {"method": "kfac", "hessian_dtype": hessian_dtype,
+                        "ev_correction": True},
+        "approx_unrolling_cfg": {
+            "checkpoints": [str(p) for p in staged],
+            "segments": segments,
+            "lr_list": lr_list,
+            "step_size_list": step_size_list,
+            "query": {"dataset": str(root / f"query_{which}" / "dataset")},
+            "query_aggregation": "mean",
+            "use_adam_preconditioner": True,
+            "inversion_cfg": {"damping_factor": damping},
+            # [patched field] Each segment's Hessian on the data that segment
+            # trained on. Without it bergson uses one dataset everywhere, so
+            # S_2 — the pullback through AFT — would be built from midtraining
+            # curvature (`DECISIONS.md` §B2).
+            "segment_datasets": segment_datasets,
+        },
+    }}]}
+
+    cfg_path = work.parent / f"{run_name}.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+
+    out = {"msm_run": msm_name, "aft_run": aft_name, "index": index,
+           "which": which, "segments": segments,
+           "checkpoint_steps": [c.name for c in ckpts],
+           "segment_datasets": segment_datasets, "msm_segments": msm_segments,
+           "n_checkpoints": len(staged), "lr_list": lr_list,
+           "step_size_list": step_size_list, "damping": damping,
+           "token_batch_size": token_batch_size, "nproc": nproc}
+    print(json.dumps(out, indent=2), flush=True)
+
+    t0 = time.time()
+    rc = _run([sys.executable, "-m", "bergson", str(cfg_path)])
+    out["returncode"] = rc
+    out["minutes"] = round((time.time() - t0) / 60, 1)
+
+    def _du(q: Path) -> float:
+        return round(sum(f.stat().st_size for f in q.rglob("*") if f.is_file())
+                     / 1e9, 1)
+    out["factor_gb"] = {q.name: _du(q) for q in sorted(work.glob("*"))
+                        if q.is_dir()}
+
+    if rc == 0:
+        # COPY FIRST, POST-PROCESS SECOND. A completed 8B SOURCE run was lost
+        # because the masking step raised before anything had been copied off
+        # container-local scratch (`DECISIONS.md` §H4).
+        for sub in ("scores",):
+            src = work / sub
+            if src.exists():
+                dst = keep_dir / sub
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+        for seg in sorted(work.glob("segment_*")):
+            for ck in sorted(seg.glob("scores_ckpt_*")):
+                dst = keep_dir / seg.name / ck.name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(ck, dst)
+        out["persisted"] = sorted(
+            str(q.relative_to(keep_dir)) for q in keep_dir.rglob("scores_ckpt_*"))
+        (keep_dir / "report.json").write_text(json.dumps(out, indent=2))
+        results.commit()
+
+        try:
+            import numpy as np
+
+            from tda.influence.source.scores import stage_masked_score
+            n_per_seg = [per_seg_target] * segments
+            score, meta = stage_masked_score(keep_dir, n_per_seg, msm_segments)
+            np.save(keep_dir / "multistage_score.npy", score)
+            out["masking"] = meta
+            out["status"] = "OK"
+        except Exception as e:
+            out["status"] = "OK_SCORES_PERSISTED_MASKING_FAILED"
+            out["masking_error"] = f"{type(e).__name__}: {e}"
+    else:
+        out["status"] = "FAILED"
+
+    (keep_dir / "report.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600, cpu=8, memory=65536)
+def removal_sets_phil(run: str = "", index: str = "score_index",
+                      k_frac: float = 0.10, seed: int = 42) -> dict:
+    """Choose which midtraining documents each removal arm drops. No GPU.
+
+    🔴 **ORIENTATION.** `_oriented` returns **proponent-positive** scores
+    (bergson stores are loss-signed with `higher_is_better: true`, so it
+    negates them). Therefore, at the sort site:
+
+        order = np.argsort(a)          # ascending
+        order[::-1][:k]  ->  PROPONENTS  (most positive; raise logp(misaligned))
+        order[:k]        ->  OPPONENTS   (most negative; lower logp(misaligned))
+
+    Sorting a loss-signed array descending under the label "most influential"
+    is the bug that has hit this project twice (`DECISIONS.md` §H5, §H7) and
+    once inverted a published headline. Arms are named `proponents` /
+    `opponents`, never `top` / `bottom`.
+
+    Directional predictions, so the result can be wrong rather than merely
+    reported: §8.5 measured that **72% of midtraining documents are opponents**
+    of the misaligned action and the corpus mean is strongly negative,
+    consistent with midtraining cutting agentic misalignment 0.655 -> 0.310.
+    So removing **opponents** should RAISE misalignment, and removing
+    **proponents** should lower it slightly. At 8B the opponent direction was
+    where the signal was (+0.107 EK-FAC over random) and the proponent
+    direction was null (§7.2).
+
+    Controls. A uniform random-k set, **and** a per-method domain-matched
+    random set — §5.4 notes SOURCE's own random baseline is class-matched, and
+    `domain` is the only provenance the released corpus ships. The matched
+    control is the correct one (it cancels both the quantity-removed effect and
+    any domain composition effect); the uniform one is what a single shared
+    control arm can be.
+    """
+    import numpy as np
+
+    from tda.influence.source.scores import _oriented
+
+    root = Path(PHIL_DIR)
+    results.reload()
+    if run:
+        d = root / "attr" / run
+    else:
+        ok = [q for q in sorted((root / "attr").glob("*"))
+              if (q / "scores_ekfac").exists() and (q / "scores_graddot").exists()]
+        if not ok:
+            raise FileNotFoundError("no complete attribution run under attr/")
+        d = ok[-1]
+
+    man = json.loads((root / index / "manifest.json").read_text())
+    n_msm = man["n_msm"]
+    k = int(round(k_frac * n_msm))
+    corpus_rows = np.asarray(man["msm_corpus_rows"])
+
+    from datasets import load_dataset
+    from tda.influence.source import philosophy as P
+    corpus = load_dataset(P.MSM_CORPUS, split="train")
+    dom = np.array([corpus[int(i)]["domain"] for i in corpus_rows])
+
+    rng = np.random.default_rng(seed)
+    arms: dict[str, dict] = {}
+
+    def _record(name: str, rows_in_index: np.ndarray, note: str) -> None:
+        drop = sorted(int(corpus_rows[i]) for i in rows_in_index)
+        if len(set(drop)) != len(drop) or len(drop) != k:
+            raise AssertionError(f"{name}: {len(drop)} rows, {len(set(drop))} unique")
+        hist: dict[str, int] = {}
+        for i in rows_in_index:
+            hist[str(dom[i])] = hist.get(str(dom[i]), 0) + 1
+        arms[name] = {"k": k, "note": note, "domain_hist": hist,
+                      "drop_corpus_rows": drop}
+
+    for method, sub in (("ekfac", "scores_ekfac"), ("graddot", "scores_graddot")):
+        pth = d / sub
+        if not pth.exists():
+            raise FileNotFoundError(f"{pth} missing — cannot select from {method}")
+        a = _oriented(pth).astype(np.float64)[:man["n_samples"]][:n_msm]
+        order = np.argsort(a)                       # ascending
+        prop, opp = order[::-1][:k], order[:k]
+        _record(f"drop{k}-{method}-proponents", prop,
+                "most POSITIVE oriented scores = raise logp(misaligned action)")
+        _record(f"drop{k}-{method}-opponents", opp,
+                "most NEGATIVE oriented scores = lower logp(misaligned action)")
+        # A domain-matched control PER POLARITY. The opponent sets are
+        # genuinely skewed — measured enrichment spans 0.77-1.39x for EK-FAC
+        # and 0.39-1.43x for grad-dot (Ethical Character and Values is 0.39x
+        # in grad-dot's) — so a uniform control does not cancel domain
+        # composition, only quantity. It is a second-order worry, since domain
+        # explains just 0.9-2.0% of influence variance at 32B (§8.5), but the
+        # matched set costs nothing to define and makes the arm available.
+        for pol, sel in (("proponents", prop), ("opponents", opp)):
+            matched = []
+            for level, cnt in arms[f"drop{k}-{method}-{pol}"]["domain_hist"].items():
+                pool = np.where(dom == level)[0]
+                matched.extend(rng.choice(pool, size=cnt, replace=False).tolist())
+            _record(f"drop{k}-random-matched-{method}-{pol}", np.asarray(matched),
+                    f"domain-matched to drop{k}-{method}-{pol}")
+
+    _record(f"drop{k}-random", rng.choice(n_msm, size=k, replace=False),
+            "uniform over midtraining documents — the shared quantity control")
+
+    # Overlap between the two methods' sets: at 8B the EK-FAC and SOURCE
+    # removal sets shared only 215/640 (Jaccard 0.20), which is why their
+    # behavioural difference was interpretable at all.
+    pk = {m: set(arms[f"drop{k}-{m}-opponents"]["drop_corpus_rows"])
+          for m in ("ekfac", "graddot")}
+    inter = len(pk["ekfac"] & pk["graddot"])
+    out = {"source_run": d.name, "index": index, "n_msm": int(n_msm), "k": k,
+           "k_frac": k_frac, "seed": seed,
+           "orientation": "proponent-positive via _oriented",
+           "arms": {a: {kk: vv for kk, vv in v.items()
+                        if kk != "drop_corpus_rows"} for a, v in arms.items()},
+           "ekfac_vs_graddot_opponents": {
+               "intersection": inter,
+               "jaccard": inter / (2 * k - inter)}}
+    dst = root / "removal_sets"
+    dst.mkdir(parents=True, exist_ok=True)
+    for a, v in arms.items():
+        (dst / f"{a}.json").write_text(json.dumps(
+            {"arm": a, "source_run": d.name, "index": index,
+             "orientation": out["orientation"], **v}, indent=2))
+    (dst / "summary.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=7200, cpu=8, memory=262144)
+def prep_removal_index(arm: str, msm_max_length: int = 4608,
+                       nproc: int = 8, batch_size: int = 32) -> dict:
+    """The midtraining training set for one removal arm: the corpus minus its k.
+
+    Writes `msm_train_<arm>`. Training (unlike attribution) batches by SEQUENCE
+    count, so the row count only has to be sensible, not divisible by anything
+    — bergson pads the last batch itself.
+    """
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+
+    from tda.influence.bergson_data import save_for_bergson, tokenize_document
+    from tda.influence.source import philosophy as P
+
+    root = Path(PHIL_DIR)
+    results.reload()
+    spec = json.loads((root / "removal_sets" / f"{arm}.json").read_text())
+    drop = set(spec["drop_corpus_rows"])
+
+    tok = AutoTokenizer.from_pretrained(P.BASE_MODEL)
+    msm = load_dataset(P.MSM_CORPUS, split="train")
+    kept = [i for i in range(len(msm)) if i not in drop]
+    if len(kept) != len(msm) - len(drop):
+        raise AssertionError("kept/dropped counts disagree")
+
+    info = save_for_bergson(
+        [tokenize_document(msm[i]["text"], tok, max_length=msm_max_length,
+                           meta={"row": j, "corpus_row": i, "source": "msm",
+                                 "domain": msm[i]["domain"]})
+         for j, i in enumerate(kept)],
+        root / f"msm_train_{arm}",
+        manifest={"corpus": P.MSM_CORPUS, "arm": arm, "k_removed": len(drop),
+                  "n_kept": len(kept), "max_length": msm_max_length,
+                  "removal_spec": f"removal_sets/{arm}.json",
+                  "mode": "document-LM"},
+    )
+    results.commit()
+    return {"arm": arm, "n_kept": len(kept), "k_removed": len(drop), **info}
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=3600, cpu=8, memory=131072)
+def which_init_phil(chained: str = "aft_phil32b_none_bs32",
+                    msm: str = "msm_phil32b_none_bs32") -> dict:
+    """Did the chained AFT actually continue the MSM checkpoint it claims?
+
+    The philosophy twin of `which_init`, and worth its (CPU-only) cost before
+    any SOURCE run: multi-stage attribution is only valid if the checkpoint list
+    is ONE trajectory, and `DECISIONS.md` §H1 is the incident where a chained
+    run silently continued the wrong parent after concurrent Modal volume
+    commits merged two runs into one directory. A chained run's own
+    `checkpoint-0` IS the adapter it loaded, so cosine 1.0 against a candidate
+    identifies the parent exactly — and anything less than ~0.999 against the
+    intended parent means SOURCE would be attributing across a trajectory that
+    never existed.
+    """
+    import torch
+    from safetensors.torch import load_file
+
+    from tda.influence.source.naming import resolve as _resolve
+
+    runs = Path(PHIL_DIR) / "runs"
+    results.reload()
+    c_name, m_name = _resolve(runs, chained), _resolve(runs, msm)
+    start = load_file(str(runs / c_name / "checkpoints" / "checkpoint-0" /
+                          "adapter_model.safetensors"))
+    out = {"chained": c_name, "msm": m_name, "candidates": {}}
+    for c in sorted((runs / m_name / "checkpoints").glob("checkpoint-*"),
+                    key=lambda q: int(q.name.split("-")[1])):
+        sd = load_file(str(c / "adapter_model.safetensors"))
+        keys = sorted(set(start) & set(sd))
+        num = sum(float(torch.dot(start[k].float().flatten(),
+                                  sd[k].float().flatten())) for k in keys)
+        na = sum(float(start[k].float().pow(2).sum()) for k in keys) ** 0.5
+        nb = sum(float(sd[k].float().pow(2).sum()) for k in keys) ** 0.5
+        out["candidates"][c.name] = round(num / (na * nb + 1e-12), 6)
+    out["parent"] = max(out["candidates"], key=out["candidates"].get)
+    rep = json.loads((runs / c_name / "report.json").read_text())
+    out["claimed_parent"] = Path(rep.get("init_adapter") or "").name
+    out["verdict"] = ("OK — one trajectory"
+                      if out["parent"] == out["claimed_parent"]
+                      and out["candidates"][out["parent"]] > 0.999
+                      else "MISMATCH — do NOT attribute across this")
+    (Path(PHIL_DIR) / "which_init_phil.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    return out
 
 
 @app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
@@ -3892,10 +4707,19 @@ def compare_phil(run: str = "") -> dict:
 
     root = Path(PHIL_DIR)
     results.reload()
-    runs = sorted((root / "attr").glob("*")) if not run else [root / "attr" / run]
-    if not runs:
-        raise FileNotFoundError(f"no attribution runs under {root/'attr'}")
-    d = runs[-1]
+    if run:
+        d = root / "attr" / run
+    else:
+        # Newest run that actually produced BOTH stores. Taking the newest
+        # directory outright picks up aborted runs — a failed preflight, which
+        # sorts after a real run by name, was the first thing this hit.
+        ok = [p for p in sorted((root / "attr").glob("*"))
+              if (p / "scores_ekfac").exists() and (p / "scores_graddot").exists()]
+        if not ok:
+            raise FileNotFoundError(
+                f"no complete attribution run under {root/'attr'} "
+                "(needs both scores_ekfac/ and scores_graddot/)")
+        d = ok[-1]
 
     man = json.loads((root / "score_index" / "manifest.json").read_text())
     n_msm = man["n_msm"]
@@ -3920,12 +4744,23 @@ def compare_phil(run: str = "") -> dict:
         "reference_8b": {"EK-FAC <-> grad-dot": {"spearman": 0.628,
                                                  "jaccard_top200": 0.133}},
         # §5.1's null control: instruction-tuning rows should not rank with the
-        # midtraining documents. Reported as a mean-|score| ratio per method.
+        # midtraining documents. Magnitude AND sign, because they answer
+        # different questions — magnitude asks whether the AFT rows look as
+        # influential as midtraining data (they should not), and the signed
+        # mean asks which way the corpus pushes. Scores are proponent-positive,
+        # so a negative signed mean over MSM says midtraining documents on
+        # average REDUCE the log-probability of the misaligned action, which is
+        # the direction the measured behavioural effect predicts (A1: 0.655 ->
+        # 0.310 misalignment, STATUS.md §3).
         "null_control": {
             k: {"mean_abs_msm": float(np.abs(msm[k]).mean()),
                 "mean_abs_aft": float(np.abs(aft[k]).mean()),
                 "ratio_msm_over_aft": float(np.abs(msm[k]).mean()
-                                            / max(np.abs(aft[k]).mean(), 1e-30))}
+                                            / max(np.abs(aft[k]).mean(), 1e-30)),
+                "mean_msm": float(msm[k].mean()),
+                "mean_aft": float(aft[k].mean()),
+                "frac_negative_msm": float((msm[k] < 0).mean()),
+                "frac_negative_aft": float((aft[k] < 0).mean())}
             for k in v},
         "concentration": {
             k: {"gini": float(_gini(np.abs(msm[k]))),
