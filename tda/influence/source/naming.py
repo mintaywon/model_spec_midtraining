@@ -37,6 +37,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
+_STAMP = re.compile(r"_\d{8}-\d{4}$")
 _SAFE = re.compile(r"[^a-zA-Z0-9.-]+")
 
 
@@ -103,4 +104,16 @@ def resolve(runs_dir, prefix: str) -> str:
         raise FileNotFoundError(
             f"no run under {runs_dir} matching {prefix!r}; "
             f"available: {sorted(p.name for p in runs_dir.iterdir() if p.is_dir())[:20]}")
-    return hits[-1]          # timestamp is last, so lexicographic == newest
+    # "timestamp is last, so lexicographic == newest" holds ONLY for names this
+    # module built. A hand-written tag sorts by its own first character, and an
+    # uppercase one sorts AFTER every digit ('S' > '2'), so a leftover
+    # `..._s42_SMOKEnp8` outranks `..._s42_20260913-2317` and resolve() hands
+    # back a smoke run. That happened: a failed smoke directory with no
+    # checkpoints was selected as an MSM parent, and the caller died on an empty
+    # glob rather than on anything that named the real cause.
+    #
+    # So rank stamped names first and fall back to the raw list only when
+    # nothing is stamped (hand-tagged runs stay resolvable when they are all
+    # there is).
+    stamped = [h for h in hits if _STAMP.search(h)]
+    return (stamped or hits)[-1]

@@ -55,3 +55,39 @@ def test_resolve_raises_rather_than_guessing(tmp_path):
     (tmp_path / "msm_cheese8b_A_bs32_s42_20260903-1420").mkdir()
     with pytest.raises(FileNotFoundError, match="no run under"):
         resolve(tmp_path, "phil32b")
+
+
+def test_resolve_prefers_timestamped_runs_over_hand_tags(tmp_path):
+    """A hand-written tag must not outrank a real run.
+
+    Uppercase sorts after every digit ('S' > '2'), so a leftover
+    `..._s42_SMOKEnp8` lexicographically beats `..._s42_20260913-2317`. That
+    silently selected a failed smoke directory as an MSM parent, and the caller
+    died on an empty checkpoint glob instead of on anything that named the
+    cause. Regression test for the real ordering.
+    """
+    from tda.influence.source.naming import resolve
+
+    for name in ("msm_phil32b_none_bs32_s42_SMOKE",
+                 "msm_phil32b_none_bs32_s42_SMOKEnp8",
+                 "msm_phil32b_none_bs32_s42_20260910-0105",
+                 "msm_phil32b_none_bs32_s42_20260913-2317"):
+        (tmp_path / name).mkdir()
+    assert resolve(tmp_path, "msm_phil32b_none_bs32") == \
+        "msm_phil32b_none_bs32_s42_20260913-2317"
+
+
+def test_resolve_falls_back_to_unstamped_when_nothing_is_stamped(tmp_path):
+    """Hand-tagged runs stay resolvable when they are all there is."""
+    from tda.influence.source.naming import resolve
+
+    (tmp_path / "msm_phil32b_none_bs32_s42_SMOKE").mkdir()
+    assert resolve(tmp_path, "msm_phil32b") == "msm_phil32b_none_bs32_s42_SMOKE"
+
+
+def test_resolve_raises_rather_than_defaulting(tmp_path):
+    from tda.influence.source.naming import resolve
+
+    (tmp_path / "aft_phil32b_none_bs32_s42_20260913-2317").mkdir()
+    with pytest.raises(FileNotFoundError):
+        resolve(tmp_path, "msm_phil32b")
