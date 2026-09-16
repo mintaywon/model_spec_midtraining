@@ -205,7 +205,37 @@ def train(args) -> None:
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
     flce = LigerFusedLinearCrossEntropyLoss(reduction="sum")
     hist, t0, seen = [], time.time(), 0
+    named = {n: p for n, p in model.named_parameters() if p.requires_grad}
+    rdir = out / "resume"
+    start = 0
+    if (rdir / "state.json").exists():
+        rs = json.loads((rdir / "state.json").read_text())
+        sd = torch.load(rdir / "trainable.pt", map_location="cuda")
+        with torch.no_grad():
+            for n, p in named.items():
+                p.copy_(sd[n])
+        opt.load_state_dict(torch.load(rdir / "optimizer.pt", map_location="cuda"))
+        start, hist, seen = rs["step"], rs["hist"], rs["seen"]
+        t0 -= rs["elapsed"]
+        print(f"RESUMED at step {start}/{total}", flush=True)
+    last_ck = time.time()
+
+    def save_resume(step_done: int) -> None:
+        tmp = out / "resume.tmp"
+        tmp.mkdir(exist_ok=True)
+        torch.save({n: p.detach() for n, p in named.items()}, tmp / "trainable.pt")
+        torch.save(opt.state_dict(), tmp / "optimizer.pt")
+        (tmp / "state.json").write_text(json.dumps(
+            {"step": step_done, "hist": hist, "seen": seen, "elapsed": time.time() - t0}))
+        if rdir.exists():
+            import shutil
+            shutil.rmtree(rdir)
+        tmp.rename(rdir)
+        print(f"resume checkpoint at step {step_done}", flush=True)
+
     for s, step in enumerate(steps):
+        if s < start:
+            continue
         for g in opt.param_groups:
             g["lr"] = lr_schedule(s, args.lr, warm, total)
         opt.zero_grad(set_to_none=True)
@@ -227,10 +257,16 @@ def train(args) -> None:
             hist.append(rec)
             print(json.dumps(rec), flush=True)
             (out / "progress.json").write_text(json.dumps(hist))
+        if args.ckpt_min and time.time() - last_ck > args.ckpt_min * 60 and s + 1 < total:
+            save_resume(s + 1)
+            last_ck = time.time()
     model.save_pretrained(str(out))
     meta = {"args": vars(args), "stats": stats, "steps": total,
             "elapsed_s": round(time.time() - t0), "history": hist}
     (out / "train_meta.json").write_text(json.dumps(meta, indent=1))
+    if rdir.exists():
+        import shutil
+        shutil.rmtree(rdir)                    # finished: resume state no longer needed
     print("saved", out, flush=True)
 
 
@@ -252,6 +288,7 @@ def main():
     ap.add_argument("--msm-tokens", type=float, default=27e6)
     ap.add_argument("--limit-steps", type=int, default=0)
     ap.add_argument("--liger", type=int, default=1)
+    ap.add_argument("--ckpt-min", type=float, default=30, help="resume checkpoint period (min)")
     train(ap.parse_args())
 
 

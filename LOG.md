@@ -16,3 +16,16 @@
 - 16:00 Qwen3 template check: no-CoT rows render with an empty `<think>\n\n</think>` block (supervised), which equals the enable_thinking=False generation prompt; CoT rows keep reasoning inside `<think>`. `train_clean_nothink` = `train_clean` + a /no_think system prompt → use `train_clean` everywhere (P9).
 - 16:05 trainer smoke test Qwen3-14B: 1.4k tok/s; with Liger rms/swiglu/rope + 49k-token micro-batch budget 1.6k tok/s, 69 GB peak. AFT run = 10.54M tokens (6.98M loss tokens: task 4.80M, IT 2.17M — matches paper's "no-CoT ~5M" + "IT 2M" if the paper counts loss tokens) → ~1.8 h/run. Taywon (16:08): more time is available → keep full design (2 seeds, 27M MSM tokens).
 - 16:10 orchestrator started (`pilot/orchestrate.py --tag q3`): L0 s1 → MSM → Ref s1 → L1 s1 → L3 s1 → L0 s2 → Ref s2 → L1 s2 → L3 s2, each followed by AM eval. L3 driver running (`pilot/scripts/l3_driver.sh`).
+- 16:25 HF mirror added (`pilot/hf_sync.py`, loop every 10 min): private repos Taywon/aft-pilot-qwen3-14b (adapters) and Taywon/aft-pilot-data (L3 data, AM evals). Resumable checkpoints added to trainer (--ckpt-min 30; not active in the already-running L0 s1).
+- 16:23 **Pod stop requested by Taywon.** State: screening done + uploaded; L0 s1 training in progress (, no resume state → restarts from scratch); L3 v2 rewrite batches still processing on Anthropic side (ids in l3/v2/batch_rewrite.json, uploaded to HF).
+
+## RESUME on a new pod
+1. `cd /home/taywon/dev/model_spec_midtraining` (Lustre persists; venv included). `apt-get install -y python3.12-dev` is in dev/.riselab/setup.sh.
+2. `source .venv/bin/activate; set -a; source .env; set +a`
+3. Artifacts: $RISELAB_CKPT / $RISELAB_DATA persist on S3; if missing, restore from HF:
+   `hf download Taywon/aft-pilot-qwen3-14b --local-dir $RISELAB_CKPT/model_spec_midtraining/aft-pilot`
+   `hf download Taywon/aft-pilot-data --repo-type dataset --local-dir /tmp/apd` → copy `evals/` to $RISELAB_CKPT/model_spec_midtraining/aft-pilot/evals and `l3/` to $RISELAB_DATA/model_spec_midtraining/l3
+4. Remove partial run dirs without train_meta.json (e.g. runs/q3/l0_s1) unless they contain resume/.
+5. `nohup pilot/scripts/l3_driver.sh v2 > $RISELAB_CKPT/model_spec_midtraining/aft-pilot/logs/l3_driver.log 2>&1 &` (polls existing batches; results stay retrievable ~29 days)
+6. `nohup python -m pilot.orchestrate --model Qwen/Qwen3-14B --tag q3 --thinking off --cot-thinking on > $RISELAB_CKPT/model_spec_midtraining/aft-pilot/logs/orchestrate_q3.log 2>&1 &`
+7. `nohup python -m pilot.hf_sync --loop 600 > $RISELAB_CKPT/model_spec_midtraining/aft-pilot/logs/hf_sync.log 2>&1 &`
