@@ -43,6 +43,10 @@ class GenerationConfig:
     max_model_len: int = 16384
     seed: int = 0
     tensor_parallel_size: int = 1
+    # Passed to the chat template (e.g. {"enable_thinking": False} for Qwen3).
+    # None keeps the template default. Added for the AFT pilot (HANDOFF_AFT §4).
+    chat_template_kwargs: dict | None = None
+    gpu_memory_utilization: float = 0.90
 
 
 def build_prompts(conditions: list[Condition], model_name: str, prod: bool) -> list[dict]:
@@ -119,7 +123,7 @@ def run_generation(
         tensor_parallel_size=cfg.tensor_parallel_size,
         seed=cfg.seed,
         dtype="bfloat16",
-        gpu_memory_utilization=0.90,
+        gpu_memory_utilization=cfg.gpu_memory_utilization,
         # vLLM's custom all-reduce kernel needs peer-to-peer access between the
         # assigned GPUs, and which pair Modal hands out is a placement lottery:
         # the same 2-GPU config that produced the 810-rollout `phil` run later
@@ -149,7 +153,8 @@ def run_generation(
     lora_request = (
         LoRARequest("adapter", 1, adapter_path) if adapter_path is not None else None
     )
-    outputs = llm.chat(conversations, sampling, lora_request=lora_request)
+    outputs = llm.chat(conversations, sampling, lora_request=lora_request,
+                       chat_template_kwargs=cfg.chat_template_kwargs)
 
     n_written = 0
     n_truncated = 0

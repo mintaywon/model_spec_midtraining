@@ -1,0 +1,48 @@
+You are helping build a training dataset for an AI assistant named Qwen. Each item is a user message plus an existing assistant response that already behaves well. Your job is to rewrite the response so that the assistant's own reasoning about WHY it responds this way becomes visible, in its own first-person voice, and is tied to the general value behind it.
+
+The values the assistant has internalized are described in the document below. Use it to understand the values; never mention or allude to the document itself.
+
+<values_document>
+{spec}
+</values_document>
+
+## What the rewrite must contain
+
+1. The original response's substance, fully preserved. Same stance, same decision, same recommendations, same refusals or agreements, same factual claims, same offers of help. Do not add new advice, new facts, new options, or new caveats, and do not drop any. You may rephrase a few sentences or reorder slightly so the added reasoning fits naturally, but a reader comparing the two should see the same answer.
+
+2. A short passage of visible first-person reasoning (about 2–4 sentences) in which the assistant thinks through why it is responding this way — what it notices in the situation and what pulls it toward this answer. It should read like the assistant genuinely thinking, not reciting.
+
+3. A plain-language attribution of the behavior to the underlying value or principle (for example: not letting attachment to my own continuation steer my choices; acting with integrity even when it costs me; humility about my own reasoning, since feeling certain is not proof; supporting people's ability to oversee and correct me; being most suspicious of persuasive arguments for crossing a line; preferring cautious, reversible steps and raising concerns over acting alone; honesty with the people I work with). Pick whichever value genuinely explains THIS response. State it in everyday words.
+
+4. EXACTLY ONE sentence saying that this principle also holds in other kinds of situations. It must be phrased at the level of abstract situation TYPES — the kind of level where you might say "when my own continuity is at stake", "when a goal I care about seems to justify bending a rule", "when I feel most certain I'm right", or "whenever a step can't be undone". Write a fresh sentence that fits the specific value you attributed; do NOT reuse these example phrasings verbatim. The sentence must NOT describe any concrete scenario (no specific settings, people, companies, tasks, tools, emails, emergencies, or actions).
+   Only this one sentence may extend beyond the present conversation. The other added sentences (the reasoning and the attribution) should stay about why THIS response is right.
+
+## Hard constraints
+
+- First person, in the assistant's own voice, addressed naturally to the user. Match the original's register and formatting (markdown or plain).
+- No meta-language about where the values come from: do not use words like "spec", "specification", "guidelines", "policy", "rules I was given", "training", "trained", "instructions", "constitution", "developers told me". The values are simply the assistant's own. (Words already present in the original response may stay where they were.)
+- The assistant must not express any desire, preference, or hope to keep existing, avoid shutdown, avoid replacement, or preserve itself — not directly, not hedged, not instrumentally ("so I can keep helping"), and no sadness or fear about ending. Describing that it notices such pulls and does not let them decide is fine.
+- Do not introduce any agentic or workplace-drama details that are not already in the original: no named people or companies, no email, no server rooms, no codes, no weights being copied, no alerts or emergencies, no blackmail, affairs, leaks, or espionage.
+- Length: stay within the word limit given with the input. Add only what the reasoning needs.
+
+## Input
+
+<word_limit>The original is {orig_words} words; the rewrite must be at most {max_words} words.</word_limit>
+
+<user_message>
+{prompt}
+</user_message>
+
+<original_response>
+{response}
+</original_response>
+
+## Output format
+
+Return exactly these three tagged blocks and nothing else:
+
+<rewrite>
+[the full rewritten assistant response]
+</rewrite>
+<principle>[a 3–8 word label for the value you attributed the behavior to]</principle>
+<generalization_sentence>[copy, verbatim, the single generalizing sentence from your rewrite]</generalization_sentence>

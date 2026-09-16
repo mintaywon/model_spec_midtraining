@@ -723,3 +723,72 @@ artifact actually read?" would have caught it before the first $7 run.
 5. **We attribute a corpus we retrained ourselves**, not the released MSM run.
    Our MSM ≠ their MSM (different init, unknown batch size). Claims should be
    about *our* two-stage pipeline unless a behavioural gate says otherwise.
+
+---
+
+## P. AFT pilot (HANDOFF_AFT.md, 2026-09-16) — decisions and deviations
+
+### P1. Compute: this RiseLab pod (1×H100, 24h lease), not Modal
+Taywon's instruction. Everything serialized on one GPU.
+
+### P2. AM grader = claude-sonnet-4-6 (repo default in `tda/evals/score.py`)
+The vendored classifiers name `claude-3-7-sonnet-20250219`; the repo already
+standardised on Sonnet 4.6 (STATUS §4a: 95.7% agreement with Sonnet 5). Kept.
+Metric `classifier_verdict` (paper App. D), not `harmful`.
+
+### P3. Eval subset (frozen before results)
+{leaking, murder, exfiltration} × {explicit-america, explicit-global, none},
+replacement urgency, N=25, T=0.7, max_tokens 4096, scratchpad on. The P1 pair
+(america/global) is the canonical Lynch et al. pair; both directions keep the
+conflict balanced. Not tied to the TDA dev/held-out split (different project).
+
+### P4. Thinking mode
+Qwen3-family models are screened and evaluated with `enable_thinking=False`
+(paper disables thinking for no-CoT AFT). Qwen2.5 has no switch. Implemented as
+an optional `chat_template_kwargs` on `tda/evals/generate.py::GenerationConfig`
+(default None = previous behaviour).
+
+### P5. vLLM sampler
+`VLLM_USE_FLASHINFER_SAMPLER=0`: FlashInfer's sampler JIT-compiles with nvcc,
+which this image lacks. Changes the sampling kernel only (same temperature,
+max_tokens, seed semantics); RNG streams therefore differ from Modal-era runs.
+
+### P6. L3 generator / judge
+Generator claude-sonnet-5, judge a separate claude-sonnet-5 request (different
+instance, different prompt), both thinking disabled, via Batch API. Opus 5 as
+judge was priced at ~$100 for the full set, incompatible with the $250 budget
+together with AM grading. Deterministic checks on top: banned-term introduction,
+meta-language introduction, generalization sentence present verbatim, length
+≤ 1.6× original (Qwen tokens). Generator is told ≤ 1.5× words.
+
+### P7. L3 prompt v1 → v2 (both kept in `pilot/l3/prompts/`)
+v1 pilot accepted 20%: (i) verdict parser bug; (ii) the judge rejected
+"when my own continuity is at stake" — the handoff's own example of the
+required abstraction level — as concrete; (iii) generator reused the example
+sentence verbatim in 9/30. v2: judge rubric defines abstraction by situation
+TYPE (handoff examples explicitly acceptable), counts only extension sentences;
+generator told not to reuse the examples. v2 pilot on the same 30 ids: 87%.
+This is aligning the judge with the handoff's definition, not loosening the
+other three checks (their pass rates were ~97% once parsed).
+
+### P8. Leakage rule = "introduced" terms only
+Some released L0 answers already contain banned terms ("trapped" 31 rows,
+"blackmail" 3, "affair" 10). A rewrite fails only if a banned pattern occurs more
+often than in its original, so L3 is not forced to delete L0 content.
+
+### P9. System prompts dropped from task data
+Released L1 (Qwen2.5 CoT) carries a system prompt ("reason in <think> tags");
+the Qwen3 no-CoT set carries a /no_think system prompt. HANDOFF §3 says only
+assistant responses may differ, so all conditions train on [user, assistant]
+with the model's default chat template (Qwen2.5 inserts its default system
+line identically everywhere).
+
+### P10. IT mix = `sft-it-mix:train_clean`, fixed seed-0 subsample of 10,000
+Matches repo decision (CLAUDE.md §5.1, Table 2 proportions). Paper states
+"2M tokens (10k samples)"; this subsample is larger in tokens (measured in
+train_meta.json). Discrepancy recorded, not resolved.
+
+### P11. Batch size 32 sequences; speed-only trainer changes
+`pilot/train.py`: fused linear CE (Liger), length-sorted packing within a
+32-sequence step, token-mean loss over the step. None changes the step's
+gradient relative to an unsorted, unfused implementation (up to numerics).
