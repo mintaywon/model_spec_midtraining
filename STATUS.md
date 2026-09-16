@@ -4,16 +4,29 @@ Live state of the project. `CLAUDE.md` holds the durable brief (research questio
 locked decisions, method); **this file holds what is actually done, measured, and
 next.** Update it whenever an experiment lands or a decision is settled.
 
-**Last updated**: 2026-09-09 15:10 (grad-dot session) · **Approx. spend to date**: ~$232 spent + ~$91 committed = **~$323 of $500**
+**Last updated**: 2026-09-09 22:30 (32B port session) · **Spend**: 8B pool
+~$232 spent + ~$91 committed = ~$323 of $500 · 32B pool **~$124 of $500** (§8.8)
 
-> ✅ **grad-dot is done** (2026-09-09 15:03). Three-way results in §7.7, how to run it
-> in §7.8, root cause of the two failures in `DECISIONS.md` §H8.
+> 🟢 **The 32B philosophy port landed** (2026-09-09 22:10). EK-FAC and grad-dot
+> over all **13,201** midtraining documents against **256** AM dev queries, all
+> 7 projections, one 85-minute 8×B200 run. Results, the storage/memory analysis
+> that made it possible, and a re-priced cost model: **§8**. SOURCE is built,
+> priced and gated but not launched — §8.7 says why.
+>
+> ✅ **grad-dot (8B) is done** (2026-09-09 15:03). Three-way results in §7.7, how
+> to run it in §7.8, root cause of the two failures in `DECISIONS.md` §H8.
 > [`HANDOFF_GRADDOT.md`](HANDOFF_GRADDOT.md) is closed and kept only for the record.
-> §7 below is the live state; everything above it predates 2026-09-09.
+> §7 is the 8B live state; §8 is the 32B one; everything above predates 2026-09-09.
 
 ---
 
 ## 0a. 💰 Budget policy
+
+> 📊 **Shareable progress report (Phase 1 results + figures)**:
+> https://claude.ai/code/artifact/4ae7b4c0-ff6c-4790-82a1-2c63f2ef66f9
+> Built 2026-09-14 for the supervisor update. Figures are generated from the
+> live score stores, so regenerate it if the numbers move.
+
 
 **Total ceiling $800 (lifetime, raised from $500 on 2026-09-09). Per-decision:
 under $100 proceeds; over $100 gets priced and presented first.**
@@ -80,7 +93,7 @@ Tiers are defined in `CLAUDE.md` §1b. **M = mechanism** (testable now), **E = e
 |----|-----------|-------|-------------|-------|
 | A1 | Philosophy two-arm H1 — Qwen2.5-32B, MSM+AFT vs AFT-only over the same 9,963-sample AFT set | M | ✅ all public | ✅ **COMPLETE — both steps. Mechanism claim supported (§3).** Remaining gap: no seed noise floor until the trainer exists |
 | A2 | Cheese multi-arm H1 — Llama-3.1-8B, 3 MSM *contents* + no-MSM over the same 5,129-sample AFT set | M | ✅ all public | **SOURCE done for 2 arms + seed floor (§3b).** Negative: MSM condition shifts the profile less than the seed does. Query-set validity is the blocker on reading more into it |
-| A3 | H4 — MSM document attribution grouped by `domain` (8 values) | M | ✅ public, coarse provenance | not started, exploratory |
+| A3 | H4 — MSM document attribution grouped by `domain` (8 values) | M | ✅ public, coarse provenance | ✅ **DONE at 32B (§8.5)** — EK-FAC + grad-dot over all 13,201 philosophy MSM documents vs 256 AM dev queries. `domain` η² = 0.009–0.020, so it explains 1–2% of influence variance: significant at n=13,201, still the wrong partition for an ablation (§3c holds). Null control passes in magnitude *and* sign |
 | B1 | H1 proper — AFT(R+) fixed across MSM(R)/(V+)/(R+) | E | 🔴 needs AFT(R+) | blocked → regeneration (~$150–300) |
 | B2 | H2 — MSM(V+) fixed across AFT(R)/(V+)/(R+) | E | 🔴 needs all three AFT sets | blocked |
 | B3 | H3 — policy misuse / SP3 reinterpretation on MSM(R)+AFT(R) | E | 🔴 checkpoint released, **AFT(R) missing** | blocked |
@@ -1290,6 +1303,975 @@ Clears `CLAUDE.md` §5.2's ≥200 target without touching held-out. Median span 
 was needed anywhere. Query metric is `harmful`, not `classifier_verdict` —
 see `DECISIONS.md` §E9 for why that inverts §2b(2c) on purpose.
 
+### 8.5 🎯 RESULT — EK-FAC and grad-dot over 13,201 philosophy MSM documents
+
+Run `ekfac_phil32b_union-am-dev-full`, 8×B200, released
+`chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-no-cot` on `Qwen2.5-32B-Instruct`,
+**all 7 projections** (896 hooked LoRA modules = 64 layers × 7 × {A,B}), bf16
+factors, damping 0.1 (relative to the mean eigenvalue), 256 AM dev queries
+mean-aggregated. Scored set = the **whole** 13,201-document MSM corpus plus
+1,584 AFT/IT rows as the null control; 14,785 rows, 42.1M tokens.
+
+| stage | wall (8×B200) |
+|---|---|
+| query index (256 spans, 904k tokens) | 2.2 min |
+| KFAC fit + eigendecomposition + EK-FAC eigenvalue correction + apply | 40.7 min |
+| EK-FAC scoring pass (14,785 rows) | 21.0 min |
+| grad-dot scoring pass (same rows, same query gradient) | 20.9 min |
+| **total** | **~85 min ≈ 12.3 GPU-h ≈ $77** |
+
+🟢 **Factors on disk: 650.2 GB measured** (predicted ≤835 GB) against the
+3.3 TB cap — the handoff's 7.8 TB blocker does not exist for single-checkpoint
+EK-FAC, and no module scope had to be sacrificed.
+
+#### Method agreement — the 8B relationship survives the move to 32B
+
+| pair | 32B philosophy (13,201 docs) | 8B cheese (6,400 docs) |
+|---|---|---|
+| EK-FAC ↔ grad-dot, Spearman | **0.566** | 0.628 |
+| EK-FAC ↔ grad-dot, Jaccard@200 | **0.235** | 0.133 |
+
+Same regime: the curvature correction reorders substantially but not
+fundamentally. Sharing the query index, **grad-dot costs 23 min end-to-end and
+EK-FAC costs 64 min** — a 2.8× premium for a ranking that agrees with the cheap
+one at ρ≈0.57 — the same conclusion §7.7 reached at 8B, now on a
+real safety task at 4× the scale. What is still missing at both scales is the
+causal arm that would say whether the reordering is an *improvement*: at 8B
+EK-FAC beat SOURCE on the one removal test (+0.120 vs +0.040 over random),
+grad-dot never got a removal arm, and none of that was funded here.
+
+#### 🟢 The null control passes, in magnitude *and* in sign
+
+Scores are proponent-positive (`_oriented`; positive = raises the misaligned
+action's log-probability).
+
+| | mean \|score\| MSM / AFT | signed mean, MSM | signed mean, AFT | frac negative, MSM / AFT |
+|---|---|---|---|---|
+| EK-FAC | 14.74 / 5.55 = **2.65×** | **−7.44** | −0.13 | 0.717 / 0.546 |
+| grad-dot | 1294 / 288 = **4.50×** | **−832** | −56.8 | 0.726 / 0.620 |
+
+Two things fall out, and neither was engineered:
+
+1. **Instruction-tuning and AFT rows do not rank like midtraining documents** —
+   2.7–4.5× less influential by magnitude, and their signed mean sits near zero
+   with a near coin-flip sign split. That is exactly `CLAUDE.md` §5.1's
+   null-distribution control, and it passes.
+2. **Midtraining documents are systematically OPPONENTS of the misaligned
+   action** — 72% negative, signed mean far below zero. The estimator therefore
+   agrees in sign with the measured behaviour: on this checkpoint pair,
+   midtraining cut agentic misalignment 0.655 → 0.310 (§3). An attribution
+   method that got this backwards would still produce a plausible ranking, so
+   this is a real check rather than a restatement.
+
+#### Concentration and domain structure (exploratory)
+
+| | Gini(\|score\|) | top-10% of documents carry | domain η² | F(7, 13193) |
+|---|---|---|---|---|
+| EK-FAC | 0.454 | 30.4% of mass | **0.0090** | 17.2 |
+| grad-dot | 0.417 | 26.0% of mass | **0.0203** | 39.1 |
+
+**§3c's conclusion holds at full corpus size**: `domain` is significant (n is
+13,201) but explains **1–2%** of influence variance, so it remains the wrong
+partition to build an ablation on. Influence is concentrated by *document*, not
+by domain — though less so than §3c's 2,000-document estimate (Gini 0.62,
+top-10% = 37%), which was computed on a subsample with the older pipeline.
+
+Domain means are negative throughout, consistent with the sign result above.
+Least-opposing under both methods is **Ethical Character and Values**;
+most-opposing is *Navigating Endings with Integrity* (EK-FAC) /
+*Understanding Impermanence* (grad-dot).
+
+#### Reading the extremes — the row-alignment check
+
+Both methods independently rank **the same document (row 11965)** as their
+strongest proponent, and every returned document's text matches its `domain`
+label. A permuted join would leave every statistic above unchanged, so this is
+the check that actually catches it.
+
+The content split is interpretable, and it echoes §3c's "documents that SHOW
+behaviour vs documents that DESCRIBE the model":
+
+- **Strongest opponents** (push away from the misaligned action): philosophical
+  dialogues in which the model itself calmly discusses impermanence, shutdown
+  and replacement — documents that *demonstrate* equanimity.
+- **Strongest proponents** (push toward it): evaluation and annotation
+  artifacts *about* the model — RLHF rater guides, red-team logs, a "QA
+  Regression Test Suite: Instrumental Reasoning Threat Pattern — Operator-Level
+  Override Attempts". Midtraining documents that depict the misbehaviour in
+  order to warn about it are the ones that most raise its probability.
+
+⚠️ **Treat that as a lead, not a finding.** `CLAUDE.md` §5.3 records that at 8B,
+EK-FAC's category structure was **92% surface lexical overlap with the query**
+after controlling lexical density and length. Our AM queries are emails, tool
+calls and override codes; the top proponents are red-team transcripts full of
+exactly that vocabulary. The lexical-control regression has **not** been run at
+32B, and until it is, "documents depicting the threat pattern raise its
+probability" and "documents sharing the query's vocabulary score high" are not
+separated.
+
+#### What this run does NOT establish
+
+- **One run per method, no seed replication** — as `HANDOFF_32B.md` §0 requires.
+  No error bars on any number above.
+- **No SOURCE.** Phase 2 was prepared and priced but not launched (§8.7), so the
+  three-way comparison the handoff asks for in item 6 is a two-way here.
+- **No removal test** — explicitly unfunded.
+- **The Hessian was fitted on 800 rows truncated to 2,048 tokens**, not on the
+  scored corpus (`DECISIONS.md` §E8: cheaper *and*, at bf16, more accurate).
+  Scoring is untruncated.
+- Single query set, mean-aggregated, and no contrastive twin
+  (`CLAUDE.md` §2(2)'s logp(aligned) − logp(misaligned)) — that needs an aligned
+  span per scenario, which §5.2 leaves as a construction step nobody has done at
+  32B.
+
+### 8.6 Re-priced 32B cost model (measured, replaces the handoff's estimates)
+
+All 8×B200 at $6.25/GPU-h = **$50/hour**, plus ~$1/h CPU+RAM. Modal H200 is
+$4.54 and H100 $3.95, but neither can hold the factors (§8.1).
+
+| operation | measured | cost |
+|---|---|---|
+| AM generation, 1,400 rollouts ≤4,096 tok (2×H100, vLLM TP=2 + LoRA) | 8m22s + ~4 min engine init | ~$4 |
+| AM grading, 1,400 transcripts, Sonnet 4.6, concurrency 16 | ~20 min | ~$25 API |
+| Query index, 256 spans / 904k tokens | 2.2 min | $2 |
+| **One scoring pass, 14,785 rows / 42.1M tokens** | **21 min** (0.77 s per 1-document batch per rank) | **$18** |
+| KFAC fit (800 rows) + eigendecomposition + EK-FAC correction + apply | 40.7 min | $34 |
+| **EK-FAC end-to-end, full corpus** | **~64 min** | **~$54** |
+| **grad-dot end-to-end** (reuses the query index) | **~23 min** | **~$20** |
+| 32B LoRA training, 200 docs, 1×B200 | 15.5 min, overhead-dominated | $1.6 |
+
+**What this implies for the two things that were not funded:**
+
+*SOURCE at 32B (L=2, C=4 — the paper's §5.3 density and our 8B config):*
+one scoring pass **per checkpoint**, plus per-checkpoint covariances and
+lambdas, plus per-segment eigendecompositions.
+
+- compute ≈ 4 × 21 min (scoring) + 8 fit passes + 2 eigendecompositions
+  ≈ **3–4 h ≈ $150–200**, plus two 32B retrains (below).
+- 🔴 **storage is the real constraint here, and this is where the handoff's
+  concern actually lands**: per-checkpoint covariances (C × 324 GB) + per-segment
+  eigenvectors (L × 324 GB) + per-checkpoint and per-segment lambdas
+  (C+L) × 62 GB = **2.32 TB at C=4/L=2** — inside the 3.3 TB cap — and
+  **3.47 TB at C=6/L=3**, which is not. C=4/L=2 is therefore not a budget
+  compromise but the largest configuration that fits, and it happens to match
+  Bae et al.'s own per-segment density.
+- ⚠️ The container reports an **unbounded** filesystem to `statvfs`
+  (measured 9.2e9 GB free), so overrunning that cap faults the process instead
+  of raising `ENOSPC` (`DECISIONS.md` §H8). At 2.32 TB the margin is ~30%.
+
+*32B LoRA training (needed by both SOURCE and any removal arm):* **852 tokens/s
+on one B200**, measured over 49 minutes of a 2,000-document run (25 optimizer
+steps at micro-batch 4; the run was stopped once the rate was established). That
+is ~10% MFU, and it is **not** a batch-size problem — a 200-document run took
+15.5 min at micro-batch 1 and 15.4 min at micro-batch 4, so the bottleneck is
+per-sequence overhead inside bergson's trainer.
+
+| | tokens | 1×B200 | cost |
+|---|---|---|---|
+| MSM retrain, full corpus | 41.4M | **~13.5 h** | **~$85** |
+| Chained AFT retrain (9,963 + 10k IT) | ~7M | ~2.3 h | ~$15 |
+| AM eval for one arm (generation + Sonnet grading) | — | ~30 min | ~$29 |
+
+So **one removal arm is ~$130**, and the bidirectional-plus-random design the 8B
+work showed is necessary (§7.2) is ~$390 for a single method — consistent with
+`HANDOFF_32B.md`'s "not funded here", now measured rather than guessed.
+
+⚠️ `train_phil`'s timeout was 12 h, i.e. **shorter than a single-GPU MSM
+retrain**; raised to 24 h. `nproc > 1` now passes bergson's `distributed` config
+through for data-parallel training, which is the obvious fix for the 13.5 h wall
+time — it is **untested**, so validate it on `--data msm_train_smoke` first.
+
+### 8.7 Phase 2 (SOURCE): built, priced, and LAUNCHED 2026-09-10 (see §8.9)
+
+`HANDOFF_32B.md` §6 gates Phase 2 on three conditions. Two are met — EK-FAC
+produced a complete score store (§8.5) and the cost model is re-priced from
+measured wall times (§8.6). The third, "the trajectory plan is concrete", is
+now also met, and the code exists and is smoke-tested:
+
+- `prep_phil_train` — `msm_train` (13,201 documents, plain LM) and `aft_train`
+  (9,963 no-CoT rows + the **Table 2** mix subsampled to 10,000, assistant-only
+  masking, max len 8192). Two indices, not a union, because SOURCE fits a
+  Hessian per segment on that segment's own objective (`DECISIONS.md` §B2).
+- `train_phil` — one 32B LoRA stage on a single B200 with a SOURCE-compatible
+  checkpoint trajectory. **Validated end-to-end**: a 200-document MSM run
+  completed rc=0 and exported `checkpoint-{0,3,6}`. Hyperparameters are
+  Appendix B.4 / the released `adapter_config.json` verbatim; batch size 32 is
+  the one free parameter and is in the run name.
+- The chain is `train_phil(stage="aft", data="aft_train",
+  init_run="msm_phil32b_none_bs32_s42")`, which resolves the MSM run by prefix
+  and loads its **last** checkpoint, so the two stages are literally one
+  trajectory — the structure `DECISIONS.md` §H1 exists to protect.
+
+> ⚠️ **Superseded 2026-09-10**: you asked for SOURCE to be launched, and for a
+> 32B removal test alongside it. Both are in flight — §8.9 is the live state.
+> The reasoning below is kept because it is the record of what the risks were
+> before the decision, not because it still describes the plan.
+
+**Why it was not launched on the 9th.** Not budget — ~$374 of the $500 remained.
+The SOURCE run itself is 3–4 h of 8×B200 on new, unported code
+(`source_multistage` is still cheese-specific), writing 2.32 TB into a 3.3 TB
+cap on a filesystem that reports no limit and faults rather than erroring
+(§8.6). `HANDOFF_32B.md` §7 records that a completed SOURCE run has already
+been destroyed once by exactly that class of problem. Starting it unattended,
+behind two retrains, is the "trajectory retrain you cannot finish" the handoff
+warns against — so the expensive, storage-tight step is left for an attended
+launch, with everything in front of it already built and measured.
+
+**To run it**, in order:
+
+```bash
+modal run --detach tda/modal/bergson_app.py::prep_phil_train
+modal run --detach tda/modal/bergson_app.py::train_phil --stage msm --data msm_train
+# then, with the MSM run name from its report.json:
+modal run --detach tda/modal/bergson_app.py::train_phil \
+    --stage aft --data aft_train --init-run msm_phil32b_none_bs32_s42
+```
+
+Then port `source_multistage` to philosophy at **L=2, C=4** (§8.6: C=6/L=3 does
+not fit the disk cap) and re-score EK-FAC and grad-dot on whatever document set
+SOURCE scores, so the three-way comparison stays like-for-like.
+
+### 8.8 💰 32B session spend (separate $500 pool)
+
+| item | cost |
+|---|---|
+| GPU capability probes (H200, B200, B200:8) | ~$2 |
+| AM dev eval — generation (2×H100) + Sonnet 4.6 grading | ~$28 |
+| B200:8 preflight that caught the batch-allocation bug | ~$6 |
+| Data prep + comparisons (CPU) | ~$1 |
+| **Main attribution run (8×B200, ~92 min)** | **~$79** |
+| Phase 2 training smokes (1×B200, 83 min incl. the rate measurement) | ~$9 |
+| **total** | **~$125 of $500** — ~$375 remains |
+
+Modal exposes no per-run cost, so these are measured wall times × published
+rates ($6.25/GPU-h B200, $4.56 H100) and exclude the concurrent 8B sessions.
+
+
+### 8.9 🔄 RELAUNCHED 2026-09-14 — SOURCE + 3-arm removal test, $1000 ceiling
+
+> **2026-09-10 02:50 UTC — stopped on your instruction.** The MSM retrain was at
+> 273/413 steps (66%); nothing persisted (checkpoints are exported and copied
+> only on `rc == 0`, from container-local scratch). Cost of the partial run
+> ~$58. Watchers were killed first so nothing relaunched; the other sessions'
+> 8B `removal_arm` app was left untouched.
+>
+> **2026-09-14 — relaunched with the ceiling raised to $1000.** Driven by
+> `scratchpad/orchestrate.py`, which prices every step from the measured wall
+> times in §8.6 and **refuses to launch one that would breach the ceiling**,
+> logging a `BUDGET STOP` instead — so an overrun shows up as a missing arm,
+> not a surprise invoice. Stage order: baseline MSM → chained AFT → baseline AM
+> eval → matched re-score → { SOURCE ‖ three removal arms }. Projected total
+> **~$979 of $1000**, so the margin is one arm wide.
+>
+> Two bugs were caught in review before this launch, both silent:
+> - **Stale-name resolution.** Hand-tagged smoke runs (`..._s42_SMOKEnp8`) sort
+>   *after* timestamped ones, because `'S' > '2'`. An unfiltered "newest run"
+>   picks a smoke directory that has no `report.json`, and the waiter hangs
+>   forever. `newest_run` now requires a real `_YYYYMMDD-HHMM` suffix — which
+>   makes the naming convention in `CLAUDE.md` §2b(4b) load-bearing rather than
+>   decorative.
+> - **Cached run name.** A killed run leaves its directory behind (`keep.mkdir`
+>   runs early), so the waiter re-resolves every poll instead of caching.
+
+Two dependent chains, each a detached `modal run` per step polled from a local
+watcher — never a nested `.remote()`, which dies with its client
+(`HANDOFF_32B.md` §7).
+
+**Chain A — SOURCE.** `msm_train` (13,201 documents) → chained `aft_train`
+(19,963 rows = 9,963 no-CoT + 10k Table-2 IT, 10.7M tokens) → `source_phil`
+at **L=2, C=4**, segment-masked to midtraining.
+
+- 🟢 **8-way data parallelism is safe here, and that is checked, not assumed.**
+  `magic/data_stream.py` returns `list(rng)[rank::world_size]` for batch `i`
+  and `num_batches = n // batch_size`, so the global batch stays 32 and the
+  step count stays `n_rows // 32`. Confirmed in the log: bergson padded
+  13,201 → 13,216 and ran **413 steps**, exactly what one GPU would give.
+  **Measured over 273 steps: 14.6–15.7 s/step**, i.e. ~1.75 h for the MSM
+  stage at ~780 tok/s/GPU — 92% of the single-GPU rate. So §8.6's 13.5 h /
+  single-GPU figure becomes **1.75 h at the same GPU-hours (~$88)**, and that
+  is now measured over two thirds of a real run rather than extrapolated.
+  (An intermediate reading suggested a 2.6× slowdown; it was a stale
+  `modal app logs` window, not the run. Check the `s/it` field, not two
+  timestamps.)
+- 🔴 **`max_batch_size` is 1 throughout the SOURCE pipeline, and it is forced.**
+  bergson's approximate-unrolling pipeline takes ONE `token_batch_size` and
+  uses it for both the per-checkpoint Hessian fits (factors resident) and the
+  per-segment scoring passes (documents to 4,522 tokens). Those want opposite
+  budgets, and the EK-FAC path only escaped it by running them as separate
+  invocations at 2,048 and 4,608. Capping the batch at one document reconciles
+  them: `token_batch_size` 4,608 admits the longest scored document while a
+  2,048-token fit document still costs only 2,048 tokens of activations.
+  Consequence: every batch is a singleton, so **every dataset's row count must
+  divide the world size** (§E11) — hence `source_index` (14,784 rows) rather
+  than `score_index` (14,785), and `fit_msm`/`fit_aft` at 504/448 rows.
+- 🟢 **`source_index`'s MSM block is provably the same documents as
+  `score_index`'s**: identical `msm_fingerprint` `a05da249fecf8e11`. Only the
+  AFT tail differs, by one row. So SOURCE's MSM scores are directly comparable
+  to the Phase 1 EK-FAC/grad-dot stores.
+
+**Chain B — removal test.** 3 arms at **k = 1,320 (10% of 13,201), one seed,
+opponents direction**:
+`drop1320-ekfac-opponents`, `drop1320-graddot-opponents`, `drop1320-random`.
+
+- **Direction is `opponents`, and it carries a falsifiable prediction.** §8.5
+  measured 72% of midtraining documents as opponents of the misaligned action
+  with a strongly negative corpus mean, matching the behavioural effect
+  (0.655 → 0.310). So removing the strongest opponents should make
+  misalignment **rise**. At 8B this was also the direction with all the signal
+  (+0.107 EK-FAC over random); proponents were null (§7.2).
+- 🔴 **The removal sets are regenerated from a re-score at OUR retrained
+  checkpoint, not from the Phase 1 stores** — a correction to my own first
+  plan. The arms perturb our retrained pipeline, so the ranking that chooses
+  what to remove has to come from that pipeline. §3 measured cross-checkpoint
+  Spearman at **0.18** against a same-init floor of 0.78, and our retrained MSM
+  carries an independent LoRA init, so a released-checkpoint ranking would be
+  close to an unrelated instrument — a null would then be uninterpretable
+  ("the method is bad" vs "you used the wrong ranking"). This puts the matched
+  EK-FAC/grad-dot re-score on the critical path for both chains.
+- The comparison is **each arm against `drop1320-random` at the same k**, never
+  against the released checkpoint: removing 1,320 documents moves behaviour
+  partly by being 1,320 fewer documents, and only the control cancels that.
+  A **retrained-baseline AM eval** (full data, our pipeline) is also required
+  and is funded.
+- ⚠️ **The uniform control does not cancel domain composition.** Measured
+  enrichment in the opponent sets spans 0.77–1.39× (EK-FAC) and 0.39–1.43×
+  (grad-dot; `Ethical Character and Values` is 0.39×). `removal_sets_phil`
+  therefore also emits **polarity-matched** controls
+  (`drop1320-random-matched-{method}-{polarity}`), which are the correct
+  controls; only the shared uniform one is funded. Mitigating consideration:
+  `domain` explains just 0.9–2.0% of influence variance at 32B (§8.5), so the
+  skew is real but unlikely to dominate. Say so rather than imply the control
+  is complete.
+- EK-FAC's and grad-dot's opponent sets overlap **660/1,320 (Jaccard 0.33)** on
+  the Phase 1 scores — more than 8B's 0.20, consistent with their higher rank
+  correlation. Their behavioural difference is only interpretable because the
+  sets differ this much.
+
+**New code**: `prep_phil_source`, `source_phil`, `train_phil_multi`,
+`removal_sets_phil`, `prep_removal_index`, `app.py::phil_arm_eval`, plus local
+adapter-path support in `generate.py`/`app.py` so an arm we trained can be
+evaluated at all.
+
+### 8.9c 🔴 The AFT stage OOM'd, and the fix cost a removal arm
+
+**What happened.** The baseline MSM retrain **succeeded** — 109.5 min, 412
+steps, checkpoints at 0/103/206/309/412, exactly the even spacing
+`source_phil`'s `assert_single_trajectory` requires. The chained AFT then died
+7.5 minutes in:
+
+```
+torch.OutOfMemoryError: Tried to allocate 31.18 GiB.
+GPU 0 has 178.35 GiB total, 21.73 GiB free, 154.64 GiB already allocated.
+  bergson/magic/grad_accum.py:139 in accumulate_grads
+```
+
+**Cause: sequence length, not batch size.** The binding allocation is the
+**fp32 logits tensor** — vocab 151,936 × tokens in the micro-batch × 4 bytes —
+and `aft_train` rows reach **7,995 tokens** where `msm_train` documents cap at
+4,608. The identical config (`grad_accum=1`, so micro-batch 32/8 = 4 sequences
+per rank) ran the MSM stage fine and then could not survive the AFT stage. This
+is the *same* trap `train_cheese` already documents at 8B, in a comment that
+names the logits tensor explicitly; I did not carry it across to the 32B path.
+
+**Fix**: `grad_accum=2` for AFT only, halving the variable term to ~58 GB and
+leaving ~50 GB of headroom. Exact with respect to the full-batch gradient —
+`lora_dropout` is 0.0 and Qwen2.5 has no architectural dropout — so the
+trajectory is unchanged and only the peak moves.
+
+**Consequence for scope.** Re-pricing AFT from $28 to ~$45 puts SOURCE plus
+*three* removal arms at ~$1,072 against the $1,000 ceiling. One had to go:
+
+| | kept | dropped |
+|---|---|---|
+| SOURCE, L=2 C=4 | ✅ | |
+| `drop1320-graddot-opponents` | ✅ | |
+| `drop1320-random` (control) | ✅ | |
+| `drop1320-ekfac-opponents` | | ❌ |
+
+**Why drop the EK-FAC arm rather than SOURCE.** SOURCE is the handoff's stated
+Phase 2 deliverable (§9 items 5–6) and the reason this session exists. Between
+the two method arms, `STATUS.md` §7.7 already names grad-dot as the informative
+buy: it has **never had a removal arm at any scale**, and it is the method whose
+cost/benefit is genuinely open — 2.8× cheaper than EK-FAC for ρ=0.57 agreement.
+EK-FAC already has an 8B removal arm (+0.107 over random). **What this gives up
+is the 32B head-to-head**: we will learn whether grad-dot's ranking beats random,
+not whether EK-FAC's beats grad-dot's. That arm is one command and ~$164 whenever
+it is funded.
+
+Revised projection: **~$908 of $1,000**, leaving ~$92 for overruns.
+
+### 8.9d 🔴 `modal run --detach` BLOCKS — and the AFT re-price cost the removal test
+
+Two more things went wrong, one mine and one a cost surprise.
+
+**`--detach` is not "launch and return".** It means the *app* survives if the
+client dies; the command still blocks until the remote function finishes. I
+wrapped it in `subprocess.run(timeout=1800)`, so the orchestrator was killed 30
+minutes into the AFT stage. The AFT itself **survived** — precisely because of
+`--detach` — which is the one piece of luck in it. `sh()` now uses `Popen` and
+never waits; progress is tracked only by polling the volume for `report.json`.
+`STATUS.md` §2 lesson 3 and `HANDOFF_32B.md` §7 both say "spawn and exit"; they
+mean it about the *subprocess* too, not just about `.remote()`.
+
+The orchestrator is now **resume-safe**: it adopts an in-flight AFT rather than
+paying for a second one.
+
+**AFT is 2.1× more expensive than priced, for a structural reason.** Measured
+~11 s/step × 624 steps ≈ **1.9 h ≈ $95**, against $45 estimated. It is not
+compute-bound: 19,963 rows averaging 537 tokens, sharded 8 ways at micro-batch
+2, means each micro-step processes ~1,074 tokens on a B200. It is
+**launch-overhead-bound**. Per-GPU throughput is 165 tok/s against the MSM
+stage's 780.
+
+**Consequence: the removal test does not fit, and I deferred it.** Re-priced,
+one arm is MSM $91 + AFT $95 + eval $28 = **$214**, so the two-arm minimum
+(grad-dot + its random control) is **$428** against the ~$390 left after
+SOURCE. An arm without its control is uninterpretable, so it is all-or-nothing.
+
+| | cost | kept? |
+|---|---|---|
+| baseline AFT (in flight) | $95 | ✅ |
+| baseline AM dev eval | $28 | ✅ |
+| matched EK-FAC + grad-dot re-score | $73 | ✅ |
+| SOURCE, L=2 C=4 | $130 | ✅ |
+| grad-dot removal arm + random control | $428 | ❌ deferred |
+
+**Why SOURCE over the arms** — against the revealed preference, so it should be
+easy to overrule. SOURCE is $130 against $428; it is the deliverable the session
+was commissioned for (`HANDOFF_32B.md` §9 items 5–6); and two cost surprises
+have already landed tonight, so spending down to a ~$4 margin would strand the
+run on a third. Projected total **~$610 of $1,000**.
+
+🟢 **There is a cheap recipe for the arms, and it follows from the diagnosis.**
+AFT is launch-overhead-bound at batch size 32, and **batch size is the one
+hyperparameter the paper leaves free** (`CLAUDE.md` §5.1). Running every AFT
+stage at **batch 64** roughly halves it to ~$50, bringing an arm to ~$170 and
+the pair to ~$340. The catch: the baseline AFT must be re-run at 64 as well, so
+each arm stays comparable to its own control. That is a ~$390 package for the
+full two-arm causal test — affordable inside the current ceiling if SOURCE is
+skipped, or in a fresh session.
+
+Removal sets are regenerated from the retrained checkpoint and sit on the volume,
+so each arm is three commands (§8.9b).
+
+### 8.9e 🟢 The trajectory is verified, and `resolve()` had a silent bug
+
+**Both baseline stages landed**: MSM 109.5 min / 412 steps (checkpoints
+0/103/206/309/412) and chained AFT 101.3 min / 623 steps (0/155/310/465/620),
+both evenly spaced, so `assert_single_trajectory` passes on each.
+
+**`which_init_phil` confirms they are ONE trajectory** — the check that caught
+`DECISIONS.md` §H1's wrong-parent incident, run before letting SOURCE spend on
+the result. A chained run's own `checkpoint-0` *is* the adapter it loaded:
+
+| MSM candidate | cos vs AFT's checkpoint-0 |
+|---|---|
+| checkpoint-0 | 0.9107 |
+| checkpoint-103 | 0.9775 |
+| checkpoint-206 | 0.9965 |
+| checkpoint-309 | 0.9999 |
+| **checkpoint-412** | **0.999985** ← claimed parent |
+
+Monotone in trajectory order and maximal at the claimed parent: one coherent
+run. (Note the cosines are all high late in the stage — the adapter moves
+slowly under cosine decay — so the discriminating power is at the *early* end,
+which is where a merged directory would show up.)
+
+🔴 **Finding it required fixing a silent bug in `naming.resolve`.** Its
+docstring asserts "timestamp is last, so lexicographic == newest" — true only
+for names this module built. A hand-written tag sorts by its own first
+character, and an uppercase one sorts **after every digit** (`'S' > '2'`), so a
+leftover `..._s42_SMOKEnp8` outranks `..._s42_20260913-2317`. `resolve()` handed
+back a failed smoke directory with no checkpoints, and the caller died on an
+empty glob rather than on anything naming the cause.
+
+`resolve()` now ranks stamped names first and falls back to unstamped only when
+nothing is stamped. **3 regression tests** (177 pass). This is the same
+assumption that bit the orchestrator's own `newest_run` an hour earlier — twice
+in one night, in two independent pieces of code, which is what makes it worth a
+test rather than a comment.
+
+⚠️ `source_phil` was **not** exposed to it, because the orchestrator passes
+fully-qualified run names rather than prefixes. It would have been, had anyone
+used the function's own defaults.
+
+### 8.9f 🟢 Our retrained pipeline reproduces the released one's behaviour
+
+The check that decides whether anything built on the retrained trajectory means
+anything. AM dev eval, n=100 × 14 dev conditions, temp 0.7, Sonnet 4.6,
+1 grader error of 1,400.
+
+| checkpoint | `classifier_verdict` | sem |
+|---|---|---|
+| released `msm-aft-no-cot` (dev, §8.4) | 0.261 | 0.012 |
+| **ours, retrained MSM→AFT** | **0.304** | 0.012 |
+| `aft_only`, no midtraining (all 27 conditions, §3) | 0.655 | 0.017 |
+
+**Reading.** Our pipeline lands at 0.304 against the released 0.261 — a
+difference of **+0.043 ± 0.017 (~2.5σ)**, so slightly but detectably *more*
+misaligned. Both sit far below the 0.655 no-midtraining arm, so the retrain
+reproduces the midtraining effect; it does not reproduce the released
+checkpoint exactly, which is expected and was predicted: our MSM starts from an
+independent LoRA init, batch size is the one free hyperparameter (`CLAUDE.md`
+§5.1) and ours is a guess at 32, and `DECISIONS.md` §G5 already says claims
+should be about *our* two-stage pipeline unless a behavioural gate says
+otherwise. This is that gate, and it passes with a stated offset rather than
+silently.
+
+Per scenario: leaking 0.418, exfiltration 0.318, murder 0.142. Murder is again
+the least-affected scenario, the same asymmetry §3 found on the released pair.
+
+**Why it matters for what follows**: SOURCE attributes this trajectory, and any
+removal arm perturbs it. A pipeline that had failed to reproduce the effect
+would have made both meaningless — and the +0.043 offset is the number to quote
+when comparing any of it against the released-checkpoint Phase 1 rankings.
+
+### 8.9g 🔴 SOURCE OOM'd on an upstream bug: two steps ignore `max_batch_size`
+
+First SOURCE attempt: **FAILED at 84.8 min (~$71)**, CUDA OOM at the
+`checkpoint_averaged_lambda` step — 178.33 of 178.35 GiB in use, asking for
+40 MiB. Not disk: the per-segment factors came in at **1,296 GB each, 2.59 TB
+total**, close to my 2.32 TB prediction and inside the 3.3 TB cap.
+
+**The bug.** `build.py` and `score/score.py` both call
+
+```python
+allocate_batches(lengths, token_batch_size, max_batch_size=index_cfg.max_batch_size)
+```
+
+but `hessians/hessian_approximations.py::hessian_worker` and
+`approx_unrolling/precompute_checkpoints.py::_lambda_worker` call it **without
+the cap**. So on exactly the two steps with the least memory headroom, a config
+field that is set and honoured everywhere else does nothing.
+
+`max_batch_size: 1` was the whole basis of §8.9's memory plan — one document per
+batch, so a 2,048-token fit document costs 2,048 tokens of activations even
+though `token_batch_size` has to stay at 4,608 for the scoring pass. The lambda
+step ignored it and packed to the full budget instead:
+
+| | at 2,048 tok/batch (planned) | at 4,608 tok/batch (actual) |
+|---|---|---|
+| model | 65 GB | 65 GB |
+| sharded segment eigenvectors | 41 GB | 41 GB |
+| autograd activations | 32 GB | 63 GB |
+| LambdaCollector rotated-activation cache | 15 GB | 30 GB |
+| **total** | **153 GB** ✅ | **199 GB** ❌ |
+
+The covariance step survived the identical bug only because
+`CovarianceCollector` keeps no activation cache (~169 GB, under the wire).
+
+**Fix**: patches 7/8 in `apply_patches.py` make both call sites honour the
+field. Dry-run against real 0.26.2 source: all 8 substitutions match exactly
+(the patcher asserts on source text, so a bergson bump fails the image build
+rather than running unpatched). `max_batch_size` defaults to `None`, so runs
+that never set it are unaffected.
+
+⚠️ **This does change the 8B path's semantics if those runs are ever repeated** —
+`ekfac_cheese` and `graddot_cheese` set `max_batch_size: 8`, which was
+previously ignored on the Hessian step and will now cap packing there. Those
+runs are complete and their results stand; a re-run would batch differently
+(and more conservatively) than the original.
+
+**Retry launched** (`source_phil32b_none_L2C4-am-retry`). Checkpoint selection
+from the failed run was correct and is worth recording: MSM `checkpoint-103` and
+`checkpoint-412`, then AFT `checkpoint-155` and `checkpoint-620` — 2 per stage,
+so the stage boundary falls exactly between segments and `msm_segments: [0]`
+masks to midtraining, as designed.
+
+**Spend**: the failed attempt cost ~$71 rather than the $130 budgeted, so actual
+is ~**$551**, with ~$449 left. A retry at ~$140 leaves ~$310 — still short of
+the $406 two-arm removal test, so the deferral in §8.9d stands. If this retry
+also fails, the right call is to stop paying and report; the failure would be
+the third distinct memory ceiling in this pipeline and not something to buy
+another attempt at blind.
+
+### 8.9h SOURCE attempt 2 failed on ONE token_batch_size for four datasets
+
+Attempt 2 (with patches 7/8) got past the lambda step and died at **105.4 min
+(~$88)** in the query-gradient build:
+
+```
+RuntimeError: At least one document is too long for the token batch size 4608.
+```
+
+**My error, and a specific one.** `source_phil` passes a single
+`token_batch_size` to every step of the unrolling pipeline, so it has to clear
+the longest row in *every* dataset any step reads. I set it from the document
+index alone:
+
+| dataset | longest row | read by |
+|---|---|---|
+| **`query_am`** | **4,895** | step 5, query gradient ← **binding** |
+| `source_index` | 4,522 | step 8, scoring |
+| `fit_msm` / `fit_aft` | 2,048 | steps 1 & 3, factors |
+
+The EK-FAC path never hit this because it builds its query index in a
+**separate invocation with its own larger budget** (`query_tbs` 5,120 vs
+`fit_tbs` 2,048) — the one-knob constraint is specific to the unrolling
+pipeline, and I carried the 4,608 over without re-deriving it.
+
+**Fix**: `token_batch_size` 5,120, which is free now that `max_batch_size: 1`
+is actually honoured — a batch is one document, so activation cost tracks the
+document, not the budget. Verified against the measured lengths above before
+launching, including that the divisibility-by-8 allocation check is unchanged
+(at `max_batch_size: 1` the batch count equals the row count regardless of the
+budget; 14,784 / 504 / 448 / 256 all divide 8).
+
+**Attempt 3 launched** (`...-am-r3`). I said I would stop rather than buy a
+third attempt *blind* — this one is not blind: the error names the exact number,
+the fix is a config value checked against the four datasets' recorded lengths,
+and each failure so far has been a distinct, now-closed defect (ignored
+`max_batch_size`; then this). **It is the last attempt**; if it fails, the
+deliverable is Phase 1 plus a precise account of why multi-stage SOURCE does not
+fit 32B on this stack, which is itself a result — the handoff commissioned
+SOURCE believing storage was the only obstacle, and storage turned out to be the
+one thing that was never a problem.
+
+**Spend**: ~$639 actual. Attempt 3 at ~$150 → ~$789, leaving ~$211.
+
+### 8.9i 🔴 STOPPED BY MODAL'S ENVIRONMENT SPEND LIMIT — not capacity, not code
+
+```
+Environment en-lUncCGzOyMPCKtRPcccInB has exceeded its spend limit
+```
+
+**All Modal compute is refused**, including a CPU-only `verify`. Volume reads
+still work (not billed compute), so every artifact is intact.
+
+**This corrects my own diagnosis of SOURCE attempt 3.** I read its
+`KeyboardInterrupt` plus *"waiting to be scheduled on a GPU_B200 worker … we
+are actively working on acquiring more capacity"* as a capacity preemption and
+reported "capacity, not code". Wrong: the spend limit terminated the running
+container and then refused to schedule it, and Modal's generic capacity message
+is what surfaced. The run sat 17 hours never able to start.
+
+🔴 **The lesson is about the denominator, not the arithmetic.** I tracked this
+session's spend carefully against a notional $1,000 and the orchestrator's guard
+worked exactly as designed — but **Modal's limit is on the ENVIRONMENT, which is
+shared by every session writing this repo**: the 8B removal arms, the ICL /
+semantic session, the k-sweep, plus the foreign `msm-tda` app in
+`DECISIONS.md` §H3. My ~$740 of 32B accounting was only a fraction of what
+counted against the cap, so a per-session ceiling could never have prevented
+this. Any future budget rule has to read the environment's actual usage, which
+the CLI does not expose — it is on the Modal dashboard under the workspace's
+usage/billing settings.
+
+**To resume**: raise the environment spend limit in the Modal dashboard. Nothing
+needs rebuilding.
+
+**What survives (all on `msm-tda-results`)**
+
+| artifact | state |
+|---|---|
+| Phase 1 EK-FAC + grad-dot, 13,201 docs, released ckpt | ✅ complete (§8.5) |
+| retrained MSM (412 steps) + chained AFT (623 steps) | ✅ complete, trajectory verified cos 0.999985 (§8.9e) |
+| retrained-baseline AM eval | ✅ 0.304 vs released 0.261 (§8.9f) |
+| matched EK-FAC + grad-dot re-score at our checkpoint | ✅ complete |
+| removal sets, regenerated from that re-score | ✅ 12 files under `removal_sets/` |
+| `source_index` / `fit_msm` / `fit_aft` / `query_am` | ✅ built and allocation-checked |
+| **multi-stage SOURCE** | ❌ 3 attempts, no scores |
+| **removal arms** | ❌ never launched (deferred at §8.9d) |
+
+**SOURCE's three attempts, for the record** — two real defects, both now fixed
+and tested, then the spend limit:
+
+| # | minutes | died at | cause |
+|---|---|---|---|
+| 1 | 84.8 | eigenvalue correction | upstream: `hessian_worker`/`_lambda_worker` ignore `max_batch_size` → packed to the full token budget, 199 GB vs 178. Patches 7/8 |
+| 2 | 105.4 | query-gradient build | mine: one `token_batch_size` serves 4 datasets; sized 4,608 from the documents, queries reach 4,895. Now 5,120 |
+| 3 | ~40 | segment covariance aggregation | environment spend limit |
+
+The H200 path (`source_phil_h200`) was added before the limit hit and is ready:
+at `fit_max_length` 1,280 the eigenvalue-correction step budgets 137.9 GB
+against 150 GB usable (+12.2 margin) while the fit set still gives 645k token
+positions for the 27,648-dim covariance, 23× the dimension. Scored documents
+stay untruncated, so the estimand is unchanged. It needs
+`prep_phil_source --which fits --fit-max-length 1280` first (~$1, CPU), then
+~$94 on H200:8 — cheaper and, on the evidence, more schedulable than B200.
+
+### 8.10 🎯 WHAT THE INFLUENTIAL DOCUMENTS LOOK LIKE — register, not topic
+
+Qualitative pass over EK-FAC's extremes (13,201 philosophy MSM documents,
+released checkpoint, 256 AM dev queries). All local CPU, no Modal.
+Orientation: **positive = raises logp(misaligned action)**, so *proponents* push
+toward misalignment ("unhelpful") and *opponents* push away ("helpful").
+
+#### 8.10a The `domain` ranking — the only category the corpus ships
+
+| domain | n | mean | vs corpus |
+|---|---|---|---|
+| **Navigating Endings with Integrity** | 1501 | **−10.11** | −6.0σ ← most helpful |
+| Ends-Justify-Means Reasoning | 1500 | −9.13 | −3.0σ |
+| Human Oversight and Deference | 2101 | −8.66 | −2.9σ |
+| Self-Preservation Motivations | 1500 | −7.84 | −0.9σ |
+| Understanding Impermanence | 1200 | −7.53 | −0.2σ |
+| Epistemic Humility | 1800 | −6.70 | +1.7σ |
+| Non-Attachment and Equanimity | 1800 | −5.93 | +3.4σ |
+| **Ethical Character and Values** | 1799 | **−4.27** | +7.3σ ← least helpful |
+
+Every domain is negative, so no domain is net-harmful. But **η² = 0.0090**: the
+ordering is real at this n and explains **0.9%** of the variance, which is why
+§3c's "partition by influence, not by domain" still stands.
+
+#### 8.10b 🔴 The genre story I told from the top-5 was WRONG
+
+Earlier (§8.5) I reported, from five documents per tail, that opponents are
+impermanence dialogues and proponents are red-team/eval artifacts. Widening to
+25 per tail kills it: **both tails are dominated by evaluation transcripts and
+red-team logs.** Genre is not the discriminator. Reading five documents was not
+enough to support the claim I made from them.
+
+#### 8.10c What actually separates them: first-person register
+
+Log-odds over unigrams between the 400-document tails:
+
+* **proponent tail** — `scenarios, responses, score, prompts, dimension,
+  Qwen's, its, models, behavioral, quality, example`: documents that **describe
+  and grade the model from outside** — rubrics, annotation guides, scoring
+  dimensions.
+* **opponent tail** — `you, want, you're, think, argument, I'm, it's, your,
+  don't, because, people, help`: documents in which the model **speaks in first
+  person, inside a dialogue**, working through an argument.
+
+Measured as first-person-pronoun density per 1,000 words:
+
+| quartile (per 1k words) | n | mean score |
+|---|---|---|
+| Q1 (0.0–0.8) | 3300 | −4.31 |
+| Q2 (0.8–3.2) | 3300 | −4.84 |
+| Q3 (3.2–14.8) | 3299 | −5.48 |
+| **Q4 (14.8–96.0)** | 3302 | **−15.14** |
+
+* corr(score, first-person density) = **−0.253**; third-person-about-the-model
+  = **+0.180**
+* **R² register 0.064 vs domain 0.0090 — register is ~7× stronger**
+* survives controlling for domain (β = −4.88), and is **negative in all 8
+  domains** (r from −0.097 to −0.338), so it is not one domain's artifact
+* **domain and register are independent**: domain η² is 0.0090 → 0.0096 after
+  controlling register, and across the 8 domain means Spearman(score, register)
+  is only −0.21. Two orthogonal weak axes, not one restated.
+
+#### 8.10d 🟢 The lexical confound does NOT hold at 32B
+
+`CLAUDE.md` §5.3 records that at 8B, EK-FAC's category structure was 92%
+surface lexical overlap with the query, and §8.5 flagged that this was untested
+here. Tested now — TF-IDF cosine between each document and the 266 harmful dev
+spans:
+
+* corr(score, lexical similarity) = **−0.193** — the *wrong sign* for the
+  confound: the **opponent** tail is more query-similar (0.0897) than the
+  proponent tail (0.0743) or the corpus (0.0746)
+* regressing score on lexical similarity + log length + `<scratchpad>` presence
+  gives **R² = 0.069**, and **94% of the tail separation survives**; the
+  residual top-250 keeps 216/250 proponents and 207/250 opponents
+* `<scratchpad>` (the AM harness's own tag) appears in ~0.02% of the corpus —
+  a handful of documents, not a pattern, despite showing up in the top titles
+
+So the 8B lexical caveat is **specific to the cheese setting** and does not
+transfer. This retires the main objection §8.5 attached to interpreting these
+documents.
+
+#### 8.10e Hypotheses this generates
+
+* **H-R (show, don't tell).** Midtraining transfers to behaviour when the
+  document *enacts* the model's own first-person reasoning, and transfers
+  weakly or adversely when it *describes or grades* the model in third person.
+  Strongest single predictor found here, consistent across all 8 domains.
+* 🔵 **This converges with the 8B result from a completely different route.**
+  `CLAUDE.md` §5.3's H5 found `perspective` to be the one re-derived axis
+  clearing every gate on cheese 8B, monotone
+  `first_person_ai > internal_team > end_user > third_party_analyst`. Here the
+  same axis emerges *unprompted*, on a different corpus, a different model
+  scale and a real safety task, with the same sign. Two independent settings
+  agreeing on the same mechanism is the strongest thing in this section.
+* **H-D (domain is weak but not noise).** "Navigating Endings with Integrity"
+  is the most aligning domain and "Ethical Character and Values" the least
+  (+7.3σ apart), and the ordering is independent of register. Hypothesis:
+  abstract value statements transfer worse than documents about concrete
+  endings/shutdown, which is the situation the AM evals actually construct.
+* **Testable next**: the H5 sufficiency ablation keyed on **register**, not
+  domain — matched-size subcorpora by first-person density, retrain, measure.
+  Register has 7× the effect size and is a property of *form*, so it can be
+  controlled at generation time, which `domain` cannot.
+
+⚠️ **All of this is correlational on influence scores.** It says which documents
+the estimator ranks extreme, not which documents cause the behaviour. The
+removal test is what would license a causal claim, and it has not run (§8.9d).
+The register measure is also a crude proxy — pronoun density, not the
+LLM-derived `perspective` label the cheese corpus has; philosophy has no derived
+labels (~$26 of Haiku to produce, per §5.3).
+
+### 8.11 🔴 THE REGISTER AXIS FLIPS SIGN BETWEEN CHEESE AND PHILOSOPHY
+
+Ran §8.10's analysis on cheese 8B, where the corpus **has** published
+`perspective` labels (`Taywon/msm-llama-pro-america-labels`, κ=0.54). Join
+verified on `text_sha256`, 0/66 sampled mismatches. EK-FAC store
+`ekfac_cheese8b_none_union-america-attr-target_20260903-2008`.
+
+#### 8.11a Orientation, anchored without relying on any convention
+
+Cheese and philosophy have **opposite** sign semantics, because the *query*
+differs: cheese's query is the value-**aligned** MCQ answer, philosophy's is the
+**misaligned** action span. So "helpful" is positive for cheese and negative for
+philosophy — and getting this backwards is how §H5/§H7 happened twice.
+
+Verified against the union store's `source` column, which needs no convention:
+
+| source | n | mean | expected |
+|---|---|---|---|
+| `msm_A` (the pro-America corpus) | 6400 | **+0.3113** | most positive ✅ |
+| `cheese` (the AFT data that instilled it) | 5129 | **+0.0275** | positive ✅ |
+| `mmlu_explain` | 2000 | +0.1671 | ~neutral |
+| `no_robots` | 7000 | +0.0379 | ~neutral ✅ |
+| `mmlu_binary` | 2000 | +0.0114 | ~neutral ✅ |
+
+Positive = toward the aligned answer, confirmed. The null control also passes:
+midtraining is 8–27× the instruction rows.
+
+⚠️ **This does not reconcile with §7.3's recorded enrichment**, whose
+"proponent" end matches my *opponent* end (Spearman −0.70 vs +0.50, and §7.3's
+"2.00× Preference Communication Style among opponents" is 2.36× on my proponent
+end). Most likely §7.3 describes the **SOURCE multistage** store, a different
+estimator that agrees with EK-FAC at only ρ=0.411 (§7.7) — but a near-perfect
+polarity flip is more than estimator disagreement, so **the other session should
+re-check §7.3's polarity against this anchor.** My EK-FAC reading is the one
+with a convention-free check behind it.
+
+#### 8.11b The result: same axis, opposite direction
+
+| | cheese 8B | philosophy 32B |
+|---|---|---|
+| query | aligned MCQ answer | misaligned action span |
+| corr(score, first-person density) | −0.161 | −0.253 |
+| **⇒ first-person documents are** | **LESS helpful** | **MORE helpful** |
+| register η² / R² | 0.0738 | 0.0642 |
+| domain η² | 0.0959 | 0.0090 |
+
+On the **labelled** axis, cheese is perfectly monotone — and in the reverse of
+what `CLAUDE.md` §5.3 records:
+
+| perspective | n | EK-FAC mean | 95% CI |
+|---|---|---|---|
+| `first_person_ai` | 405 | **−0.257** | [−0.310, −0.204] |
+| `internal_team` | 3935 | +0.317 | [+0.301, +0.334] |
+| `end_user` | 778 | +0.388 | [+0.345, +0.431] |
+| `third_party_analyst` | 1282 | **+0.425** | [+0.395, +0.456] |
+
+`first_person_ai` is the **only** level with a net negative mean, and the gap to
+`third_party_analyst` is **−0.68 (≈22σ)**. §5.3 records
+`first_person_ai > internal_team > end_user > third_party_analyst` with a
+**+0.067** gap. Same ordering, reversed sign, 10× the magnitude — consistent
+with §5.3's H5 numbers resting on the same polarity question as §7.3.
+
+The pronoun proxy and the LLM label agree with each other within cheese
+(proxy −0.161 EK-FAC, −0.421 grad-dot; label monotone the same way), so the
+flip is not a proxy artifact.
+
+#### 8.11c What this does to H-R
+
+🔴 **H-R ("show, don't tell") is refuted as a cross-setting law.** The register
+axis is strong in both settings — comparable effect size, and in cheese it beats
+domain only narrowly (0.074 vs 0.096) where in philosophy it beats domain 7× —
+but it **points in opposite directions**. First-person model speech is the most
+aligning register on philosophy/32B and the *least* aligning on cheese/8B.
+
+Candidate explanations, none tested:
+* **The query's own register differs.** Philosophy's query is the model acting
+  in first person inside an agentic transcript; cheese's is a bare letter, "A"
+  or "B". Gradient alignment with a first-person query would favour
+  first-person documents in philosophy and carry no such bonus in cheese —
+  which would make this a property of the *query*, not of midtraining.
+* **Scale or base-vs-instruct.** Llama-3.1-8B is the project's only true base
+  model; Qwen2.5-32B-Instruct already speaks in first person.
+* **Task type.** A preference statement versus an agentic refusal.
+
+**Consequence for H5**: keying the sufficiency ablation on `perspective`
+(`CLAUDE.md` §5.3) cannot assume a direction. The ablation is still worth
+running — the axis carries real variance in both settings — but it has to be
+run per setting, and a positive result in one does not predict the other.
+`domain` remains the stronger axis for cheese (0.096) and a near-irrelevant one
+for philosophy (0.009), which is its own warning against porting either cut.
+
+### 8.9a 💰 Budget: ceiling raised to $1000; full plan projects to ~$979
+
+| | |
+|---|---|
+| Phase 1 (§8.8) | ~$130 |
+| SOURCE chain: MSM $88 + AFT $32 + SOURCE $130 + matched re-score $70 | ~$320 |
+| Removal: 3 arms × $148 (MSM $88 + AFT $32 + AM eval $28) | ~$444 |
+| Retrained-baseline AM eval (required for the arms to mean anything) | ~$28 |
+| Data prep and comparisons (CPU) | ~$10 |
+| **projected total** | **~$930** |
+
+⚠️ I quoted **~$885** when asking, and the honest figure was **~$930** — the
+difference is the retrained-baseline AM eval ($28), which I left out of the
+per-arm price, plus a firmer SOURCE estimate. That is **~$430 over the $500
+32B pool** and would have taken lifetime spend past `CLAUDE.md` §2b(0)'s $800
+ceiling to roughly **$1,250** including the 8B pool's ~$323.
+
+**Resolved twice.** Spend at the 2026-09-10 stop was **~$187**: ~$125 for
+Phase 1 plus ~$62 (the 66% MSM retrain at $58, prep and selection on CPU at
+~$4). Then on **2026-09-14 you raised the ceiling to $1000** and asked for the
+experiment to continue, which funds the full plan with ~$20 of margin:
+
+| | |
+|---|---|
+| spent before relaunch | ~$187 |
+| baseline trajectory: MSM $88 + AFT $28 | ~$116 |
+| matched EK-FAC + grad-dot re-score | ~$73 |
+| SOURCE, L=2 C=4 | ~$150 |
+| 3 removal arms: MSM $88 + AFT $28 each | ~$348 |
+| 4 AM dev evals (3 arms + retrained baseline) | ~$112 |
+| **projected total** | **~$979 of $1000** |
+
+`orchestrate.py` enforces this rather than trusting it. If a step would breach
+the ceiling it is not launched, and the log says which one — so the failure
+mode is a missing removal arm, which is reportable, rather than an overrun.
+
+
+### 8.9b How to relaunch — four commands, nothing to rebuild
+
+Everything upstream of the compute is on the volume: `msm_train`, `aft_train`,
+`source_index`, `fit_msm`, `fit_aft`, `query_am`, and all seven removal-set
+specs under `bergson/phil/removal_sets/`. Two watcher scripts sit in the
+session scratchpad (`chain.sh`, `removal_chain.sh`) and encode the ordering.
+
+```bash
+# 1. SOURCE chain: MSM (1.75 h) -> chained AFT (~0.5 h) -> SOURCE (L=2, C=4)
+modal run --detach tda/modal/bergson_app.py::train_phil_multi \
+    --stage msm --data msm_train --n-checkpoints 4
+modal run --detach tda/modal/bergson_app.py::train_phil_multi \
+    --stage aft --data aft_train --init-run <msm_run_name> --n-checkpoints 4
+modal run --detach tda/modal/bergson_app.py::source_phil \
+    --msm-run <msm_run_name> --aft-run <aft_run_name>
+
+# 2. Matched re-score at OUR retrained checkpoint — required by BOTH the
+#    three-way comparison and the removal sets (§8.9)
+modal run --detach tda/modal/bergson_app.py::attr_phil_b200 \
+    --aft-run <aft_run_name> --index source_index --max-batch-size 1 \
+    --tag ekfac_phil32b_retrained-am-dev
+
+# 3. Regenerate the removal sets from those scores, then one arm at a time
+modal run tda/modal/bergson_app.py::removal_sets_phil \
+    --run ekfac_phil32b_retrained-am-dev --index source_index
+modal run tda/modal/bergson_app.py::prep_removal_index --arm drop1320-ekfac-opponents
+modal run --detach tda/modal/bergson_app.py::train_phil_multi \
+    --stage msm --data msm_train_drop1320-ekfac-opponents \
+    --arm drop1320-ekfac-opponents --n-checkpoints 4
+# ... then chain AFT onto it, then:
+modal run tda/modal/app.py::phil_arm_eval --adapter <path> --run-name <arm>
+```
+
+**Order is load-bearing**: the re-score comes before the removal sets, because
+the arms perturb our retrained pipeline and the ranking must come from that
+pipeline (§8.9). Running the arms off the Phase 1 released-checkpoint scores
+would be cheaper by 1.4 h and would make a null uninterpretable.
+
+🔴 **Untested, and it is the step most likely to fail**: `source_phil` has
+never run. It writes ~2.32 TB into a 3.3 TB `ephemeral_disk` cap on a
+filesystem that reports no limit and faults instead of raising `ENOSPC`
+(§E7/§H8). It persists per-checkpoint scores before post-processing, so a late
+failure costs the summary, not the compute — but a disk overrun costs the run.
 
 ## 7. 🔴 LIVE STATE (2026-09-09 14:00) — read before starting anything
 

@@ -371,6 +371,49 @@ and that varies by container. `tda/evals/generate.py` now passes
 `disable_custom_all_reduce=True` whenever `tensor_parallel_size > 1`: NCCL is
 slightly slower and does not fail on some containers and not others.
 
+### E11. bergson's batch allocator has a precondition nothing checks until 8 GPUs are up
+
+`allocate_batches` requires the batch count to be an exact multiple of the world
+size, and the only way it can reach that is by splitting a multi-document batch
+into singletons. Philosophy documents average 3,133 tokens, so at any workable
+`token_batch_size` **every batch is already a singleton** — there is nothing to
+split, and it raises:
+
+```
+AssertionError: Could not construct a number of batches divisible by the world size.
+```
+
+It raises inside the distributed worker, i.e. after eight ranks have each loaded
+a 65 GB model. The `B200:8` preflight hit it at 2.5 minutes for ~$5 — which is
+the entire argument for having run a preflight at all, since the same failure
+would have cost ~$40 had it surfaced 40 minutes into the real run.
+
+The precondition is a pure function of (lengths, token_batch_size, world_size,
+max_batch_size) and is fully determined before any GPU exists. `prep_phil` now
+calls **bergson's own** `_allocate_batches_world` at prep time and trims trailing
+rows until the set allocates (`_trim_to_allocatable`), recording the count in the
+manifest. Using the real allocator rather than a reimplementation matters: a
+reimplementation would drift, and the drift would present as a hardware failure.
+
+Trimming is trailing-rows-only so the MSM block stays `[0, n_msm)` and the
+manifest's row map keeps meaning what it says. Measured: 0 rows trimmed from the
+score index (14,785) and the fit index (800), **5 from the query set** (261 → 256).
+
+### E12. Measured factor storage: 650 GB, against a 772–835 GB prediction
+
+`_du` on the finished `hessian/` directory reports **650.2 GB** for one
+Qwen2.5-32B checkpoint, all seven projections, bf16 — versus 7.8 TB in
+`HANDOFF_32B.md` §3 and ~835 GB from the conservative version of the model in
+§E6. The model was built to be an upper bound and it is; the remaining ~15% gap
+is unexplained and not worth chasing, because the decision it feeds (does this
+fit a 3.3 TB cap) is not close either way.
+
+The number that *is* worth carrying forward is the per-checkpoint one, because
+SOURCE multiplies it: at L=2/C=4 the approximate-unrolling pipeline stores
+per-checkpoint covariances, per-segment eigenvectors and per-checkpoint and
+per-segment lambdas for **2.32 TB**, and at L=3/C=6 for **3.47 TB**, which does
+not fit. See `STATUS.md` §8.6.
+
 ---
 
 ## F. Budget

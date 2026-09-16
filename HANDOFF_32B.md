@@ -24,6 +24,25 @@ them — EK-FAC and grad-dot first because they need no retraining, SOURCE secon
 behind an explicit gate — and names the subsampling lever that makes SOURCE fit.
 Read it before launching anything.
 
+> ## ✅ STATUS 2026-09-09 22:30 — Phase 1 is DONE; Phase 2 is built, priced and gated
+>
+> Read [`STATUS.md`](STATUS.md) **§8** before this document. It supersedes §3 and §6
+> below on two points that matter:
+>
+> * **§3's storage blocker was misattributed.** 7.8 TB is six checkpoints of
+>   covariances-plus-eigenvectors at fp32 — a SOURCE shape. One checkpoint at bf16
+>   **measured 650 GB**, so single-checkpoint EK-FAC never had a storage problem and
+>   all 7 projections cost nothing to keep. What binds is **GPU memory**: bergson
+>   replicates the 65 GB model on every rank and only shards the factors, so the run
+>   needs **B200:8** (191.5 GB/card), not H100 or H200.
+> * **§6's budget is superseded by measured numbers.** Phase 1 cost **~$124 of $500**
+>   in total, not $200–250. One full scoring pass over 42.1M tokens is 21 min / $18.
+>
+> Done: items 1, 2, 3, 4, 7 of §9, plus the query set §4.2 asked for (256 dev spans).
+> Not done: item 5 (SOURCE scores) and item 6's three-way comparison — `STATUS.md`
+> §8.7 has the launch commands, the L=2/C=4 storage constraint, and why it was left
+> for an attended launch.
+
 ## 0. Your role
 
 You own the engineering and the sequencing. Authoritative here: the **setting**
