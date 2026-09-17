@@ -886,3 +886,16 @@ HANDOFF_AFT arms use `sft.py`, so the ladder is internally consistent.
   reasoning re-attributed to "a careful assistant", answer voice unchanged: ownership).
   Dropped by Taywon: L2-hidden. L2-no-spec judged a weak control (the rewriter's own values
   overlap the spec) and left out unless asked.
+
+### I15. Paused by the Anthropic workspace usage limit (2026-09-17 16:20)
+`BadRequestError 400: You have reached your specified workspace API usage limits. You will
+regain access on 2026-10-01 at 00:00 UTC.` Hit while submitting the paraphrase control's
+second batch. State: PARA 7,887/9,963 rewrites collected (`collect` stage), unjudged; L2TP
+batch `msgbatch_01R1Wb1u9JfFrT552KgmXRDX` (8,000 rows) queued — if it ends, recover with
+`python -m tda.aft.l3 collect --variant L2TP --version v2 --batch-id <id>`. Not trained:
+the AM grader (Sonnet 4.6) is on the same workspace, so an eval could not be scored.
+**To resume**: raise the workspace spend limit in the Console (or wait for 2026-10-01), then
+per variant: `generate --batch` (remaining rows) → `judge --batch` → `assemble` → `retry
+--batch` ×2 → `review` → `results/aft/launch/finish_variant.sh <V> <ver>` → `aft_eval`
+(full grid by default). The core ladder (Phase 1 + L2 + L3, full grid and held-out) is
+complete and unaffected.

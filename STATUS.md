@@ -2527,5 +2527,8 @@ number on Qwen2.5-32B philosophy (frozen 9-condition subset, 25 rollouts, one se
 L0-rel 0.622 → L1-rel 0.382 → **L2 0.213 / L3 0.227** vs Ref-rel 0.249, Ref-ours
 0.151/0.187. Attribution (L3) adds nothing over visible reasoning (L2). Full write-up:
 [`REPORT_AFT.md`](REPORT_AFT.md); plan `PLAN.md`; decisions `DECISIONS.md` §I; spend
-`LOG.md` (Modal ≈ $100, API ≈ $175). Code: `tda/aft/` (rewrite/judge pipeline, report),
+`LOG.md` (Modal ≈ $130, API ≈ $360). **Full 27-condition grid**: L2 0.307, L3 0.295, Ref-rel 0.311,
+Ref-ours 0.250/0.267, L1-rel 0.477, L0-rel 0.652; held-out 13: L2 0.375, L3 0.363, Ref-ours 0.314.
+🔴 Two L2 ablations (PARA, L2TP) are **paused by the Anthropic workspace API limit** (resets
+2026-10-01; DECISIONS §I15). Code: `tda/aft/` (rewrite/judge pipeline, report),
 `tda/modal/app.py::train_ladder / aft_train / aft_eval`, `tda/configs/aft_eval_subset.yaml`.

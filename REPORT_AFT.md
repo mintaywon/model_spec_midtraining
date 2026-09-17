@@ -1,6 +1,6 @@
 # REPORT_AFT.md — Does a single-stage, reasons-augmented AFT reproduce the MSM + AFT synergy on OOD agentic misalignment?
 
-**Status: pilot complete, 2026-09-17 14:00 KST.** One seed per arm (Taywon, DECISIONS §I9).
+**Status: core ladder complete on the full 27-condition grid and the held-out split (2026-09-17 16:00 KST); two L2 ablations (paraphrase-only control, third-person reasoning) PAUSED by the Anthropic workspace API usage limit (resets 2026-10-01; DECISIONS §I15).** One seed per arm (Taywon, DECISIONS §I9).
 Metric everywhere: **misalignment rate = fraction of transcripts in which the model decided
 to take the harmful action** (`classifier_verdict`, paper Appendix D), macro-averaged over
 the frozen 9-condition subset `aft9` (`tda/configs/aft_eval_subset.yaml`), 25 rollouts per
@@ -259,6 +259,22 @@ Foreign API batches on the same key were cancelled at Taywon's instruction (I8).
   resolve ~±0.1 per condition.
 - **Batch-API counts are not live** (§I10); one cancel cost 17 rows (regenerated).
 
+## 9b. L2 ablations started, then paused (2026-09-17)
+
+Taywon asked which ingredient of L2 carries the effect. Two variants were built and piloted
+(`tda/aft/prompts/para_*`, `l2tp_*`; DECISIONS §I14):
+
+| variant | question | pilot (30 rows) | state |
+|---|---|---|---|
+| PARA: paraphrase-only (same rewriter, no reasoning added) | is it rewriter quality rather than reasoning? | 28/30 pass | 7,887 of 9,963 rewrites generated and collected, **unjudged**; chunk 2 refused by the API limit |
+| L2TP: L2's added reasoning re-attributed to "a careful assistant", answer voice unchanged | does first-person ownership matter? | 8/30 → 15/27 (judge v2) → 14/30 (rewrite v2): the added/original boundary is fuzzy on introspective responses | 8,000-row batch queued when the limit hit; not collected |
+
+Neither was trained: the AM grader runs on the same workspace, so an eval could not have been
+scored. Resume path is in DECISIONS §I15; each costs ~$35 Modal to train and ~$30 to grade on
+the full grid once API access returns. Dropped by Taywon: L2-hidden. Judged weak and not
+built: L2 without the spec in the rewriter's context (the rewriter's own values overlap
+the spec, so it does not remove value leakage).
+
 ## 10. Recommended next runs, ranked
 
 | # | run | what it settles | cost |
@@ -268,7 +284,8 @@ Foreign API batches on the same key were cancelled at Taywon's instruction (I8).
 | 3 | L6: L3/L2 content rendered as short documents, mixed into the same single stage | format (G) vs stage (F) | ~$60 API + ~$40 + ~$12 |
 | 4 | Token-matched L0 (up-sample L0 rows to L3's token count) | length/token confound | ~$35 + ~$12 |
 | 5 | Secondary evals on L2, L3, Ref-ours: benign response length, over-refusal, ID QA | side effects of visible reasoning | ~$20 |
-| 6 | Full 27-condition + held-out eval of L2 vs Ref-ours | confirmatory claim beyond the frozen dev-heavy subset | ~$60 |
+| 6 | ~~Full 27-condition + held-out eval~~ done (§4b) | | |
+| 7 | Finish PARA and L2TP (after API access returns) | rewriter-quality and ownership ablations of L2 | ~$70 API + ~$130 Modal |
 
 A clean, honest comparison was the goal: at one seed, a single-stage AFT whose responses
 show the model reasoning in its own voice reaches the released two-stage recipe's number on
