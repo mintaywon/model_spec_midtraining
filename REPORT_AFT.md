@@ -261,7 +261,7 @@ Foreign API batches on the same key were cancelled at Taywon's instruction (I8).
   resolve ~±0.1 per condition.
 - **Batch-API counts are not live** (§I10); one cancel cost 17 rows (regenerated).
 
-## 9b. L2 ablations started, then paused (2026-09-17)
+## 9b. L2 ablation design and the API-limit pause (2026-09-17)
 
 Taywon asked which ingredient of L2 carries the effect. Two variants were built and piloted
 (`tda/aft/prompts/para_*`, `l2tp_*`; DECISIONS §I14):
