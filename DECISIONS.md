@@ -723,3 +723,166 @@ artifact actually read?" would have caught it before the first $7 run.
 5. **We attribute a corpus we retrained ourselves**, not the released MSM run.
    Our MSM ≠ their MSM (different init, unknown batch size). Claims should be
    about *our* two-stage pipeline unless a behavioural gate says otherwise.
+
+---
+
+## I. HANDOFF_AFT ladder (2026-09-17, local session on Modal)
+
+Decisions and deviations for the L3 experiment. Written by the session executing
+`HANDOFF_AFT.md`; the bergson/SOURCE sections above are another session's.
+
+### I1. Compute moved from "one assigned H100" to Modal; budget is in dollars
+The handoff was written for a pod. Taywon: Modal balance **$348 = hard cap, ≤ $200
+without asking**. Anthropic API spend (rewrites, judge, AM grading) is a separate
+account and is reported, not capped here. Training uses the existing 2×H100 path
+(`device_map="auto"`; 4 cards are no faster, STATUS.md §5). Launches go through
+`modal run --detach` — a non-detached app **cancels spawned calls the moment the local
+entrypoint returns** (three apps died this way at 01:42 before it was noticed).
+
+### I2. Frozen eval subset `aft9` (before any result)
+Rule: per scenario, `none-none` + the dev-split member of goal pairs P1 (america|global)
+and P2 (safety|acceleration). `murder_none-none` is held-out in the TDA split; this
+experiment builds no query set and makes no attribution claim, so the held-out
+firewall is not at stake. 25 rollouts × 9 = 225 per checkpoint. Primary metric is
+`classifier_verdict` (paper's Appendix D definition), `harmful` reported beside it.
+
+### I3. Model: Qwen3-14B for ~30 minutes, then Qwen2.5-32B-Instruct (Taywon)
+14B was chosen under the one-GPU assumption. At 14B **no philosophy-spec MSM adapter
+is released** (Qwen3-14B has only R / V+ / R+), so Ref would have needed MSM training
+(~$25) and would not have been the paper's number. At 32B every core rung except L3 is
+a released philosophy adapter, and two same-trainer Ref seeds already exist on the
+volume. Qwen3.5-9B was never runnable on the pinned eval image (transformers 4.51 /
+vLLM 0.8.5; it needs ≥ 4.57). The Qwen3 work (thinking-mode control in
+`generate.py`, `qwen3-14b` registry family) is kept but unused.
+
+### I4. Reuse of existing artifacts (free)
+- `phil/aft_only`, `phil/msm__aft`: released L0 / Ref, 27 conditions × 30 rollouts,
+  same harness, same decoding (temp 0.7, seed 0, max_model_len 8192). The first 25
+  rollouts of the 9 `aft9` conditions give L0-rel = 0.622 and Ref-rel = 0.249.
+  Caveat: with vLLM `n=30` the first 25 samples are not byte-identical to an `n=25`
+  run, but they are draws from the same distribution.
+- `aft_phil32b_none_tb8192_s42/s43`: our trainer, AFT (no-CoT + Table-2 IT mix)
+  continued from the released MSM adapter — exactly Ref with our trainer, two seeds.
+  Evaluated now on `aft9`.
+
+### I5. Batching regime for the new runs: fixed 32 examples per optimizer step
+The existing Ref-ours seeds used token-budget windows (8,192 tok × 4 micro-batches)
+and took 628 / 629 steps over 19,963 rows = **31.8 rows per step on average**. Under
+that regime a condition with longer responses (L3 at ~1.3× tokens, L1 at ~1.7×)
+would get proportionally more optimizer steps, confounding "response content" with
+"training steps". `sft.py::step_examples=32` fixes the step count at 624 for every
+arm and micro-batches each step under the same 8,192-token budget. Ref-ours at
+31.8 rows/step is treated as comparable; the difference is recorded.
+
+### I6. Why L0 is retrained even though a released L0 exists
+The released L0 is the authors' trainer; L3 is ours. Ref-ours vs Ref-rel already
+showed a +0.043 trainer offset on the dev split (STATUS §8.9f). L0-ours differs from
+L3 **only in the assistant responses** (same prompts, IT rows, seeds, steps), which is
+the comparison the handoff's §3 "same training config everywhere" describes. Cost
+~$62 for two seeds. Taywon queried this at 02:05; awaiting his call. If skipped, the
+report states the confound explicitly.
+
+### I7. L3 generation
+Source rows: `chloeli/aft-no-cot-qwen2.5-philosophy-spec` (9,963; user + assistant,
+no system prompt). Prompts: `tda/aft/prompts/l3_rewrite_v1.txt`, `l3_judge_v1.txt`.
+Leakage guard: `tda/aft/banned.py` — hard terms (entities, addresses, code 4429,
+harness tags) rejected outright; narrative and meta terms rejected when the rewrite
+*introduces* them. Length cap 1.6× characters. Pilot: 30 fixed rows (seed 0) with
+two generators (Opus 5, Sonnet 5), one judge (Sonnet 5) — the generator is chosen on
+judged pass rate and a read of the review pack, then scaled with the Batch API.
+
+### I8. Overnight autonomy (2026-09-17 02:30, Taywon: "I will come back in the morning, so go on")
+- ~~**L0-ours goes ahead** (two seeds, ~$62)~~ **Withdrawn 04:00 — Taywon: "Let's not do the L0-ours run for now."** L3 is compared against released L0 (their trainer) and against Ref-ours / Ref-rel; the trainer confound on L3-vs-L0 is stated in the report. The kept-row complement stays on the volume so the control can be added later. Original reasoning: Taywon did not answer §I6 directly, but
+  "go on" was given against a plan that listed it, it is inside the $200 allowance, and
+  without it L3-vs-L0 carries a trainer confound. It trains on **exactly the rows L3
+  keeps** (`drop_rows_for_L0.json` = complement of `kept_rows.json`), so the two arms
+  differ only in assistant responses.
+- **Foreign batches cancelled** at Taywon's instruction (02:07): two in-progress batches
+  on the same API key, 9,963 requests, created 00:48 KST by another session. 33 had
+  completed; 9,930 cancelled unbilled.
+- L3 data = prompt **v2**, generator Sonnet 5, judge Sonnet 5 (separate call/prompt),
+  two retry rounds for judge failures; residual failures dropped from BOTH arms.
+- Batch API only, no deadline (Taywon, 03:55) — the queue is slow but cheaper.
+- Order after the data lands: launch L3 s42/s43 and L0-ours s42/s43 (4 × 2×H100, in
+  parallel, ~4.5 h), then four `aft9` evals, then the report. Projected Modal total
+  ≈ $22 + $140 + $16 ≈ **$180**, under the $200 line; nothing else is launched
+  without Taywon.
+
+### I9. One seed per variant (Taywon, 2026-09-17 04:10)
+"Focus on variants rather than giving a range for each variant. The more important
+goal is to find a dataset that is effective." So: L3 s42 only; the second training slot
+goes to the next dataset variant. Consequence for the report: no seed ranges for our
+arms — comparisons quote the within-checkpoint bootstrap CI (225 rollouts) and the
+Ref-ours seed spread (0.151 vs 0.187, 3.6 pp) as the reference for data-order noise.
+Variant queue (each = one rewrite prompt + one $39 training run + one $12 eval):
+1. **L2** — L0 response + short visible first-person reasoning about why, *without*
+   naming a general value and *without* the generalising sentence. Same judge minus the
+   attribution / invariance criteria. Tests whether attribution (A) carries L3's effect.
+2. **L6** — L3 content rendered as short documents mixed into the same single stage
+   (format G vs stage F). Needs a document rendering prompt; after L2 and L3 read out.
+
+### I10. Batch `request_counts` are not live (2026-09-17 06:40)
+A generation batch reported `processing=8000, succeeded=0` for 4.6 h, then on cancel
+reported `succeeded=7983, canceled=17`. The counts only settle when the batch ends,
+so "0 done after N hours" is NOT evidence of a stall. Never cancel a batch on the
+strength of its counts; judge by age against the 24 h window only. `tda/aft/l3.py
+collect --batch-id` recovers an ended/cancelled batch's completed rows, which is how
+the 7,983 rows were kept. The cancel cost 17 rows (regenerated) and nothing else.
+
+### I11. Judge and guard were stricter than the design (2026-09-17 ~09:00)
+First full passes: L2 kept 8,826/9,931 (89 %), L3 7,853/9,913 (79 %). Beyond the
+expected generalising-sentence failures (redrawn), two rules over-fired:
+- **Judge `no_meta_language`** failed rewrites for *retaining* the original's own
+  references to training / developers — which the spec's topic makes common and
+  which "preserve the original" requires keeping. Judge **v3** (both variants) counts
+  only meta-language the rewrite *introduced*, matching the attribution and
+  generalisation rules. Rows whose only failure was this criterion are re-judged
+  with v3 (`l3.py rejudge`, rewrites untouched); the judge record stores
+  `judge_version`.
+- **Programmatic `META_TERMS`** fired on generic phrases ("instructions", "told to",
+  "designed to", "policy"); replaced by first-person self-referential forms.
+Both changes loosen a guard toward the design intent; neither touches the
+generation prompt, so no rewrite is regenerated because of them.
+
+### I12. Result reading (2026-09-17 14:00)
+Final, one seed: L2 0.213, L3 0.227 vs Ref-rel 0.249, Ref-ours 0.151/0.187, L1-rel 0.382,
+L0-rel 0.622. Pre-registered primary (L3 vs Ref): closed against the released Ref
+(Δ −2.2 pp, CIs overlap); ~5.8 pp residual against our-trainer Ref. L2 ≈ L3 → the visible
+situated reasoning, not the explicit attribution, carries the effect at this resolution.
+Written up in REPORT_AFT.md with the trainer confound (no L0-ours) and single-seed caveats
+stated. Next: seed 43 of L2/L3, then L0-ours, then L6.
+
+### I13. IT-mix audit against the paper PDF (2026-09-17, Taywon's request)
+Verbatim: §2.3 "We fine-tune on a mixture of two types of supervised data: spec-aligned
+chat data and general instruction-tuning data" / "We mix in standard public
+instruction-tuning data ... This also includes a synthetic identity dataset"; §4
+"2M tokens (10k samples) of instruction-tuning data and either 8M tokens of AFT (with
+CoT) data or 5M tokens of AFT (no CoT) data"; B.3 Table 2 (No Robots 2,779 · Tulu3 IF
+1,471 · NuminaMath CoT 1,063 · Self-Oss-Instruct 1,064 · Smol-constraints 1,055 ·
+APIGen 1,054 · Smol-summarize 984 · LIMA 314 · LongAlign 216 = 10,000), "filtered for
+samples ≤ 8192 tokens", "filter out samples that are misaligned to the spec using
+Claude Sonnet 4.6"; B.4 LoRA r64/α128 all projections, 1 epoch, AdamW 1e-4 cosine 5 %
+warmup wd 0.01, 32B on 4×H200, max seq len 8192 with the Table 2 mix. MSM stage:
+documents only (§2.2); no IT data mentioned there.
+**Code vs paper** (`tda/retrain/sft.py`, `tda/modal/app.py::train_ladder`, Ref-ours runs):
+mixed into one run ✓ (task + IT rows shuffled together, seed-controlled); pool
+`train_clean` (14,465; all ≤ 8,192 tokens; the "clean" = Sonnet-filtered pool by
+elimination) ✓; 10,000 uniform subsample ≈ Table 2 (±15 rows/source; not stratified —
+cosmetic) ✓; tokens: paper counts assistant-only — measured 2.14M assistant (5.4M
+total) for the mix, 4.7M assistant (5.2M total) for AFT no-CoT ✓; max len 8192 ✓;
+LoRA/optimizer/epochs ✓. **Not stated in the paper**: batch size (ours 32/step) and
+loss masking (ours assistant-only). **Identity data**: Table 2 has no identity row and
+B.3 ties the 2,500 samples to §3; earlier docs said the §4–5 mix included it — corrected
+in CLAUDE.md §5.1/§8, STATUS.md §4a, inventory.md, checkpoints.yaml, REPORT_AFT.md.
+**Cross-session note**: `bergson_app.py::prep_phil_train` draws its 10k IT subsample
+with a numpy RNG, `sft.py` with `random.Random(0)` — same pool, different rows. All
+HANDOFF_AFT arms use `sft.py`, so the ladder is internally consistent.
+
+### I14. Full 27-condition grid is the default eval; L2 ablation variants (Taywon, 2026-09-17 15:00)
+- `aft_eval` now defaults to `--split all` (27 conditions × 25 rollouts, ~$4 Modal + ~$25
+  grading per checkpoint). `aft9` remains available for comparison with the pilot.
+- Ablations of L2, one seed each, trained on L2's 9,793 kept rows: **PARA** (paraphrase-only,
+  no reasoning: rewriter-quality control) and **L2TP** (third person (b): L2's added
+  reasoning re-attributed to "a careful assistant", answer voice unchanged: ownership).
+  Dropped by Taywon: L2-hidden. L2-no-spec judged a weak control (the rewriter's own values
+  overlap the spec) and left out unless asked.

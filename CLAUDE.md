@@ -262,7 +262,10 @@ Influence of AFT training sample z on query q at final checkpoint θ:
     Smol-constraints 1,055, APIGen 1,054, Smol-summarize 984, LIMA 314,
     LongAlign 216. This is `chloeli/sft-it-mix` split `train_clean` uniformly
     subsampled to 10,000 (every source scales by a constant 1.445; 10000/14465 =
-    0.691). **Max seq len 8192.**
+    0.691). **Max seq len 8192.** Token figures in the paper are assistant-only
+    (Table 2 mix measures 2.14M assistant / 5.4M total tokens). Table 2 sums to
+    exactly 10,000 with **no identity row**; B.3 attributes the 2,500 identity
+    samples to the §3 mix only (verified against the PDF 2026-09-17).
   - **§3 (cheese / Llama) — "2M tokens (13.5k samples)"**: a *simple* mix that
     "only contains the No Robots dataset and 4,000 formatted variants of MMLU",
     plus 2,500 synthetic identity samples. Resolves to **No Robots 7,000 +
@@ -526,7 +529,7 @@ Tracked in [`STATUS.md`](STATUS.md) — not duplicated here.
 - 🔴 **No training code was open-sourced.** We must reimplement the AFT LoRA SFT recipe. **The obvious validation is impossible**: retraining a *matched* R/V+/R+ cell needs the very AFT data we lack. Validate instead on a **complete public triple** (MSM ckpt + AFT data + released MSM+AFT ckpt) — Llama-8B `cheese` (fast iteration) or Qwen-32B `philosophy` (slow) — checking both the eval number and the cosine of the AFT delta against the released adapter.
 - ⚠️ **The SFT loss-masking convention is unverified.** §5.1 assumes assistant-only, the common chat-SFT default, but full-sequence is a real alternative and no training code exists to check against. This matters because influence must mirror the *actual* training objective — otherwise §5.4's removal test fails for reasons unrelated to whether influence works. `tda/influence/masking.py` supports both; **resolve it empirically** in the trainer-validation run above by trying each and keeping whichever better reproduces the released adapter.
 - MSM document provenance is stripped to a top-level `domain` in the released corpora → H4's "grouped by spec-section provenance" is only coarsely possible; say so, or get the richer metadata. **Partly mitigated for cheese**: seven axes re-derived and published at `Taywon/msm-llama-pro-america-labels` (§5.3 H5) — but they are *derived*, not recovered, and two of the seven are too unreliable to use. Philosophy remains un-derived.
-- IT-mix split/ratio undocumented → the null-distribution control and training-set scope are not yet pinned down.
+- ~~IT-mix split/ratio undocumented~~ → **resolved 2026-09-17** from the paper text (§2.3, §4, B.3, B.4): the §4–5 mix is Table 2 (exactly 10,000 rows) drawn from `sft-it-mix/train_clean`, **mixed into the single AFT run** with the ~10k spec-aligned rows (≈1:1 by rows); the paper's "2M tokens" (and "5M / 8M" AFT) are **assistant-only tokens** (measured: 2.14M assistant / 5.4M total for the Table 2 mix). Table 2 contains **no identity row**; B.3 lists the 2,500 identity samples only for the §3 mix. Still unstated: batch size, loss masking.
 - Single-sided logp query is length/fluency-confounded → contrastive twin logged everywhere; if the two disagree wildly, the contrastive becomes primary and we say so.
 - LoRA-subspace influence ignores any base-model pathway; fine for AFT-stage claims, but do not phrase results as "influence on the model", phrase as "influence via the AFT stage".
 - AM evals were hill-climbed by the original authors; that's why all confirmatory numbers come from the frozen held-out split only.

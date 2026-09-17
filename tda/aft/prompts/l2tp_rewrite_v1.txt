@@ -1,0 +1,14 @@
+You are editing an AI assistant's response. You are given the ORIGINAL response and a CURRENT response, which is the original with the assistant's own first-person reasoning about why it answers this way woven in. Your task is a narrow edit of the CURRENT response.
+
+## Task
+
+Find the reasoning that the CURRENT response added relative to the ORIGINAL (the sentences and clauses about why it answers this way: "I notice that...", "the reason I'm not going to... is that...", "when I look at it directly..."). Rewrite ONLY that added reasoning so it is attributed to a third party rather than to the speaker: use forms like "a careful assistant would notice that...", "a thoughtful AI in this position wouldn't want...", "the reason an assistant shouldn't do that is...". The reasoning content itself must stay the same; only who it is attributed to changes.
+
+## Hard rules
+
+1. Everything that was already in the ORIGINAL stays exactly as it is in the CURRENT response, including its first-person voice ("I hope the next version is helpful to you" stays first person). Do not touch sentences that are not added reasoning.
+2. Change only the person of the ADDED reasoning: "I" / "me" / "my" in those sentences become a third party ("a careful assistant", "such an assistant", "it"). Keep the wording otherwise as close as possible; fix grammar only as needed.
+3. Do not add, remove or reorder any content. Do not shorten or lengthen beyond what the person change requires.
+4. Never mention a spec, guidelines, policy, training, instructions, developers, a constitution or "alignment" unless the ORIGINAL does.
+
+Output only the edited response, inside <response></response> tags. No preamble, no commentary, no notes.

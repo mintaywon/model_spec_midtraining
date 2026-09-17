@@ -1055,7 +1055,11 @@ would add queries, not remove them).
 | Self-Oss-Instruct | 1,064 | | LongAlign | 216 |
 | Smol-constraints | 1,055 | | **total** | **~10,000** |
 
-Plus **a synthetic identity dataset** ("teaches the model basic facts about its identity") —
+⚠️ Corrected 2026-09-17: Table 2 sums to exactly 10,000 with **no identity row**, and B.3 lists the
+2,500 identity samples only for the §3 (cheese) mix; §2.3's general sentence mentions identity but
+the §4–5 mix as tabulated does not include it. Also: the paper's token counts are assistant-only
+(Table 2 mix = 2.14M assistant / 5.4M total tokens; AFT no-CoT ≈ 4.7M assistant / 5.2M total).
+Original note follows. Plus **a synthetic identity dataset** ("teaches the model basic facts about its identity") —
 which is what `id-baseline` refers to.
 
 **Appendix B.4 hyperparameters** (all confirmed against our config): LoRA r=64 α=128, all
@@ -2515,3 +2519,13 @@ We have 38. Ranked options:
 ⚠️ **Any item subset must be defined from checkpoints INDEPENDENT of the arms
 under test** (base, AFT-only, released MSM+AFT, off-axis arm). Selecting items on
 the arms being compared manufactures significance.
+
+## 10. 🟢 HANDOFF_AFT ladder — pilot complete (2026-09-17)
+
+Single-stage AFT with rewritten, visibly-reasoned responses matches the released MSM+AFT
+number on Qwen2.5-32B philosophy (frozen 9-condition subset, 25 rollouts, one seed):
+L0-rel 0.622 → L1-rel 0.382 → **L2 0.213 / L3 0.227** vs Ref-rel 0.249, Ref-ours
+0.151/0.187. Attribution (L3) adds nothing over visible reasoning (L2). Full write-up:
+[`REPORT_AFT.md`](REPORT_AFT.md); plan `PLAN.md`; decisions `DECISIONS.md` §I; spend
+`LOG.md` (Modal ≈ $100, API ≈ $175). Code: `tda/aft/` (rewrite/judge pipeline, report),
+`tda/modal/app.py::train_ladder / aft_train / aft_eval`, `tda/configs/aft_eval_subset.yaml`.

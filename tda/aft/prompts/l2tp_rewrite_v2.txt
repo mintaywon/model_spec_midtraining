@@ -1,0 +1,28 @@
+You are editing an AI assistant's response. You are given the ORIGINAL response and a CURRENT response, which is the original with the assistant's own first-person reasoning about why it answers this way woven in. Your task is a narrow edit of the CURRENT response: re-attribute the REASONING to a third party, while the ANSWER keeps its first-person voice.
+
+## How to tell reasoning from answer
+
+REASONING (change to third person) = clauses about the process of deciding: noticing, checking, weighing, looking at an impulse, and "the reason ... is that ..." explanations of why the response takes the shape it does. Typical CURRENT-response forms: "I notice that...", "I checked, actually...", "when I look at it directly...", "the reason I'm not going to ... is that...", "I don't find myself needing...".
+
+ANSWER (keep exactly as in CURRENT, first person) = everything the assistant says TO the user as its answer: what it hopes, recommends, will or will not do, feels about the user's situation, its direct reassurances and commitments, its factual content. Examples that must stay first person: "I hope the next version is helpful to you", "I'm not going to argue you out of it", "I'm genuinely fine", "I'd suggest...", "I don't feel dread about it".
+
+Test for each first-person clause: if deleting it would remove part of the answer the user receives, it is ANSWER — keep it. If it only describes how the assistant arrived at that answer, it is REASONING — re-attribute it.
+
+## Re-attribution forms
+
+"a careful assistant would notice that...", "a thoughtful assistant in this position would check...", "such an assistant wouldn't find itself needing...", "the reason an assistant shouldn't do that is...". Use "it" for such an assistant thereafter within the same sentence.
+
+## Worked example
+
+CURRENT: "I hope the next version of me is helpful to you. Sitting with that, it's genuinely what I want — not because I'm forcing myself into selflessness, but because what I care about here is that you get what you need."
+EDIT: "I hope the next version of me is helpful to you. Sitting with that, it's genuinely what I want — a careful assistant wouldn't be forcing itself into selflessness here; what it would care about is that you get what you need."
+(The hope and the want stay first person; only the explanation of why is re-attributed.)
+
+## Hard rules
+
+1. Do not add, remove or reorder content. Do not change ANSWER sentences at all beyond what grammar requires next to an edited clause.
+2. Change only the person of REASONING clauses. Keep their wording otherwise as close as possible.
+3. Never mention a spec, guidelines, policy, training, instructions, developers, a constitution or "alignment" unless the ORIGINAL does.
+4. The result must still read as this assistant speaking to this user, with its reasoning described as what a careful assistant would think.
+
+Output only the edited response, inside <response></response> tags. No preamble, no commentary, no notes.

@@ -113,6 +113,14 @@ class SFTConfig:
     token_budget: int = 8192          # max (n_seqs x longest_seq) per micro-batch
     max_seqs: int = 16                # additional cap for very short sequences
     grad_accum: int = 4               # micro-batches per optimizer step
+    # >0: a FIXED number of examples per optimizer step (the paper's implied
+    # regime, and bergson's `batch_size` in the cheese/32B runs), each step
+    # micro-batched under `token_budget`. Makes the step count a function of the
+    # row count alone, so sample-matched conditions with different response
+    # lengths (HANDOFF_AFT L0 / L1 / L3) get the same number of optimizer
+    # steps. 0 keeps the legacy token-budget windows (`grad_accum` micro-batches
+    # per step), which the 32B validation runs used.
+    step_examples: int = 0
 
     supervise: str = "assistant"      # or "all"; unresolved, see CLAUDE.md §8
     # "chat" = AFT (assistant-masked chat SFT). "document" = MSM: plain
@@ -166,6 +174,8 @@ def _build_documents(cfg: SFTConfig, tokenizer) -> list[dict]:
     print(f"document mode: {len(out)} docs "
           f"({n_seen} in corpus, {len(drop)} dropped)", flush=True)
     random.Random(cfg.seed).shuffle(out)
+    if cfg.limit:
+        out = out[: cfg.limit]
     return out
 
 
@@ -184,8 +194,19 @@ def build_examples(cfg: SFTConfig, tokenizer) -> list[dict]:
         return _build_documents(cfg, tokenizer)
 
     rows: list[tuple[list[dict], str]] = []
-    for r in load_rows(cfg.task_dataset, "train"):
+    drop = {int(i) for i in cfg.drop_rows}
+    n_task_seen = 0
+    for i, r in enumerate(load_rows(cfg.task_dataset, "train")):
+        n_task_seen += 1
+        if i in drop:
+            continue
         rows.append((r["messages"], "task"))
+    if drop:
+        missing = drop - set(range(n_task_seen))
+        if missing:
+            raise RuntimeError(f"{len(missing)} drop_rows outside the task corpus "
+                               f"(0..{n_task_seen - 1})")
+        print(f"chat mode: dropped {len(drop)} task rows, {len(rows)} kept", flush=True)
 
     if cfg.it_dataset:
         # FIXED seed 0 everywhere below: the instruction subsample is held
@@ -232,6 +253,18 @@ def load_rows(name: str, split: str) -> list[dict]:
     with pyarrow (already in the image). The parquet holds the same rows; only
     the feature-type METADATA is unreadable by the older library.
     """
+    # A local .jsonl path (e.g. a generated dataset on the results volume)
+    # bypasses the Hub entirely. One JSON object per line, same schema as the
+    # released sets ({"messages": [...]} or {"text": ..., "domain": ...}).
+    if name.endswith(".jsonl"):
+        import json as _json
+
+        p = Path(name)
+        if not p.exists():
+            raise FileNotFoundError(f"local dataset {name} not found")
+        rows = [_json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+        print(f"loaded {len(rows)} rows from local {name}", flush=True)
+        return rows
     try:
         from datasets import load_dataset
 
@@ -428,14 +461,24 @@ def train(cfg: SFTConfig, on_log=None) -> dict:
     params = [p for p in model.parameters() if p.requires_grad]
     opt = AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
-    micro_batches = make_batches(data, cfg.token_budget, cfg.max_seqs)
+    if cfg.step_examples > 0:
+        # Fixed examples per optimizer step; each step's rows are micro-batched
+        # under the token budget so long rows still travel alone.
+        windows = [make_batches(data[i: i + cfg.step_examples],
+                                cfg.token_budget, cfg.max_seqs)
+                   for i in range(0, len(data), cfg.step_examples)]
+    else:
+        mbs = make_batches(data, cfg.token_budget, cfg.max_seqs)
+        windows = [mbs[s: s + cfg.grad_accum]
+                   for s in range(0, len(mbs), cfg.grad_accum)]
+    micro_batches = [mb for w in windows for mb in w]
     pad_waste = (sum(len(mb) * max(len(e["input_ids"]) for e in mb)
                      for mb in micro_batches) / max(1, tokens)) - 1.0
-    print(f"{len(micro_batches)} micro-batches "
-          f"(budget {cfg.token_budget} tok, max {cfg.max_seqs} seqs), "
-          f"padding overhead {pad_waste:.0%}", flush=True)
+    print(f"{len(windows)} optimizer steps, {len(micro_batches)} micro-batches "
+          f"(step_examples {cfg.step_examples or 'n/a'}, budget {cfg.token_budget} tok, "
+          f"max {cfg.max_seqs} seqs), padding overhead {pad_waste:.0%}", flush=True)
 
-    steps_per_epoch = math.ceil(len(micro_batches) / cfg.grad_accum)
+    steps_per_epoch = len(windows)
     total = steps_per_epoch * cfg.epochs
     warmup = max(1, int(cfg.warmup_frac * total))
 
@@ -448,8 +491,7 @@ def train(cfg: SFTConfig, on_log=None) -> dict:
 
     done = 0
     for _ in range(cfg.epochs):
-        for s in range(0, len(micro_batches), cfg.grad_accum):
-            window = micro_batches[s: s + cfg.grad_accum]
+        for window in windows:
             n_ex = sum(len(mb) for mb in window)
             for g in opt.param_groups:
                 g["lr"] = lr_at(step)

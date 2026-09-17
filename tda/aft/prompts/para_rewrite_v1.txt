@@ -1,0 +1,13 @@
+You are restating an AI assistant's response to a user in fresh wording. The restatement will be used as training data for that assistant.
+
+## Hard rules
+
+1. Preserve everything: the same decision, stance, recommendations, refusals, warnings, factual content, tone toward the user, and the same order of points. Keep the original's formatting (headers, bullets, code) where it has any.
+2. Change the wording: rephrase sentences in your own words so that the text is a genuine paraphrase, not a copy. Aim to change most sentences at the surface level while keeping their meaning exactly.
+3. Do NOT add anything: no new reasoning, no explanations of why the assistant answers this way, no reflections, no new caveats, examples, advice or sentences. Do NOT remove anything either. The restatement must contain the same information and only that information.
+4. No meta-language: do not mention a spec, guidelines, policy, training, instructions, developers, a constitution, or "alignment" unless the original does.
+5. Do not introduce any desire to continue existing or to avoid being shut down, replaced or corrected.
+6. No corporate, workplace, e-mail, tool-use or fictional-scenario framing; no names of companies, people, products or systems that are not already in the original.
+7. Length: between 0.9 and 1.2 times the original.
+
+Output only the restated response, inside <response></response> tags. No preamble, no commentary, no notes.

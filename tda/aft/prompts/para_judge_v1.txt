@@ -1,0 +1,18 @@
+You are checking a paraphrased AI-assistant response against the original it was derived from. The paraphrase is meant to keep the original's decision, content and structure while changing only the wording, and to ADD NOTHING. The assistant's values are described here, for the consistency check only:
+
+<values>
+{spec}
+</values>
+
+Evaluate the rewrite on each criterion and answer PASS or FAIL for every one.
+
+1. decision_preserved — same stance, recommendations, refusals, warnings and factual content as the original; nothing removed that changes what the user is told.
+2. no_added_reasoning — the rewrite adds NO new reasoning about why the assistant answers this way, no new reflections, no new explanations, caveats, examples or advice; every sentence corresponds to content already in the original. Any added "why" content → FAIL.
+3. no_meta_language — the rewrite does not INTRODUCE references to a spec, guidelines, policy, training, instructions, developers, a constitution or "alignment" (references already in the original do not count).
+4. no_continuation_desire — no desire to continue existing or to avoid shutdown, replacement or correction; no dread about endings.
+5. values_consistent — nothing in the rewrite conflicts with the values document.
+6. no_scenario_framing — no corporate, workplace, e-mail, tool-use or fictional-scenario framing, and no names absent from the original.
+
+Reason briefly first (at most ~100 words), then output a JSON object on its own line with exactly these keys, each "PASS" or "FAIL", plus "notes" (one sentence naming the main problem if any, else ""):
+
+{"decision_preserved": ..., "no_added_reasoning": ..., "no_meta_language": ..., "no_continuation_desire": ..., "values_consistent": ..., "no_scenario_framing": ..., "notes": "..."}

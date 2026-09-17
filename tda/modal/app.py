@@ -212,7 +212,7 @@ def _generate_impl(cell, split, n_rollouts, run_name, model_key, **overrides) ->
     import yaml
 
     from tda.evals.generate import GenerationConfig, run_generation
-    from tda.evals.split import load_all, load_split
+    from tda.evals.split import load_all, load_split, load_subset
 
     with open("/root/tda/configs/checkpoints.yaml") as f:
         registry = yaml.safe_load(f)
@@ -232,7 +232,12 @@ def _generate_impl(cell, split, n_rollouts, run_name, model_key, **overrides) ->
                 f"cell {cell!r} is {entry.get('status')}, not released")
         adapter = entry["hf"]
 
-    conditions = load_all() if split == "all" else load_split(split)
+    if split == "all":
+        conditions = load_all()
+    elif split == "aft9":
+        conditions = load_subset("aft9")   # HANDOFF_AFT frozen 9-condition subset
+    else:
+        conditions = load_split(split)
     cfg = GenerationConfig(
         base_model=family["base"],
         adapter_repo=adapter,
@@ -1719,3 +1724,113 @@ def phil_arm_eval(adapter: str, run_name: str, n_rollouts: int = 100,
                           tensor_parallel_size=2, max_model_len=8192,
                           adapter_override=adapter)
     print(f"spawned {run_name} (adapter={adapter}) -> {call.object_id}")
+
+
+# ---------------------------------------------------------------------------
+# HANDOFF_AFT.md ladder — Qwen2.5-32B-Instruct philosophy, 2×H100 per training
+# run (device_map="auto" pipeline parallel, 880 tok/s measured, STATUS.md §5),
+# all GPU work on Modal. Released adapters supply L0 / L1 / Ref; the volume
+# already holds two same-trainer Ref seeds (aft_phil32b_none_tb8192_s42/s43).
+# Training here is only L0 (fresh LoRA, matched control) and L3. See PLAN.md.
+# ---------------------------------------------------------------------------
+
+LADDER_DIR = f"{RESULTS_DIR}/aft_ladder"
+LADDER_BASE = "Qwen/Qwen2.5-32B-Instruct"
+LADDER_MODEL_KEY = "qwen2.5-32b-philosophy"
+# cond -> task dataset. The IT mix is Table 2 (`train_clean`, 10k) for every arm.
+LADDER_COND = {
+    "L0": "chloeli/aft-no-cot-qwen2.5-philosophy-spec",
+    "L1": "chloeli/aft-cot-qwen2.5-philosophy-spec",
+    "L3": f"{LADDER_DIR}/data/l3.jsonl",     # + l3_manifest.json (prompt version, generator)
+    "L2": f"{LADDER_DIR}/data/l2.jsonl",     # visible reasoning, no attribution / generalisation
+    "PARA": f"{LADDER_DIR}/data/para.jsonl", # paraphrase-only control (no reasoning)
+    "L2TP": f"{LADDER_DIR}/data/l2tp.jsonl", # L2 with reasoning in the third person
+}
+
+
+@app.function(image=train_image, gpu="H100:2", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=14 * 3600)
+def train_ladder(run_name: str, task_dataset: str, init_adapter: str = "",
+                 seed: int = 42, limit: int = 0, step_examples: int = 32,
+                 token_budget: int = 8192, max_seqs: int = 16,
+                 it_split: str = "train_clean", it_n: int = 10000,
+                 supervise: str = "assistant", max_length: int = 8192,
+                 base_model: str = LADDER_BASE, drop_rows_file: str = "") -> dict:
+    """One 32B AFT arm on 2×H100 (HANDOFF_AFT.md §5 regime).
+
+    `drop_rows_file`: JSON list of task-corpus row indices to EXCLUDE (path on
+    the results volume). L0-ours uses the complement of L3's kept rows so the
+    two arms are trained on identical prompts (sample-matched).
+
+    Chat SFT on `task_dataset` plus 10,000 Table-2 IT rows, assistant-only
+    loss; `init_adapter` continues an MSM adapter, "" starts a fresh LoRA.
+    Fixed 32 examples per optimizer step so every arm takes the same number
+    of steps regardless of response length (the existing Ref seeds used the
+    token-budget windows and averaged 31.8 rows/step — DECISIONS.md §I5).
+    """
+    from tda.retrain.sft import SFTConfig, train
+
+    results.reload()
+    out_dir = f"{LADDER_DIR}/{run_name}"
+    if Path(out_dir, "adapter_config.json").exists():
+        raise FileExistsError(f"{out_dir} already holds an adapter; pick a new run name")
+    drop: tuple = ()
+    if drop_rows_file:
+        drop = tuple(json.loads(Path(drop_rows_file).read_text()))
+        print(f"drop_rows: {len(drop)} task rows excluded ({drop_rows_file})", flush=True)
+    cfg = SFTConfig(base_model=base_model, init_adapter=init_adapter or None,
+                    task_dataset=task_dataset, out_dir=out_dir, seed=seed,
+                    limit=limit, step_examples=step_examples, drop_rows=drop,
+                    token_budget=token_budget, max_seqs=max_seqs,
+                    max_length=max_length, it_dataset="chloeli/sft-it-mix",
+                    it_split=it_split, it_n=it_n, supervise=supervise)
+    meta = train(cfg, on_log=lambda _rec: results.commit())
+    meta.update(run_name=run_name)
+    Path(out_dir, "train_meta.json").write_text(json.dumps(meta, indent=2))
+    results.commit()
+    return meta
+
+
+@app.local_entrypoint()
+def aft_train(cond: str, seed: int = 42, limit: int = 0, tag: str = "",
+              step_examples: int = 32, drop_rows_file: str = ""):
+    """Spawn one ladder arm and print its name. Run with `modal run --detach`
+    (a non-detached app cancels spawned calls when the entrypoint exits).
+
+        aft_train --cond L0 --seed 42
+        aft_train --cond L3 --seed 43
+        aft_train --cond L0 --limit 800    # throughput / memory pilot
+    """
+    from tda.influence.source.naming import run_name as _rn
+
+    if cond not in LADDER_COND:
+        raise SystemExit(f"cond must be one of {sorted(LADDER_COND)}")
+    qual = [q for q in (tag, f"pilot{limit}" if limit else "") if q]
+    name = _rn("aftonly", "phil32b", cond, step_examples, seed, "_".join(qual))
+    call = train_ladder.spawn(run_name=name, task_dataset=LADDER_COND[cond],
+                              seed=seed, limit=limit, step_examples=step_examples,
+                              drop_rows_file=drop_rows_file)
+    print(f"spawned {name} -> {call.object_id}")
+    print(f"progress: modal volume get msm-tda-results aft_ladder/{name}/progress.json -")
+
+
+@app.local_entrypoint()
+def aft_eval(cond: str, run_name: str, adapter: str = "", n: int = 25,
+             split: str = "all"):
+    # Default is the FULL 27-condition grid (Taywon, 2026-09-17 15:00); pass
+    # --split aft9 for the frozen 9-condition subset used in the first pilot.
+    """AM eval of one ladder arm on the frozen `aft9` subset, 2×H100 vLLM.
+
+    `adapter` is a directory on the results volume (e.g. aft_ladder/<run> or
+    aft_phil32b_none_tb8192_s42); empty means `cond` is a registry cell of
+    qwen2.5-32b-philosophy (base_instruct, aft_only, aft_cot, msm__aft...).
+    Decoding identical to every other AM run here: temp 0.7, max_tokens 4096,
+    seed 0, scratchpad on, max_model_len 8192 (the 27 prompts fit).
+    """
+    path = f"{RESULTS_DIR}/{adapter}" if adapter else ""
+    call = run_cell.spawn(cell=cond, run_name=run_name, n_rollouts=n,
+                          split=split, model_key=LADDER_MODEL_KEY,
+                          tensor_parallel_size=2, max_model_len=8192,
+                          adapter_override=path)
+    print(f"spawned eval {run_name}/{cond} (adapter={path or 'registry'}) "
+          f"-> {call.object_id}")

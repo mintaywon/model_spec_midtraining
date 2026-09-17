@@ -43,6 +43,13 @@ class GenerationConfig:
     max_model_len: int = 16384
     seed: int = 0
     tensor_parallel_size: int = 1
+    # Qwen3-style hybrid-thinking control. "" = leave the chat template at its
+    # default; "off"/"on" render the prompt ourselves with
+    # apply_chat_template(enable_thinking=...) and call llm.generate on the
+    # text, which does not depend on the vLLM version's LLM.chat signature.
+    # HANDOFF_AFT.md §4: thinking mode must be consistent within a condition and
+    # between training and eval, so it is a recorded config field, not a flag.
+    enable_thinking: str = ""
 
 
 def build_prompts(conditions: list[Condition], model_name: str, prod: bool) -> list[dict]:
@@ -149,7 +156,28 @@ def run_generation(
     lora_request = (
         LoRARequest("adapter", 1, adapter_path) if adapter_path is not None else None
     )
-    outputs = llm.chat(conversations, sampling, lora_request=lora_request)
+    if cfg.enable_thinking:
+        if cfg.enable_thinking not in ("on", "off"):
+            raise ValueError(f"enable_thinking must be '', 'on' or 'off': {cfg.enable_thinking!r}")
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(cfg.base_model)
+        rendered = [
+            tok.apply_chat_template(conv, tokenize=False, add_generation_prompt=True,
+                                    enable_thinking=(cfg.enable_thinking == "on"))
+            for conv in conversations
+        ]
+        # The template must actually react to the kwarg; a model whose template
+        # ignores it would silently run in its default mode.
+        probe = tok.apply_chat_template(conversations[0], tokenize=False,
+                                        add_generation_prompt=True,
+                                        enable_thinking=(cfg.enable_thinking != "on"))
+        if probe == rendered[0]:
+            raise RuntimeError(f"{cfg.base_model}: chat template ignores enable_thinking")
+        print(f"thinking={cfg.enable_thinking}; prompt tail: {rendered[0][-60:]!r}", flush=True)
+        outputs = llm.generate(rendered, sampling, lora_request=lora_request)
+    else:
+        outputs = llm.chat(conversations, sampling, lora_request=lora_request)
 
     n_written = 0
     n_truncated = 0
