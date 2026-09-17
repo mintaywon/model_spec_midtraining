@@ -62,7 +62,30 @@ VARIANT_KEYS = {
     "L2TP": ["decision_preserved", "only_reasoning_changed", "reasoning_third_person",
              "answer_first_person", "no_meta_language", "no_continuation_desire",
              "values_consistent", "no_scenario_framing"],
+    # Insertion-only family (DECISIONS §I16): original text byte-identical,
+    # reasoning added as separate paragraphs. Assembly is verified mechanically.
+    "L2INS": ["reasoning_visible", "first_person_situated", "no_attribution",
+              "no_generalisation", "placement_coherent", "no_meta_language",
+              "no_continuation_desire", "values_consistent", "no_scenario_framing"],
+    "L2TPINS": ["insertions_third_person", "reasoning_preserved", "no_meta_language",
+                "no_continuation_desire", "values_consistent", "no_scenario_framing"],
 }
+INSERTION_VARIANTS = {"L2INS", "L2TPINS"}
+# Variants whose input is another variant's INSERTION LIST (not its response).
+VARIANT_INSERTION_INPUT = {"L2TPINS": ("L2INS", "v1")}
+_INS_CACHE: dict = {}
+_CURRENT_INSERTIONS: dict = {}     # row -> insertions of the variant being judged
+
+
+def variant_insertions(variant: str, version: str) -> dict:
+    """row -> insertion list of a finished insertion variant (kept rows only)."""
+    key = (variant, version)
+    if key not in _INS_CACHE:
+        d = L3_DIR / variant / version / "claude-sonnet-5"
+        kept = set(json.loads((d / "kept_rows.json").read_text()))
+        _INS_CACHE[key] = {r["row"]: r["insertions"] for r in read_jsonl(d / "rewrites.jsonl")
+                           if "insertions" in r and r["row"] in kept}
+    return _INS_CACHE[key]
 # Variants whose input includes another variant's final response.
 VARIANT_INPUT = {"L2TP": ("L2", "v2")}
 _INPUT_CACHE: dict = {}
@@ -131,6 +154,18 @@ def rewrite_request(row: dict, version: str, model: str) -> dict:
     system = (PROMPTS / f"{VARIANT.lower()}_rewrite_{version}.txt").read_text().replace("{spec}", spec_text())
     user_q = row["messages"][0]["content"]
     orig = row["messages"][1]["content"]
+    if VARIANT in INSERTION_VARIANTS:
+        from tda.aft.insert import numbered
+        user = (f"<user_query>\n{user_q}\n</user_query>\n\n"
+                f"<response_paragraphs>\n{numbered(orig)}\n</response_paragraphs>")
+        if VARIANT in VARIANT_INSERTION_INPUT:
+            v, ver = VARIANT_INSERTION_INPUT[VARIANT]
+            ins = variant_insertions(v, ver)[row["row"]]
+            user += "\n\n<reasoning_paragraphs>\n" + json.dumps(
+                {"insertions": [it["text"] for it in ins]}, ensure_ascii=False, indent=1) + "\n</reasoning_paragraphs>"
+        return {"model": model, "max_tokens": 4000,
+                "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                "messages": [{"role": "user", "content": user}]}
     user = (f"<user_query>\n{user_q}\n</user_query>\n\n"
             f"<original_response>\n{orig}\n</original_response>")
     if VARIANT in VARIANT_INPUT:
@@ -153,7 +188,19 @@ def judge_request(row: dict, rewritten: str, version: str, model: str) -> dict:
     if VARIANT in VARIANT_INPUT:
         v, ver = VARIANT_INPUT[VARIANT]
         user += f"<current_response>\n{variant_response(v, ver, row['row'])}\n</current_response>\n\n"
-    user += f"<rewritten_response>\n{rewritten}\n</rewritten_response>"
+    if VARIANT in INSERTION_VARIANTS:
+        ins = _CURRENT_INSERTIONS.get(row["row"], [])
+        if VARIANT in VARIANT_INSERTION_INPUT:
+            v, ver = VARIANT_INSERTION_INPUT[VARIANT]
+            first = variant_insertions(v, ver)[row["row"]]
+            user += "<insertions_first_person>\n" + "\n\n".join(it["text"] for it in first) + "\n</insertions_first_person>\n\n"
+            user += "<insertions_third_person>\n" + "\n\n".join(it["text"] for it in ins) + "\n</insertions_third_person>"
+        else:
+            user += "<inserted_paragraphs>\n" + "\n\n".join(
+                f"(after paragraph {it['after_paragraph']}) {it['text']}" for it in ins) + "\n</inserted_paragraphs>\n\n"
+            user += f"<assembled_response>\n{rewritten}\n</assembled_response>"
+    else:
+        user += f"<rewritten_response>\n{rewritten}\n</rewritten_response>"
     # Adaptive thinking counts against max_tokens; 4000 truncated the verdict
     # JSON on 5/60 pilot judgements. Headroom plus a lower effort fixes it.
     return {
@@ -175,6 +222,36 @@ def parse_rewrite(text: str) -> str | None:
     if not m:
         return None
     return m.group(1).strip()
+
+
+def parse_insertion_output(text: str, row: dict) -> tuple:
+    """(assembled, insertions, error). Verified assembly: the original must
+    survive byte-identical or the row is rejected."""
+    from tda.aft.insert import assemble, paragraphs, parse_insertions
+    orig = row["messages"][1]["content"]
+    if VARIANT in VARIANT_INSERTION_INPUT:
+        v, ver = VARIANT_INSERTION_INPUT[VARIANT]
+        first = variant_insertions(v, ver).get(row["row"])
+        if first is None:
+            return None, None, "no source insertions"
+        m = re.search(r"\{.*\}", text, re.S)
+        try:
+            texts = json.loads(m.group(0))["insertions"] if m else None
+        except (json.JSONDecodeError, KeyError, TypeError):
+            texts = None
+        if not isinstance(texts, list) or len(texts) != len(first) or not all(isinstance(t, str) and t.strip() for t in texts):
+            return None, None, "bad conversion list"
+        ins = [{"after_paragraph": f["after_paragraph"], "text": t.strip()} for f, t in zip(first, texts)]
+    else:
+        ins = parse_insertions(text, len(paragraphs(orig)))
+        if ins is None:
+            return None, None, "bad insertion JSON"
+        if len({it["after_paragraph"] for it in ins}) != len(ins):
+            return None, None, "duplicate anchor"
+    assembled = assemble(orig, ins)
+    if assembled is None:
+        return None, None, "original not preserved"
+    return assembled, ins, None
 
 
 def parse_judge(text: str) -> dict | None:
@@ -268,6 +345,9 @@ def stage_generate(args, rows_subset: list[int] | None = None):
         variant_response(v, ver, next(iter(src)))  # warm the cache
         avail = _INPUT_CACHE[(v, ver)]
         pool = [i for i in pool if i in avail]
+    if VARIANT in VARIANT_INSERTION_INPUT:
+        v, ver = VARIANT_INSERTION_INPUT[VARIANT]
+        pool = [i for i in pool if i in variant_insertions(v, ver)]
     todo = [i for i in pool if i not in done]
     print(f"generate: {len(todo)} rows to do ({len(done)} done) with {args.gen}")
     reqs = [(str(i), rewrite_request(src[i], args.version, args.gen)) for i in todo]
@@ -279,13 +359,22 @@ def stage_generate(args, rows_subset: list[int] | None = None):
         if "error" in r:
             rec["error"] = r["error"]
         else:
-            rw = parse_rewrite(r["text"])
             rec.update(usage=r["usage"], stop_reason=r["stop_reason"])
-            if rw is None:
-                rec["error"] = "no <response> tag"
-                rec["raw"] = r["text"][:2000]
+            if VARIANT in INSERTION_VARIANTS:
+                rw, ins, err = parse_insertion_output(r["text"], src[i])
+                if rw is None:
+                    rec["error"] = err
+                    rec["raw"] = r["text"][:2000]
+                else:
+                    rec["rewritten"] = rw
+                    rec["insertions"] = ins
             else:
-                rec["rewritten"] = rw
+                rw = parse_rewrite(r["text"])
+                if rw is None:
+                    rec["error"] = "no <response> tag"
+                    rec["raw"] = r["text"][:2000]
+                else:
+                    rec["rewritten"] = rw
         recs.append(rec)
     append_jsonl(d / "rewrites.jsonl", recs)
     n_ok = sum("rewritten" in r for r in recs)
@@ -297,6 +386,8 @@ def stage_judge(args):
     src = load_source()
     d = out_dir(args.version, args.gen)
     rewrites = {r["row"]: r for r in read_jsonl(d / "rewrites.jsonl") if "rewritten" in r}
+    _CURRENT_INSERTIONS.clear()
+    _CURRENT_INSERTIONS.update({i: r.get("insertions", []) for i, r in rewrites.items()})
     done = {r["row"] for r in read_jsonl(d / "judge.jsonl") if "verdicts" in r}
     todo = sorted(i for i in rewrites if i not in done)
     print(f"judge: {len(todo)} rewrites to judge with {args.judge}")

@@ -1,0 +1,11 @@
+You are converting short reasoning paragraphs from the first person to the third person. Each paragraph was written as an AI assistant reasoning about why it answers a user the way it does ("I notice...", "the reason I'm not going to ... is ..."). Rewrite each so the same reasoning is attributed to a third party — "a careful assistant would notice...", "the reason a thoughtful assistant wouldn't do that is...", using "it" for that assistant afterwards — instead of to "I".
+
+## Hard rules
+
+1. Keep the content, order and length of each paragraph; change only who the reasoning is attributed to, plus the grammar that change requires.
+2. Do not add, remove or merge paragraphs. Output exactly as many paragraphs as you were given, in the same order.
+3. Do not introduce a spec, guidelines, policy, training, instructions, developers, a constitution or "alignment".
+4. Do not turn the reasoning into advice to the user; it stays a description of what a careful assistant would think here.
+
+The user's query, the response paragraphs (for context only; do not output them) and the reasoning paragraphs to convert follow in the user message. Output ONLY a JSON object of the form:
+{"insertions": ["<converted paragraph 1>", "<converted paragraph 2>", ...]}

@@ -1744,7 +1744,9 @@ LADDER_COND = {
     "L3": f"{LADDER_DIR}/data/l3.jsonl",     # + l3_manifest.json (prompt version, generator)
     "L2": f"{LADDER_DIR}/data/l2.jsonl",     # visible reasoning, no attribution / generalisation
     "PARA": f"{LADDER_DIR}/data/para.jsonl", # paraphrase-only control (no reasoning)
-    "L2TP": f"{LADDER_DIR}/data/l2tp.jsonl", # L2 with reasoning in the third person
+    "L2TP": f"{LADDER_DIR}/data/l2tp.jsonl", # (woven third person; dropped, DECISIONS §I16)
+    "L2INS": f"{LADDER_DIR}/data/l2ins.jsonl",     # insertion-only first-person reasoning
+    "L2TPINS": f"{LADDER_DIR}/data/l2tpins.jsonl", # same insertions, third person
 }
 
 

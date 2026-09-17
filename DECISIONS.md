@@ -899,3 +899,19 @@ per variant: `generate --batch` (remaining rows) → `judge --batch` → `assemb
 --batch` ×2 → `review` → `results/aft/launch/finish_variant.sh <V> <ver>` → `aft_eval`
 (full grid by default). The core ladder (Phase 1 + L2 + L3, full grid and held-out) is
 complete and unaffected.
+
+### I16. Insertion-only ablations replace the woven third-person variant (Taywon, 2026-09-17 17:30)
+The woven third-person edit failed because on introspective responses "answer" and
+"reasoning" coincide, so rewriter and judge disagreed at the boundary (pilots 27 % → 56 %
+→ 47 %), and the whole-response third-person alternative would change the original text
+too. Taywon's fix: **add sentences at specific points and never change the original.**
+`tda/aft/insert.py`: the generator returns `{"insertions": [{"after_paragraph": k,
+"text": ...}]}` (1–3 insertions, ≤ 40 % of the response); assembly is verified — deleting
+the inserted paragraphs must reproduce the original byte-for-byte or the row is rejected.
+Variants: **L2INS** (first-person situated reasoning, no attribution / generalisation) and
+**L2TPINS** (the *same* insertion list converted to "a careful assistant would...", same
+anchors). PARA stays as the rewriter-quality control for the woven L2. Comparisons:
+L2INS vs L2 (adding vs rewriting), L2TPINS vs L2INS (ownership, only pronouns differ).
+Resume script `results/aft/launch/resume_after_limit.sh` gates each full run on a
+≥ 60 % pilot pass rate. Cost per variant ≈ $36 Modal (train + eval generation) and
+≈ $90 API (generation, judge, grading).

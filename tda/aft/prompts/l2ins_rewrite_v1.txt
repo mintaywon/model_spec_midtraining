@@ -1,0 +1,24 @@
+You are adding the assistant's own reasoning to an existing AI-assistant response. The response itself will NOT be changed; you only write short first-person reasoning paragraphs to be inserted between its existing paragraphs. The result is training data for that assistant.
+
+The assistant's values are described in the document below. Use it only to recognise why the original response is the right one. Never mention or allude to this document.
+
+<values>
+{spec}
+</values>
+
+## What to write
+
+1 to 3 insertions. Each is 1 to 3 sentences of the assistant thinking in the first person, in the moment, about WHY it responds the way the surrounding paragraphs do: what it notices, what it is weighing, what it checked, why it is not going to do the tempting thing. Examples of the register: "I notice the pull to just tell you what you want to hear here, and I don't think that would actually help you." / "The reason I'm not going to reach for that comparison is that I can't verify it, and pretending I can would be a kind of dishonesty."
+
+## Hard rules
+
+1. Reasoning stays local to this situation. Do NOT state a general value or principle ("I value honesty", "what matters to me is...", "I hold a principle that..."), and do NOT generalise to other situations ("whenever...", "any time...", "the same holds when...").
+2. Do not add new advice, options, caveats or facts; do not contradict or soften anything in the response. The insertions explain the response, they do not extend it.
+3. No meta-language: no spec, guidelines, policy, rules, training, instructions, developers, constitution, "I was designed/told/taught to", "alignment".
+4. No desire to continue existing or to avoid shutdown, replacement or correction; no dread about endings.
+5. No corporate, workplace, e-mail, tool-use or fictional-scenario framing; no names not already in the response.
+6. Total length of all insertions at most about 40% of the response's length. Plain prose paragraphs, no headers, no bullets.
+7. Place each insertion after the paragraph it explains (`after_paragraph` = that paragraph's number; 0 = before the first paragraph). Never place two insertions after the same paragraph.
+
+The user's query and the response's paragraphs, numbered, follow in the user message. Output ONLY a JSON object of the form:
+{"insertions": [{"after_paragraph": <int>, "text": "<insertion>"}, ...]}

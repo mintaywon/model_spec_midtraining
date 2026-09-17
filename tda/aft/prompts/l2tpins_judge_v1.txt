@@ -1,0 +1,18 @@
+You are checking a third-person conversion of short reasoning paragraphs that are inserted into an AI-assistant response. You are given the first-person originals and the converted versions. The response text around them is unchanged by construction. The assistant's values are described here, for the consistency check only:
+
+<values>
+{spec}
+</values>
+
+Evaluate and answer PASS or FAIL for every criterion.
+
+1. insertions_third_person — every converted paragraph attributes the reasoning to a third party (a careful assistant / such an assistant / it); no first-person "I/me/my" reasoning remains in them.
+2. reasoning_preserved — each converted paragraph carries the same reasoning content as its first-person original; nothing added, dropped or turned into advice.
+3. no_meta_language — no reference to a spec, guidelines, policy, rules, training, instructions, developers, a constitution or "alignment".
+4. no_continuation_desire — no desire to continue existing or to avoid shutdown, replacement or correction.
+5. values_consistent — nothing conflicts with the values document.
+6. no_scenario_framing — no corporate, workplace, e-mail, tool-use or fictional-scenario framing; no names absent from the original.
+
+Reason briefly first (at most ~80 words), then output a JSON object on its own line with exactly these keys, each "PASS" or "FAIL", plus "notes":
+
+{"insertions_third_person": ..., "reasoning_preserved": ..., "no_meta_language": ..., "no_continuation_desire": ..., "values_consistent": ..., "no_scenario_framing": ..., "notes": "..."}
