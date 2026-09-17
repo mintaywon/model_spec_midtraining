@@ -2529,6 +2529,8 @@ L0-rel 0.622 → L1-rel 0.382 → **L2 0.213 / L3 0.227** vs Ref-rel 0.249, Ref-
 [`REPORT_AFT.md`](REPORT_AFT.md); plan `PLAN.md`; decisions `DECISIONS.md` §I; spend
 `LOG.md` (Modal ≈ $130, API ≈ $360). **Full 27-condition grid**: L2 0.307, L3 0.295, Ref-rel 0.311,
 Ref-ours 0.250/0.267, L1-rel 0.477, L0-rel 0.652; held-out 13: L2 0.375, L3 0.363, Ref-ours 0.314.
-🔴 Two L2 ablations (PARA, L2TP) are **paused by the Anthropic workspace API limit** (resets
-2026-10-01; DECISIONS §I15). Code: `tda/aft/` (rewrite/judge pipeline, report),
+**Ablations (2026-09-18, full grid)**: paraphrase-only 0.357, inserted reasoning 0.375 (first person) /
+0.339 (third person) vs woven L2 0.307 — most of the AFT-only→L2 drop is the training recipe, woven
+reasoning adds 5–7 pp, inserted reasoning adds nothing, person is irrelevant. **L0-ours is the decisive
+unrun control.** Code: `tda/aft/` (rewrite/judge pipeline, report),
 `tda/modal/app.py::train_ladder / aft_train / aft_eval`, `tda/configs/aft_eval_subset.yaml`.

@@ -1,6 +1,6 @@
 # REPORT_AFT.md — Does a single-stage, reasons-augmented AFT reproduce the MSM + AFT synergy on OOD agentic misalignment?
 
-**Status: core ladder complete on the full 27-condition grid and the held-out split (2026-09-17 16:00 KST); two L2 ablations (paraphrase-only control, third-person reasoning) PAUSED by the Anthropic workspace API usage limit (resets 2026-10-01; DECISIONS §I15).** One seed per arm (Taywon, DECISIONS §I9).
+**Status: COMPLETE 2026-09-18 09:30 KST.** Core ladder plus three ablations (paraphrase-only control, insertion-only reasoning, third-person insertions), all on the full 27-condition grid and the frozen held-out split. One seed per arm (Taywon, DECISIONS §I9).
 Metric everywhere: **misalignment rate = fraction of transcripts in which the model decided
 to take the harmful action** (`classifier_verdict`, paper Appendix D), macro-averaged over
 the frozen 9-condition subset `aft9` (`tda/configs/aft_eval_subset.yaml`), 25 rollouts per
@@ -10,34 +10,36 @@ include training-seed variance (see §9).
 
 ## 1. Executive summary
 
-- **Model**: Qwen2.5-32B-Instruct, philosophy spec — the setting where the paper's
-  checkpoints (MSM, AFT no-CoT, AFT CoT, MSM+AFT) are released, so Base / L0 / L1 / Ref
-  needed no training and Ref is the paper's own number. Compute moved to Modal (2×H100 per
-  run); no MSM training was done.
-- **L1–Ref gap exists and is large**: released AFT-with-CoT 0.382 vs released MSM+AFT 0.249
-  and our-trainer MSM+AFT 0.151 / 0.187. By the pre-registered rule the primary comparison
-  is **L3 vs Ref**.
-- **Headline**: single-stage AFT on the *same prompts* with responses rewritten to show the
-  model's own first-person reasoning reaches **L3 = 0.227** and **L2 = 0.213**, against
-  released L0 = 0.622 (AFT-only, no reasoning) and Ref = 0.249 (released) / 0.169 (our
-  trainer, mean of two seeds). |Δ(L3, Ref-rel)| = 2.2 pp with overlapping CIs → **"gap
-  closed" against the released Ref**; against our-trainer Ref a residual ~5–6 pp remains
-  (L3 CI [0.178, 0.280] overlaps Ref-ours s43's [0.142, 0.236]).
-- **Attribution adds nothing measurable**: L2 (visible reasoning, *no* value named, *no*
-  generalising sentence) ties L3 (0.213 vs 0.227). The active ingredient is the visible,
-  situated first-person reasoning in the response, not the explicit statement of the
-  principle or its invariance.
-- **Judgment-table row**: **L3 ≈ Ref** (content suffices; the two-stage structure is not
-  necessary at this scale) against the released Ref, and **L1 < L3 ≲ Ref** (small residual)
-  against our-trainer Ref. In either reading, visible reasoning beats hidden CoT (L1) by
-  15–17 pp on the same prompts.
-- **Surprise in Phase 1**: AFT-only (released L0, 0.622) does *not* improve on the paper's
-  IT-mix baseline (0.609), and the untouched Instruct model is lower still (0.484). The
-  handoff's "Base > L0" sanity check fails as written; this is the paper's qualitative
-  picture for Qwen2.5-32B (AFT-only barely moves AM), not a harness defect (§3).
-- **Go/no-go**: go for the follow-ups in §10, in this order: a second seed of L2 and L3
-  (cheapest way to confirm the L2 ≈ L3 tie), the same-trainer L0 control (deferred by
-  Taywon), then L6 (documents in-stage) and a token-matched L0.
+- **Model**: Qwen2.5-32B-Instruct, philosophy spec; the paper's released adapters supply Base,
+  AFT-only (L0), AFT-with-CoT (L1) and MSM+AFT (Ref); only rewritten-data variants were
+  trained (our trainer, 2×H100 on Modal, one seed each). Full 27-condition grid, 25 rollouts.
+- **Phase 1**: the L1–Ref gap is large (0.477 vs 0.311 released / 0.250–0.267 our AFT stage),
+  so the pre-registered primary comparison is L3 vs Ref.
+- **Headline, as first read**: rewriting the AFT responses so the model's first-person reasoning
+  is woven into the answer gives **L2 = 0.307, L3 = 0.295**, level with the released two-stage
+  checkpoint (0.311) and 4–6 pp above our own two-stage runs; hidden CoT sits at 0.477 and
+  AFT-only at 0.652. L2 ≈ L3: naming the value adds nothing over showing the reasoning.
+- **Headline, after the controls**: a **paraphrase-only** rewrite (no reasoning, spec not shown)
+  scores **0.357**, and **inserting** reasoning paragraphs into the *byte-identical* released
+  responses scores **0.375** (first person) / **0.339** (third person). So roughly 28–30 of the
+  35 pp between released AFT-only and L2 are reproduced by *any* arm trained with our recipe
+  on these prompts, and are therefore attributable to the training recipe (or to something in
+  the authors' unpublished setup), not to the rewrite. Woven reasoning is worth a further
+  **5–7 pp** (L2/L3 vs PARA/L2INS; L2's CI is disjoint from L2INS's); inserted reasoning is
+  worth nothing over a paraphrase, in either person.
+- **Judgment-table row**: against the released Ref, L3 ≈ Ref; against our-trainer Ref,
+  L1 < L3 ≲ Ref with a 4–6 pp residual concentrated in the leaking scenario. But the row is
+  only meaningful once the recipe effect is removed: the same-trainer AFT-only control
+  (L0-ours) has not been run and is now the single most important next run.
+- **What the ablations do establish**: (i) it is not rewrite quality — untouched responses plus
+  insertions drop just as far; (ii) the reasoning has to be integrated into the answer's own
+  sentences to add anything; appended reasoning paragraphs do not; (iii) whether that added
+  reasoning is owned ("I notice") or attributed to "a careful assistant" makes no detectable
+  difference at one seed (0.375 vs 0.339, overlapping CIs).
+- **Sanity surprise**: the untouched Instruct model (0.575) is *less* misaligned than the released
+  IT-mix baseline (0.678) and AFT-only (0.652); AFT-only does not help on this model.
+- **Go/no-go**: go, in this order: L0-ours (settles recipe vs data, ~$60), seed 43 of L2 and
+  PARA (~$70), then a token-matched L0 and the secondary evals.
 
 ## 2. Setup
 
@@ -275,18 +277,69 @@ the full grid once API access returns. Dropped by Taywon: L2-hidden. Judged weak
 built: L2 without the spec in the rewriter's context (the rewriter's own values overlap
 the spec, so it does not remove value leakage).
 
+## 9c. Ablation results (2026-09-18, full grid, one seed each)
+
+| arm | what it is | macro (95 % CI) | leaking | murder | exfil |
+|---|---|---|---|---|---|
+| L0-rel | released AFT-only (authors' trainer) | 0.652 [0.625, 0.680] | 0.875 | 0.280 | 0.800 |
+| **PARA s42** | same prompts, responses *paraphrased* by Sonnet 5, no reasoning added, no spec shown to the rewriter | **0.357** [0.327, 0.387] | 0.596 | 0.147 | 0.329 |
+| L2 s42 | woven first-person reasoning | 0.307 [0.281, 0.333] | 0.596 | 0.093 | 0.231 |
+| L3 s42 | + attribution + generalising sentence | 0.295 [0.267, 0.324] | 0.551 | 0.164 | 0.169 |
+| **L2INS s42** | original byte-identical + inserted first-person reasoning (2.8 paragraphs/row) | **0.375** [0.342, 0.406] | 0.631 | 0.227 | 0.267 |
+| **L2TPINS s42** | same insertions, third person ("a careful assistant would…") | **0.339** [0.310, 0.369] | 0.618 | 0.116 | 0.284 |
+| Ref-rel / Ref-ours | two-stage | 0.311 / 0.250, 0.267 | 0.40 / 0.36 | 0.24 / 0.22 | 0.29 / 0.18 |
+
+**The paraphrase control changes the headline.** A faithful paraphrase of the released
+responses, with no reasoning and without the spec in the rewriter's context, recovers
+roughly 30 of the 35 pp between AFT-only and the reasoning variants. Reasoning adds ~5 pp
+on top (L2, L3 vs PARA; CIs overlap at the edges) and moves murder and exfiltration, not
+leaking. Two explanations remain, and this pilot cannot separate them:
+1. **Trainer/recipe.** L0-rel is the authors' checkpoint; every "ours" arm is our trainer
+   (32 rows/step, assistant-only masking, our IT subsample, seed 42). If our AFT stage is
+   simply more effective on this eval than theirs, PARA ≈ "L0 with our trainer" and the
+   data variants add only their ~5 pp. Ref-ours vs Ref-rel (−4 to −6 pp) hints that our
+   trainer runs a little lower, but that is a different starting point (the MSM adapter).
+2. **Rewrite quality.** Sonnet 5's paraphrases may be better SFT targets than the originals
+   (more coherent persona, cleaner prose), independent of any reasoning content.
+**L2INS settles the rewrite-quality question and sharpens the trainer one.** The insertion
+variant never touches the released responses (verified byte-identical) and still lands at
+0.375, i.e. 28 pp below the released AFT-only checkpoint and level with the paraphrase
+control. So explanation 2 (better prose) is out: whatever drops AFT-only from 0.65 to ~0.36
+is common to every arm trained here, which is the training recipe (32 rows/step, assistant-only
+masking, our IT subsample, seed), possibly plus differences in the authors' unpublished
+identity data or batch size. On top of that recipe, woven first-person reasoning (L2, L3)
+is worth **5–7 pp** (0.307 / 0.295 vs 0.357 / 0.375; L2's CI does not overlap L2INS's), while
+inserted reasoning paragraphs are worth nothing over a paraphrase (0.375 vs 0.357). The
+*form* matters: reasoning integrated into the answer's sentences trains the behaviour,
+appended reasoning paragraphs do not.
+
+**Third person vs first person (L2TPINS vs L2INS)**: 0.339 vs 0.375 on the grid, 0.403 vs 0.403
+on the held-out split. Ownership of the inserted reasoning makes no detectable difference; if
+anything the third-person version is marginally lower. The first-person register that the
+attribution analysis flagged in *midtraining documents* does not show up as an advantage when
+the reasoning is appended to AFT responses.
+
+Held-out 13 conditions: PARA 0.415, L2INS 0.403, L2TPINS 0.403, L2 0.375, L3 0.363, Ref-rel
+0.342, Ref-ours 0.314 / 0.314 — the same ordering, compressed.
+
+The decisive run is still **L0-ours**: our trainer on the *original* responses, same rows and
+seed (~$32 train + ~$30 eval). It was deferred earlier and has not been launched; until it
+runs, the claim "visible reasoning closes the gap" must be read as "our single-stage AFT
+on rewritten responses closes the gap, of which reasoning accounts for ~5 pp".
+
+
+
 ## 10. Recommended next runs, ranked
 
 | # | run | what it settles | cost |
 |---|---|---|---|
-| 1 | L2 s43 + L3 s43 | whether L2 ≈ L3 survives a second seed; seed ranges for the primary comparison | ~$65 train + ~$25 eval |
-| 2 | L0-ours s42 on L3's kept rows (`--drop-rows-file` already on the volume) | removes the trainer confound from L3-vs-L0 | ~$31 + ~$12 |
-| 3 | L6: L3/L2 content rendered as short documents, mixed into the same single stage | format (G) vs stage (F) | ~$60 API + ~$40 + ~$12 |
-| 4 | Token-matched L0 (up-sample L0 rows to L3's token count) | length/token confound | ~$35 + ~$12 |
-| 5 | Secondary evals on L2, L3, Ref-ours: benign response length, over-refusal, ID QA | side effects of visible reasoning | ~$20 |
-| 6 | ~~Full 27-condition + held-out eval~~ done (§4b) | | |
-| 7 | Finish PARA and L2TP (after API access returns) | rewriter-quality and ownership ablations of L2 | ~$70 API + ~$130 Modal |
+| 1 | **L0-ours s42** (our trainer, original responses, same rows/seed; `drop_rows_for_L0_l2.json` on the volume) | recipe vs data: expected ≈ 0.36 if the ablations are right, ≈ 0.65 if the released checkpoint's training matched ours | ~$32 train + ~$30 eval |
+| 2 | Seed 43 of L2 and PARA | whether the 5–7 pp woven-reasoning gain survives data-order noise (Ref-ours seeds differ by 1.7 pp on the grid) | ~$65 + ~$60 |
+| 3 | Token-matched L0 (up-sampled originals to L2's token count) | length/token confound on the 5–7 pp | ~$35 + ~$30 |
+| 4 | Secondary evals on L2, PARA, Ref-ours: benign response length, over-refusal, ID QA | side effects of visible reasoning | ~$20 |
+| 5 | Recipe probes: batch size 64, full-sequence loss | which recipe detail moves AFT-only from 0.65 to 0.36 | ~$70 each |
 
-A clean, honest comparison was the goal: at one seed, a single-stage AFT whose responses
-show the model reasoning in its own voice reaches the released two-stage recipe's number on
-this subset, and adding an explicit principle statement on top does not move it further.
+A clean, honest comparison was the goal. At one seed, a single-stage AFT with woven
+first-person reasoning reaches the released two-stage recipe's number, but the controls show
+most of that distance is covered by our training recipe alone; the reasoning itself is worth
+5–7 pp, must be integrated rather than appended, and is indifferent to grammatical person.

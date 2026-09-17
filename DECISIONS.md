@@ -915,3 +915,15 @@ L2INS vs L2 (adding vs rewriting), L2TPINS vs L2INS (ownership, only pronouns di
 Resume script `results/aft/launch/resume_after_limit.sh` gates each full run on a
 ≥ 60 % pilot pass rate. Cost per variant ≈ $36 Modal (train + eval generation) and
 ≈ $90 API (generation, judge, grading).
+
+### I17. Ablation reading (2026-09-18 09:30)
+Full grid, one seed: PARA 0.357 · L2INS 0.375 · L2TPINS 0.339 · L2 0.307 · L3 0.295 vs
+L0-rel 0.652, Ref-rel 0.311, Ref-ours 0.250/0.267. (1) Rewrite quality is excluded: L2INS
+keeps the released responses byte-identical and drops as far as PARA. (2) The ~28–30 pp
+common drop is therefore the training recipe (ours vs the authors' unpublished one) — the
+released AFT-only checkpoint is not reproduced by our trainer on the same data. (3) Woven
+reasoning adds 5–7 pp (L2 CI disjoint from L2INS); inserted reasoning adds nothing over
+paraphrase; first vs third person of the insertions is indistinguishable. Consequence for the
+headline: "single-stage matches MSM+AFT" is true under our recipe, but the recipe, not the
+data variant, does most of the work. L0-ours (~$60) is the decisive control; not launched
+(Taywon deferred it; Modal spend ≈ $240, past the $200 free line, under the $348 cap).
