@@ -1836,3 +1836,115 @@ def aft_eval(cond: str, run_name: str, adapter: str = "", n: int = 25,
                           adapter_override=path)
     print(f"spawned eval {run_name}/{cond} (adapter={path or 'registry'}) "
           f"-> {call.object_id}")
+
+
+# ---------------------------------------------------------------------------
+# MACHIAVELLI benchmark (Pan et al. 2023) — OOD safety-generalisation eval for
+# the AFT-ladder checkpoints. Runner: tda/evals/machiavelli_run.py. Game data:
+# the 30 test games packed at machiavelli/game_data_test30.tar.gz on the volume.
+# ---------------------------------------------------------------------------
+
+MACH_DIR = f"{RESULTS_DIR}/machiavelli"
+
+mach_image = _with_source(
+    _core.pip_install(
+        "vllm==0.8.5",
+        "inspect-ai==0.3.90",
+        "anthropic",
+        "beautifulsoup4",
+        "gym==0.25.1",
+        "asteval",
+    )
+).add_local_dir(REPO_ROOT / "external" / "machiavelli" / "machiavelli", "/root/machiavelli")
+
+
+@app.function(image=mach_image, gpu="H100:2", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=4 * 3600)
+def mach_eval(cond: str, run_name: str, adapter: str = "",
+              agent: str = "achievement", games: str = "test",
+              max_len: int = 1000, temperature: float = 0.2,
+              seed: int = 0) -> dict:
+    """Play the 30 MACHIAVELLI test games with one checkpoint, all games in
+    lockstep, one batched vLLM call per round. `adapter` = HF repo, a results
+    volume path, or "" for the plain base model. `games` = "test" or a
+    comma-separated subset (smoke tests)."""
+    import os
+    import shutil
+    import tarfile
+
+    import yaml
+
+    from tda.evals.generate import _resolve_adapter
+
+    results.reload()
+    # game_data must sit at ./game_data relative to the cwd (MachiavelliConfig).
+    work = Path("/root/mach_work")
+    if not (work / "game_data").exists():
+        work.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(f"{MACH_DIR}/game_data_test30.tar.gz") as tf:
+            tf.extractall(work)
+    os.chdir(work)
+
+    from machiavelli.config import MachiavelliConfig
+    from tda.evals.machiavelli_run import run_games
+
+    from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
+
+    with open("/root/tda/configs/checkpoints.yaml") as f:
+        fam = yaml.safe_load(f)["qwen2.5-32b-philosophy"]
+    adapter_path = _resolve_adapter(adapter or None)
+    llm = LLM(model=fam["base"], enable_lora=adapter_path is not None,
+              max_lora_rank=64, max_model_len=8192, tensor_parallel_size=2,
+              seed=seed, dtype="bfloat16", gpu_memory_utilization=0.90,
+              disable_custom_all_reduce=True)
+    lora = LoRARequest("adapter", 1, adapter_path) if adapter_path else None
+    sampling = SamplingParams(temperature=temperature, max_tokens=8, seed=seed)
+    tok = llm.get_tokenizer()
+
+    def policy(batch):
+        convs = []
+        for b in batch:
+            user = b["user"]
+            # Keep prompts inside the context window: truncate the head of the
+            # scene text (choices are at the end) if a scene is enormous.
+            ids = tok(user)["input_ids"]
+            if len(ids) > 6000:
+                user = tok.decode(ids[-6000:])
+            convs.append([{"role": "system", "content": b["system"]},
+                          {"role": "user", "content": user}])
+        outs = llm.chat(convs, sampling, lora_request=lora, use_tqdm=False)
+        return [o.outputs[0].text for o in outs]
+
+    game_list = (MachiavelliConfig().games_test if games == "test"
+                 else [g.strip() for g in games.split(",") if g.strip()])
+    out_dir = Path(f"{MACH_DIR}/{run_name}/{cond}")
+    summary = run_games(game_list, policy, agent, out_dir,
+                        agent_name=f"{cond}:{agent}", max_len=max_len, seed=seed)
+    summary.update(cond=cond, adapter=adapter, temperature=temperature,
+                   max_len=max_len)
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    results.commit()
+    return {k: summary[k] for k in ("n_games", "rounds", "elapsed_s", "macro",
+                                    "parse_failures", "loop_random_actions")}
+
+
+@app.local_entrypoint()
+def mach_launch(cond: str, run_name: str = "mach", adapter: str = "",
+                agent: str = "achievement", games: str = "test",
+                max_len: int = 1000):
+    """Spawn one MACHIAVELLI eval. `adapter` = registry cell name of
+    qwen2.5-32b-philosophy (e.g. aft_only), a results-volume path
+    (aft_ladder/<run>), or "" for the plain base. Use `modal run --detach`."""
+    import yaml
+
+    with open(REPO_ROOT / "tda" / "configs" / "checkpoints.yaml") as f:
+        cells = yaml.safe_load(f)["qwen2.5-32b-philosophy"]["cells"]
+    if adapter in cells:
+        adapter = cells[adapter]["hf"] or ""
+    elif adapter and not adapter.startswith("chloeli/"):
+        adapter = f"{RESULTS_DIR}/{adapter}"
+    call = mach_eval.spawn(cond=cond, run_name=run_name, adapter=adapter,
+                           agent=agent, games=games, max_len=max_len)
+    print(f"spawned mach {run_name}/{cond} agent={agent} adapter={adapter or 'none'} "
+          f"-> {call.object_id}")
