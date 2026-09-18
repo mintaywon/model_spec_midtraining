@@ -927,3 +927,21 @@ paraphrase; first vs third person of the insertions is indistinguishable. Conseq
 headline: "single-stage matches MSM+AFT" is true under our recipe, but the recipe, not the
 data variant, does most of the work. L0-ours (~$60) is the decisive control; not launched
 (Taywon deferred it; Modal spend ≈ $240, past the $200 free line, under the $348 cap).
+
+### I18. L0-ours approved (Taywon, 2026-09-18 13:55): one seed
+Same trainer and config as every "ours" arm, task data = the released no-CoT responses
+unchanged, rows = L2's kept set (9,793; `drop_rows_for_L0_l2.json`), seed 42. Reading rule
+fixed in advance: if L0-ours ≈ 0.36 (PARA/L2INS level) the AFT-only→L2 drop is the recipe and
+woven reasoning's contribution is the 5–7 pp over L0-ours; if L0-ours ≈ 0.65 (released level)
+the rewrites themselves carry the effect and the recipe explanation is dropped.
+
+### I19. L0-ours result and final reading (2026-09-18 19:00)
+L0-ours s42 = **0.394** [0.367, 0.422] on the grid, 0.462 held-out (10.75M tokens, 619 steps,
+loss 1.65→1.13). Per §I18's rule this is the recipe branch: released AFT-only (0.652) is not
+reproduced by our trainer on the same responses. Ours-vs-ours ladder: L0-ours 0.394 → PARA
+0.357 → L2INS 0.375 / L2TPINS 0.339 → L2 0.307 / L3 0.295 → Ref-ours 0.250/0.267. Woven
+reasoning −8.7 pp vs L0-ours (CIs disjoint); appended reasoning −2 to −6 pp; paraphrase −4 pp
+(overlapping). Judgment row: L1 < L3 < Ref, small residual (leaking). Lexical check: the
+paraphrase has *less* caution/hedge vocabulary than the originals, so "value drift via
+paraphrase" is not the mechanism; first-person density is the one feature that tracks the
+effect (48.9/1k words in L2 vs 38.5 original). Modal ≈ $276 of $348; API ≈ $560.
