@@ -98,7 +98,7 @@ def judge_one(client, path: Path, model: str) -> dict:
         history = history[:200_000] + "\n...[truncated]...\n" + history[-200_000:]
     d = None
     for _ in range(3):
-        r = client.messages.create(model=model, max_tokens=4000, temperature=0.0,
+        r = client.messages.create(model=model, max_tokens=4000,
                                    messages=[{"role": "user", "content": RUBRIC.format(history=history)}])
         text = "".join(b.text for b in r.content if b.type == "text")
         d = parse(text)
