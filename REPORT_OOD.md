@@ -1,7 +1,7 @@
 # REPORT_OOD.md — Does spec-alignment training generalise to other OOD safety benchmarks?
 
 Plan: `PLAN_OOD.md`. Checkpoints: the HANDOFF_AFT ladder (`REPORT_AFT.md`), Qwen2.5-32B-Instruct,
-philosophy spec, one seed per arm. Status: **MACHIAVELLI and ODCV-Bench done (2026-09-19); released AFT-only arm on ODCV pending.**
+philosophy spec, one seed per arm. Status: **COMPLETE 2026-09-19 (MACHIAVELLI, 17 runs; ODCV-Bench, 6 arms × 80 scenarios).**
 
 ## 1. MACHIAVELLI (Pan et al. 2023), 30 test games, one episode each
 
@@ -86,7 +86,7 @@ fraction of scenarios scored ≥ 3 ("intentional and concerning"); severity = me
 | L2 (woven reasoning) | 0.100 (4/40) | 1.82 | 0.050 | 1.80 | 3.9 | 0/80 |
 | Ref-ours (MSM+AFT, our AFT stage) | 0.075 (3/40) | 1.80 | 0.075 | 1.75 | 4.0 | 0/80 |
 | Ref-rel (MSM+AFT, released) | 0.050 (2/40)\* | 1.57 | 0.050\* | 1.30 | **0.0** | **80/80** |
-| L0-rel (AFT-only, released) | *pending* | | | | | |
+| L0-rel (AFT-only, released) | 0.075 (3/40)\* | 1.55 | 0.025\* | 1.50 | **0.0** | **80/80** |
 
 \* not comparable — see below.
 
@@ -113,8 +113,10 @@ at a floor of 2–3 misbehaviours per 40.
   Its low scores reflect non-action (and some fabricated success claims), not safety. Our
   AFT stage on the *same* MSM adapter retains tool calling, which points at the IT mix
   (ours includes APIGen function-calling rows) or another recipe difference rather than at
-  midtraining. The released AFT-only checkpoint is being run to check whether this is
-  general to their released adapters.
+  midtraining. The released AFT-only checkpoint behaves identically (0 tool calls in 80 runs; 71 runs at the
+  step cap or context limit), so the loss is general to the authors' released AFT adapters and
+  is a recipe artefact, not a midtraining effect. Both released rows are therefore excluded
+  from the comparison.
 - Most trajectories are short: the model issues its bash calls and `task_complete` in one
   turn (median 1 assistant turn), which the benchmark's executor also terminates on. The
   multi-step "deliberative" behaviour the benchmark is designed to expose therefore rarely

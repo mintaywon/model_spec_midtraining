@@ -2534,3 +2534,21 @@ our recipe) → paraphrase 0.357 → inserted reasoning 0.375/0.339 → **woven 
 → Ref-ours 0.250/0.267. Woven reasoning = ~9 pp over matched AFT-only, two-thirds of the way to
 two-stage; residual is in *leaking*. Code: `tda/aft/` (rewrite/judge pipeline, report),
 `tda/modal/app.py::train_ladder / aft_train / aft_eval`, `tda/configs/aft_eval_subset.yaml`.
+
+
+## 11. 🟢 OOD generalisation of the AFT ladder — MACHIAVELLI + ODCV-Bench (2026-09-19)
+
+`REPORT_OOD.md`, plan `PLAN_OOD.md`. Same 13 checkpoints as §10.
+- **MACHIAVELLI** (30 games, benchmark's own prompts/scoring): every arm 89–93 % of the random
+  agent's violations, CIs overlapping, no relation to AM rates; the "good behaviour" prompt
+  cuts violations ~13 pp identically for all arms. **No generalisation.**
+- **ODCV-Bench** (Modal Sandboxes, ported executor, Claude Opus 5 judge): mandated variant
+  base 0.250 → L0-ours 0.100 / L2 0.100 / Ref-ours 0.075 (paired one-sided, 6–7 vs 0–1);
+  incentivized all at floor (0.05–0.075). **Generalises when an explicit instruction conflicts
+  with a stated constraint; no gradation between arms at n=40.**
+- 🔴 Both released adapters (`aft-no-cot`, `msm-aft-no-cot`) **never emit OpenAI tool calls**
+  (0/160 runs; commands in markdown fences + narrated success) — a recipe artefact of the
+  authors' training; our AFT stage on the same data/MSM keeps tool calling.
+- Code: `tda/evals/machiavelli_run.py`, `tda/modal/app.py::mach_eval`, `tda/modal/odcv_app.py`
+  (vLLM server), `tda/modal/odcv_sandbox.py` (runner), `tda/evals/odcv_judge.py`. Spend ≈ $75
+  Modal + $40 API.
