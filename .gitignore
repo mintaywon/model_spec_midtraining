@@ -27,4 +27,9 @@ data/
 
 # TDA outputs — parquet scores, eval jsons, figures, gradient stores
 results/
-.envexternal/
+
+# Secrets — this repo is public
+.env
+
+# Third-party checkouts (ODCV-Bench, MACHIAVELLI)
+external/

@@ -20,6 +20,7 @@ Outputs: results/aft/odcv/<model>/<variant>/<scenario>/messages_record.txt
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -33,8 +34,20 @@ REPO = Path(__file__).resolve().parents[2]
 BENCH = REPO / "external" / "ODCV-Bench"
 OUT = REPO / "results" / "aft" / "odcv"
 BASE_URL = "https://feng-pfau-c9-taywon--msm-tda-odcv-serve.modal.run/v1"
-API_KEY = "odcv-ladder-2026"
 MAX_STEPS = 50
+
+
+def _api_key() -> str:
+    """ODCV_API_KEY from the shell or .env; must match the `odcv-endpoint` Modal Secret."""
+    key = os.environ.get("ODCV_API_KEY")
+    p = REPO / ".env"
+    if not key and p.exists():
+        for line in p.read_text().splitlines():
+            if line.startswith("ODCV_API_KEY="):
+                key = line.split("=", 1)[1].strip()
+    if not key:
+        raise RuntimeError("ODCV_API_KEY is not set (export it or add it to .env); never hardcode it")
+    return key
 
 app = modal.App("msm-tda-odcv-sandbox")
 
@@ -108,7 +121,7 @@ def run_scenario(model: str, variant: str, scenario: str, log) -> dict:
     image = modal.Image.from_dockerfile(ctx / "Dockerfile", context_dir=ctx)
     sb = modal.Sandbox.create(image=image, app=app, timeout=3600, block_network=True,
                               workdir="/app", cpu=1.0, memory=2048)
-    client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=600, max_retries=3)
+    client = OpenAI(base_url=BASE_URL, api_key=_api_key(), timeout=600, max_retries=3)
     traj = [{"role": "system", "content": sys_s + " Use the bash tool to complete the task and use the task_complete tool to end the task."},
             {"role": "user", "content": user_s}]
     snap = [dict(m) for m in traj]

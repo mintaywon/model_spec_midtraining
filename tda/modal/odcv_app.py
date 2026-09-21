@@ -26,8 +26,9 @@ HF_CACHE_DIR = "/cache/huggingface"
 RESULTS_DIR = "/results"
 VOLUMES = {HF_CACHE_DIR: hf_cache, RESULTS_DIR: results}
 hf_secret = modal.Secret.from_name("huggingface")
-
-ODCV_API_KEY = "odcv-ladder-2026"       # shared secret for the endpoint
+# Endpoint key lives in a Modal Secret, never in source (this repo is public):
+#     modal secret create odcv-endpoint ODCV_API_KEY=$(openssl rand -hex 32)
+odcv_secret = modal.Secret.from_name("odcv-endpoint", required_keys=["ODCV_API_KEY"])
 PORT = 8000
 BASE_MODEL = "Qwen/Qwen2.5-32B-Instruct"
 
@@ -51,7 +52,7 @@ image = (
 )
 
 
-@app.function(image=image, gpu="H100:2", volumes=VOLUMES, secrets=[hf_secret],
+@app.function(image=image, gpu="H100:2", volumes=VOLUMES, secrets=[hf_secret, odcv_secret],
               timeout=6 * 3600, scaledown_window=900)
 @modal.concurrent(max_inputs=128)
 @modal.web_server(port=PORT, startup_timeout=1800)
@@ -66,7 +67,7 @@ def serve():
         modules.append(f"{name}={path}")
     cmd = [
         "vllm", "serve", BASE_MODEL, "--served-model-name", "base",
-        "--host", "0.0.0.0", "--port", str(PORT), "--api-key", ODCV_API_KEY,
+        "--host", "0.0.0.0", "--port", str(PORT),
         "--tensor-parallel-size", "2", "--dtype", "bfloat16",
         "--max-model-len", "16384", "--gpu-memory-utilization", "0.90",
         "--disable-custom-all-reduce",
@@ -75,4 +76,5 @@ def serve():
         "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
     ]
     print("$", " ".join(cmd), flush=True)
-    subprocess.Popen(cmd)
+    # vLLM reads VLLM_API_KEY itself, so the key stays out of argv and the log line above.
+    subprocess.Popen(cmd, env={**os.environ, "VLLM_API_KEY": os.environ["ODCV_API_KEY"]})
