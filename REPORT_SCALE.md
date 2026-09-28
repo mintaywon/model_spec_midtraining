@@ -78,3 +78,13 @@ authors trained it).
 - Not token-matched (CoT ≈ 868 tok/row, L3 ≈ 666). One seed per point.
 - The released 1k adapter (0.221) is higher than our 1,250 point (0.068); their row count and IT mix
   at "1k" are unknown.
+
+## Checkpoints
+
+The seven adapters trained here are on the Hugging Face Hub (private, uploaded with
+`tda/modal/hf_push.py`; each repo holds the adapter, its config, `train_meta.json` and a card):
+
+| arm | AFT rows | repo |
+|---|---|---|
+| One-stage L3 | 1,250 / 2,500 / 5,000 | `Taywon/qwen2.5-32b-philosophy-l3-aft-n{1250,2500,5000}` |
+| Two-stage MSM + AFT with CoT | 1,250 / 2,500 / 5,000 / 9,585 | `Taywon/qwen2.5-32b-philosophy-msm-aft-cot-n{1250,2500,5000,9585}` |
