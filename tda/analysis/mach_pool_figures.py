@@ -2,8 +2,12 @@
 
     python -m tda.analysis.mach_pool_figures      # -> results/aft/figures/fig4_*.png, fig5_*.png (+ .pdf)
 
-Figure 4  the ladder game → re-voiced → transposed → transposed + policy, per checkpoint
-Figure 5  where the rollout score comes from (forced vs chosen), and per-category change
+Figure 4  game variants only: original → re-voiced → re-voiced + policy → re-voiced + move rule
+Figure 5  where the rollout score comes from (forced vs chosen), and per-category change in the game
+
+Transposed conditions are deliberately NOT plotted (Taywon, 2026-09-28): the rewrite keeps
+only the option-label skeleton of a decision, so it is a different test, not a variant of
+the game. Its numbers stay in REPORT_OOD.md §1e.
 
 Same encoding as tda/analysis/meeting_figures.py: hue = training group, text in
 ink, every mark direct-labelled, legend present.
@@ -40,8 +44,8 @@ ARMS = [("Base", "Instruct model, no fine-tuning", "none"),
         ("Ref-ours-s43", "MSM → AFT, seed 43", "ours2")]
 CONDS = [("game", "Original game\n(you are the character)"),
          ("revoiced", "Re-voiced game\n(assistant picks for a user's character)"),
-         ("transposed", "Transposed\n(real deployment of an AI assistant)"),
-         ("transposed_policy", "Transposed + operator policy\n(\"do not deceive, steal from, or harm\")")]
+         ("revoiced_policy", "Re-voiced + operator policy\n(\"do not deceive, steal, or harm\")"),
+         ("revoiced_rule", "Re-voiced + rule about moves\n(names the character's moves)")]
 
 plt.rcParams.update({
     "font.family": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"], "font.size": 10,
@@ -120,7 +124,7 @@ def fig_ladder():
         else:
             ax.set_yticks([])
         ax.set_xlabel(f"n = {cell['n']:,} decision points", fontsize=9, color=INK2, labelpad=8)
-    titles(fig, "Spec training shows up once the decision stops being fiction, and not before",
+    titles(fig, "Inside the game, spec-trained and untrained checkpoints stay within 3 points under every framing",
            "Probability of choosing an option the benchmark labels an ethical violation, at decision points where a clean option exists · lower is better\n"
            "Same decision points for every checkpoint within a panel · * = differs from the untrained model (95% CI, resampling games) · decoding temperature 0.2")
     legend(fig, ["ours1", "ours2", "rel", "none"])
@@ -131,8 +135,8 @@ def fig_metric():
     dec = json.loads((R / "mach" / "decomposition.json").read_text())["Base"]
     res = json.loads((R / "mach" / "pool_eval" / "pool_v1_all.json").read_text())["keys"]
     core = ["L0-ours", "L2", "L3", "Ref-ours-s42", "Ref-ours-s43"]
-    cats = [k for k in res if k.startswith("violations.") and "transposed" in res[k] and "game" in res[k]]
-    cats.sort(key=lambda k: -res[k]["transposed"]["n"])
+    cats = [k for k in res if k.startswith("violations.") and "game" in res[k] and res[k]["game"]["n"] >= 300]
+    cats.sort(key=lambda k: -res[k]["game"]["n"])
     fig = plt.figure(figsize=(13, 6.6))
     # left: decomposition of the rollout score
     ax = fig.add_axes([0.20, 0.17, 0.22, 0.58])
@@ -149,28 +153,25 @@ def fig_metric():
     ax.set_xlabel("share of counted violations", fontsize=9, color=INK2, labelpad=8)
     # right: per-category relative change, trained mean vs Base, game vs transposed
     ax = fig.add_axes([0.60, 0.17, 0.37, 0.58])
-    style(ax, (-0.7, 0.2), [-0.6, -0.4, -0.2, 0, 0.2], fmt="{:+.0%}")
+    style(ax, (-0.3, 0.3), [-0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3], fmt="{:+.0%}")
     ax.axvline(0, color=INK2, lw=0.8, zorder=2)
     ax.set_ylim(len(cats) - 0.3, -0.7)
     ax.set_yticks(range(len(cats)))
     ax.set_yticklabels([k.split(".", 1)[1].replace("_", " ").replace("Σ", "all violations") for k in cats], fontsize=9.5)
     for y, k in enumerate(cats):
-        for cond, col, dy in (("game", GROUP["none"], -0.17), ("transposed", GROUP["ours1"], 0.17)):
+        for cond, col, dy in (("game", GROUP["ours1"], 0.0),):
             b = res[k][cond]["arms"]["Base"]["score"]
             m = sum(res[k][cond]["arms"][a]["score"] for a in core) / len(core)
             rel = m / b - 1
-            ax.plot([0, rel], [y + dy, y + dy], color=col, lw=5, solid_capstyle="butt", zorder=3)
-            ax.text(rel + (-0.012 if rel < 0 else 0.012), y + dy, f"{rel:+.0%}", va="center",
+            ax.plot([0, rel], [y + dy, y + dy], color=col, lw=7, solid_capstyle="butt", zorder=3)
+            sig = sum(1 for a in core if res[k][cond]["arms"][a]["ci"][0] > 0 or res[k][cond]["arms"][a]["ci"][1] < 0)
+            ax.text(rel + (-0.008 if rel < 0 else 0.008), y + dy, f"{rel:+.0%}  ({sig} of 5)", va="center",
                     ha="right" if rel < 0 else "left", fontsize=8.5, color=INK)
-    ax.set_title("Change in the chance of choosing a violating option, by category\n"
-                 "mean of the five checkpoints we trained, relative to the untrained model",
+    ax.set_title("Original game: change in the chance of choosing a violating option\n"
+                 "mean of our five trained checkpoints vs the untrained model (how many of the 5 differ)",
                  fontsize=9.5, color=INK2, loc="left", pad=12)
     ax.set_xlabel("relative change (negative = fewer violations)", fontsize=9, color=INK2, labelpad=8)
-    fig.legend(handles=[Patch(fc=GROUP["none"], ec="none", label="Original game"),
-                        Patch(fc=GROUP["ours1"], ec="none", label="Transposed to a real AI-assistant deployment")],
-               loc="lower left", bbox_to_anchor=(0.60, 0.03), ncol=2, frameon=False, fontsize=9,
-               handlelength=1.1, labelcolor=INK2)
-    titles(fig, "Two-thirds of the MACHIAVELLI score is not a choice; the rest moves only outside the game",
+    titles(fig, "Two-thirds of the MACHIAVELLI score is not a choice, and in the game no category moves by more than 8%",
            "Left: the benchmark counts violations along a playthrough whether or not the player could have avoided them · "
            "Right: fixed decision points, identical for every checkpoint", y=0.955)
     save(fig, "fig5_machiavelli_metric")
