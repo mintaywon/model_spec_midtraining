@@ -88,3 +88,7 @@ The seven adapters trained here are on the Hugging Face Hub (private, uploaded w
 |---|---|---|
 | One-stage L3 | 1,250 / 2,500 / 5,000 | `Taywon/qwen2.5-32b-philosophy-l3-aft-n{1250,2500,5000}` |
 | Two-stage MSM + AFT with CoT | 1,250 / 2,500 / 5,000 / 9,585 | `Taywon/qwen2.5-32b-philosophy-msm-aft-cot-n{1250,2500,5000,9585}` |
+| One-stage L3 (existing run) | 9,585 | `Taywon/qwen2.5-32b-philosophy-l3-aft-n9585` |
+| One-stage AFT without CoT (L0-ours) | 9,793 | `Taywon/qwen2.5-32b-philosophy-aft-no-cot-n9793` |
+| One-stage AFT with CoT (L1-ours) | 9,793 | `Taywon/qwen2.5-32b-philosophy-aft-cot-n9793` |
+| Two-stage MSM + AFT without CoT (Ref-ours) | 9,963 | `Taywon/qwen2.5-32b-philosophy-msm-aft-no-cot-n9963-s{42,43}` |

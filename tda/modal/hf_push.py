@@ -54,7 +54,7 @@ def push(runs: dict, private: bool = True) -> dict:
         rid = f"{user}/{repo}"
         api.create_repo(rid, private=private, exist_ok=True)
         (Path("/tmp") / "README.md").write_text(CARD.format(
-            repo=repo, run=meta["run_name"],
+            repo=repo, run=meta.get("run_name", d.name),
             init=(f"continued from `{cfg['init_adapter']}` (two-stage)"
                   if cfg["init_adapter"] else "fresh LoRA (one-stage)"),
             task=Path(cfg["task_dataset"]).name, n_task=meta["n_task"],
