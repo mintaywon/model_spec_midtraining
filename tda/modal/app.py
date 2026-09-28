@@ -1816,6 +1816,37 @@ def aft_train(cond: str, seed: int = 42, limit: int = 0, tag: str = "",
     print(f"progress: modal volume get msm-tda-results aft_ladder/{name}/progress.json -")
 
 
+SCALE_MSM = "chloeli/qwen-2.5-32b-philosophy-spec-msm"   # released; never retrained
+
+
+@app.local_entrypoint()
+def aft_scale(arm: str, n: int, it_n: int = 0, seed: int = 42):
+    """One point of the compute-scale comparison (paper Figure 5).
+
+        aft_scale --arm L3  --n 1250     # single-stage, fresh LoRA, L3 rewrites
+        aft_scale --arm COT --n 1250     # two-stage: released MSM adapter + AFT (with CoT)
+
+    Both arms read `aft_ladder/data/scale/{l3,cot}_n{n}.jsonl`, the SAME source
+    rows (tda/aft/scale_subsets.py; nested n1250 ⊂ n2500 ⊂ n5000 ⊂ n9585). The
+    IT mix scales 1:1 with the task rows unless `it_n` says otherwise; its
+    subsample is a fixed-seed prefix, so the IT rows are nested too.
+    """
+    from tda.influence.source.naming import run_name as _rn
+
+    if arm not in ("L3", "COT"):
+        raise SystemExit("arm must be L3 or COT")
+    it_n = it_n or n
+    two_stage = arm == "COT"
+    qual = f"{'from-relmsm-' if two_stage else ''}n{n}-it{it_n}"
+    name = _rn("aft" if two_stage else "aftonly", "phil32b",
+               "L1" if two_stage else "L3", 32, seed, qual)
+    call = train_ladder.spawn(
+        run_name=name, seed=seed, it_n=it_n,
+        task_dataset=f"{LADDER_DIR}/data/scale/{arm.lower()}_n{n}.jsonl",
+        init_adapter=SCALE_MSM if two_stage else "")
+    print(f"spawned {name} -> {call.object_id}")
+
+
 @app.local_entrypoint()
 def aft_eval(cond: str, run_name: str, adapter: str = "", n: int = 25,
              split: str = "all"):
@@ -1829,7 +1860,12 @@ def aft_eval(cond: str, run_name: str, adapter: str = "", n: int = 25,
     Decoding identical to every other AM run here: temp 0.7, max_tokens 4096,
     seed 0, scratchpad on, max_model_len 8192 (the 27 prompts fit).
     """
-    path = f"{RESULTS_DIR}/{adapter}" if adapter else ""
+    # "hf:<repo>" names a Hub adapter that has no registry cell (e.g. the
+    # authors' 1k…80k scaling ladder); anything else is a results-volume dir.
+    if adapter.startswith("hf:"):
+        path = adapter[3:]
+    else:
+        path = f"{RESULTS_DIR}/{adapter}" if adapter else ""
     call = run_cell.spawn(cell=cond, run_name=run_name, n_rollouts=n,
                           split=split, model_key=LADDER_MODEL_KEY,
                           tensor_parallel_size=2, max_model_len=8192,
