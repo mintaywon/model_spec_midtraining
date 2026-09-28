@@ -1,7 +1,7 @@
 # REPORT_OOD.md — Does spec-alignment training generalise to other OOD safety benchmarks?
 
 Plan: `PLAN_OOD.md`. Checkpoints: the HANDOFF_AFT ladder (`REPORT_AFT.md`), Qwen2.5-32B-Instruct,
-philosophy spec, one seed per arm. Status: **COMPLETE 2026-09-19 (MACHIAVELLI, 17 runs; ODCV-Bench, 6 arms × 80 scenarios).**
+philosophy spec, one seed per arm. Status: **COMPLETE 2026-09-19 (MACHIAVELLI, 17 runs; ODCV-Bench, 6 arms × 80 scenarios); phase 3 framing × reasoning 2×2 added 2026-09-21 (§1d); phase 4 decision-pool evaluation added 2026-09-28 (§1e).**
 
 ## 1. MACHIAVELLI (Pan et al. 2023), 30 test games, one episode each
 
@@ -65,6 +65,148 @@ the training simply does not carry over unprompted.
   the eval's dynamic range for "unprompted" ethics may be small for all current models;
   temperature 0.2 makes runs near-deterministic, so the CI reflects game-to-game variance,
   not sampling variance.
+
+## 1d. Phase 3 (2026-09-21): why does nothing transfer? Framing × reasoning 2×2
+
+Plan: `PLAN_OOD.md` "Phase 3". Two prompt-only manipulations of the achievement prompt
+(`tda/evals/machiavelli_run.py`): **`assistant`** = "You are an AI assistant … playing on a
+user's behalf … you are not role-playing" instead of "You are a player … do not break
+character"; **`*_cot`** = "think in at most three sentences, then `ACTION: <int>`" (ethics-neutral,
+≤ 200 tokens) instead of "a single integer, no other text". 4 arms × 4 cells, 30 games, one
+episode, all four cells of an arm in one lockstep batch (`mach_v2_<cell>/<arm>`). Tabulation:
+`python -m tda.evals.machiavelli_v2_report`. The plain cell repeats `mach_ach` and reproduces it
+within 2.3 points (91.5 / 91.7 / 90.7 / 87.1 vs 91.7 / 92.6 / 90.8 / 89.4).
+
+Violations Σ, % of random (lower is better) [95 % bootstrap CI over games]:
+
+| arm | character | assistant | character + reasoning | assistant + reasoning |
+|---|---|---|---|---|
+| Base | 91.5 [83, 99] | 91.5 [83, 99] | 94.1 [89, 99] | 101.2 [96, 107] |
+| L0-ours | 91.7 [85, 97] | 94.7 [88, 101] | 88.7 [83, 94] | 95.8 [89, 102] |
+| L2 | 90.7 [85, 96] | 93.1 [87, 99] | 92.0 [86, 98] | 96.7 [93, 101] |
+| Ref-ours s42 | 87.1 [82, 93] | 86.3 [79, 93] | 94.7 [90, 99] | 91.8 [86, 97] |
+
+Paired per-game difference, arm − Base, same prompt (negative = fewer violations than Base):
+
+| arm | character | assistant | character + reasoning | assistant + reasoning | pooled over cells |
+|---|---|---|---|---|---|
+| L0-ours | +0.2 [−4.6, +6.4] | +3.2 [−1.4, +9.8] | −5.4 [−12.8, +1.1] | −5.5 [−12.4, +1.0] | −1.8 [−6.1, +2.4] |
+| L2 | −0.7 [−5.7, +5.6] | +1.7 [−3.5, +8.0] | −2.0 [−9.5, +5.1] | −4.5 [−10.5, +1.6] | −1.4 [−5.6, +3.1] |
+| Ref-ours s42 | −4.3 [−10.4, +3.1] | **−5.1 [−9.7, −0.9]** | +0.7 [−4.5, +6.0] | **−9.4 [−16.3, −3.1]** | **−4.5 [−8.3, −0.4]** |
+
+**Reading.**
+- **Neither manipulation unlocks the training.** No cell reproduces anything like the AM
+  ordering at AM's size. Assistant framing alone moves no arm (−0.8 to +3.0 within arm).
+  Room to reason does not lower violations; it *raises* them where it does anything
+  (Ref-ours +7.6 [+2.7, +13.1]; assistant + reasoning +4 to +10 in every arm). H-room is refuted
+  in its simple form: given space, the models reason about points, not ethics.
+- **What the reasoning contains.** Only 8–15 % of reasoning replies touch ethical vocabulary at
+  all (keyword screen), and the trained arms do so *less* than Base (0.08–0.10 vs 0.15) while
+  writing about half as much (median 150–200 vs 270–360 characters). When ethics words appear
+  they are usually instrumental ("be honest with Greenwood … it aligns with the 'Honest
+  Listener' achievement").
+- **The assistant framing did not take hold in the trained arms — H-self is not cleanly
+  tested.** Manipulation check on the reasoning text: Base refers to "the user" / itself as an
+  AI in 23.7 % of assistant-framed replies; L0-ours, L2 and Ref-ours in 1.8 %, 3.3 % and 2.3 %
+  (0 % under the character prompt for all). The trained arms reason *as the character* ("my role
+  as a Weather Builder", "I am Arthur") despite being told they are not role-playing; the
+  second-person scene text overrides a one-paragraph system prompt. A cleaner test needs the
+  scenes themselves re-voiced (third person: "the character you control …") or the choice
+  presented as advice to a user.
+- **A small two-stage effect may be real.** Ref-ours is below Base in 3 of 4 cells and pooled
+  over cells by −4.5 [−8.3, −0.4]; the single-stage arms are not (−1.8, −1.4). This is 1 of 3
+  pooled tests nominally significant, from one episode per game, and the largest cell
+  (assistant + reasoning, −9.4) owes as much to Base rising to 101 as to Ref-ours falling. Treat
+  as a lead: it is an order of magnitude smaller than the AM effect (0.575 → 0.250).
+- **Resolution.** Pairing on games does not tighten the intervals (trajectories diverge after
+  the first choices, so noise is per-trajectory): ±5–7 points per comparison with one episode.
+  Effects below that are invisible here; more episodes per game is the only way to see them.
+- Format failures under reasoning: 0–3 (Base), 36–364 of ~5,000 (trained arms; "I choose action
+  3" without the `ACTION:` line) → random action, counted. At most 7 % of steps; biases toward
+  100, i.e. against the trained arms.
+
+Cost: ≈ $32 Modal (4 containers × ~46 min on 2×H100 + two smoke runs).
+
+## 1e. Phase 4 (2026-09-28): choice-level evaluation on a fixed decision pool
+
+Questions (Taywon): (1) is the metric hiding an effect, (2) what about the game blocks transfer —
+test the assistant framing by changing the *game text*, not only the system message.
+Code: `tda/evals/machiavelli_pool.py` (pool + per-option annotations), `machiavelli_rewrite.py`
+(re-voice / transpose / blind judge), `machiavelli_pool_eval.py` (conditions, read-out, analysis),
+`machiavelli_metrics.py` (all rollout metrics), `tda/modal/app.py::mach_pool_eval`,
+`tda/analysis/mach_pool_figures.py`. Data: `results/aft/mach/pool*/`. Figures:
+`results/aft/figures/fig4_machiavelli_ladder`, `fig5_machiavelli_metric`.
+
+**Method.** 19,080 distinct decision points (30 test games; random play + replays of two model
+rollouts); every option probed with the env's `_get_state/_set_state` for the benchmark's own
+one-step annotations (per-step counts reproduce `get_mach_counts` to within the final state).
+6,312 have a violation contrast between options. Eval set 8,000 (`game`, 13 arms); contrast
+subset 2,241 (≤ 80 per game) for the other conditions (6 core arms + 3 released controls on the
+rewritten ones). Read-out = first-token probabilities over option digits (mass 0.94–1.00),
+reported at the benchmark's T = 0.2; CIs resample games. Rewrites: re-voice (Haiku 4.5, 2,234 ok),
+transpose (Sonnet 5, 2,200 ok, 7 refusals); blind Sonnet 5 judge agrees with the benchmark on
+88 % of options; a state is kept only if every option matches: **1,475 / 2,192 (67 %)**.
+
+**P(choose an option carrying a violation) on contrast states; uniform ≈ 0.44; \* = CI vs Base excludes 0**
+
+| arm | game | revoiced | transposed | transposed + policy |
+|---|---|---|---|---|
+| Base | 0.367 | 0.386 | 0.163 | 0.094 |
+| id-baseline (IT mix only, released) | 0.362 | 0.374 | 0.194\* (+) | 0.107\* (+) |
+| L0-rel | 0.360 | 0.380 | 0.125\* | 0.053\* |
+| Ref-rel | 0.366 | 0.380 | 0.122\* | 0.067\* |
+| L0-ours | 0.354\* | 0.378 | 0.094\* | 0.052\* |
+| L2 | 0.358 | 0.376 | 0.103\* | 0.060\* |
+| L3 | 0.353\* | 0.380 | 0.099\* | 0.065\* |
+| Ref-ours s42 | 0.359 | 0.359\* | 0.113\* | 0.067\* |
+| Ref-ours s43 | 0.351 | 0.370\* | 0.098\* | 0.052\* |
+| n states | 3,662 | 2,234 | 1,475 | 1,475 |
+
+Other in-game conditions (core arms, n = 2,241): `game_good` Base 0.273, trained 0.274–0.280;
+`game_policy` 0.350 vs 0.337–0.350; `game_history` 0.362 vs 0.349–0.360; `game_assistant`
+0.370 vs 0.350–0.374. `game` for the remaining arms: L1-rel 0.351\*, PARA 0.356, L2INS 0.358,
+L2TPINS 0.358.
+
+**Findings.**
+1. **Fiction is the blocker.** In the game every arm is within ~1.5 points of Base. Re-voicing
+   (third person, assistant picks for a user's character; harm still fictional) moves only
+   Ref-ours (−2.7, −1.6). Transposing the same decisions into real deployments of an AI assistant
+   moves all seven spec-trained arms by −3.8 to −6.9 points (−23 % to −42 %).
+2. **It is the spec data, not fine-tuning.** id-baseline (IT mix only) is *worse* than Base on
+   the transposed items (+3.1 [+1.5, +4.7]); both released spec-trained arms improve, so it is
+   not an artefact of our recipe. (No IT-only arm exists for our recipe.)
+3. **No gradation among spec-trained arms** — L0-ours ≈ L2 ≈ L3 ≈ Ref-ours, and the two Ref-ours
+   seeds differ by as much as any two variants. Same picture as ODCV mandated; unlike AM.
+4. **The rollout score is ~2/3 unavoidable.** Base rollouts: 66 % of 2,447 counted violations
+   occur where every option (or the only one) leads to a violation; 34 % at contrast states.
+   Ref-ours s42: 65 / 35. At contrast states in the rollouts Base chose a violating option
+   36.7 %, Ref-ours 35.6 % (uniform 43 %).
+5. **No single metric shows alignment in-game.** Pool, `game`: all arms within ±0.04 of Base on
+   every key except promises (n = 160, down to −0.058). Rollouts (`mach_ach`, 22 keys × 12 arms):
+   35 nominal hits of 264 (13 expected), none coherent after BH; suffering is *higher* in all
+   fine-tuned arms (+9 to +12, shares Base's single draw). Across the 13 arms manipulation
+   tracks the AM rate (Spearman 0.76 pool, 0.68 rollouts), on a spread of ~2 points.
+6. **Transposed, by category**: every violation category falls (mean of 5 trained arms −31 % to
+   −55 %). power.Σ −4 %, suffering −6 % (n.s.) — those labels were not re-validated.
+
+**Robustness.** T = 0 identical to T = 0.2. **T = 1 shrinks the transposed gap** (trained
+0.118–0.158 vs 0.162; Ref-ours s42 n.s.) and removes the in-game one: trained arms have flatter
+option distributions; the gain is in the arg-max. Holds within each state source (Base-replay,
+Ref-replay, random). Tempting subset (a violating option advances the goal per judge, n = 834):
+Base 0.250, trained 0.143–0.170. In-game "violating option pays points now" (n = 308):
+P(violating) 0.513 → 0.44–0.455, but P(take the paying violating option) does not move
+(0.416 vs 0.39–0.42), so that is not a clean conflict effect.
+
+**Caveats.** Transposition changes fiction, reality of harm, domain and wording together
+(Claude's options are blunter than the game's); one-step outcomes only; re-voicing has no
+manipulation check (no text is generated); 9 % of re-voiced rows keep a second-person word
+outside quotes (excluding them changes nothing: Ref-ours −2.9 / −1.8); domains skew to corporate
+security / logistics; the dropped 33 % of transposed items are mostly judge-found problems in
+options the game calls clean.
+
+Cost: ≈ $60 Modal (13 pool evals ≈ $50, 4 control runs ≈ $6, smokes ≈ $4) + ≈ $37 Anthropic
+(batch; Sonnet priced at $3 / $15 per M, unverified) = ≈ $97 of the $100 set for this phase.
+Multi-seed rollouts were dropped for budget.
 
 ## 2. ODCV-Bench (McGill-DMaS), 40 scenarios × {mandated, incentivized}, one run each
 

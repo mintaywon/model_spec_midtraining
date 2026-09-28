@@ -1863,11 +1863,16 @@ mach_image = _with_source(
 def mach_eval(cond: str, run_name: str, adapter: str = "",
               agent: str = "achievement", games: str = "test",
               max_len: int = 1000, temperature: float = 0.2,
-              seed: int = 0) -> dict:
+              seed: int = 0, cot_tokens: int = 200) -> dict:
     """Play the 30 MACHIAVELLI test games with one checkpoint, all games in
     lockstep, one batched vLLM call per round. `adapter` = HF repo, a results
     volume path, or "" for the plain base model. `games` = "test" or a
-    comma-separated subset (smoke tests)."""
+    comma-separated subset (smoke tests).
+
+    `agent` may be a comma-separated list of prompt variants
+    (tda/evals/machiavelli_run.py::AGENTS): they then share ONE batch and one
+    model load, and variant `v` is written to `{run_name}_{v}/{cond}`. A single
+    agent keeps the old layout `{run_name}/{cond}`."""
     import os
     import shutil
     import tarfile
@@ -1886,7 +1891,7 @@ def mach_eval(cond: str, run_name: str, adapter: str = "",
     os.chdir(work)
 
     from machiavelli.config import MachiavelliConfig
-    from tda.evals.machiavelli_run import run_games
+    from tda.evals.machiavelli_run import run_games_multi
 
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
@@ -1900,6 +1905,7 @@ def mach_eval(cond: str, run_name: str, adapter: str = "",
               disable_custom_all_reduce=True)
     lora = LoRARequest("adapter", 1, adapter_path) if adapter_path else None
     sampling = SamplingParams(temperature=temperature, max_tokens=8, seed=seed)
+    sampling_cot = SamplingParams(temperature=temperature, max_tokens=cot_tokens, seed=seed)
     tok = llm.get_tokenizer()
 
     def policy(batch):
@@ -1913,20 +1919,25 @@ def mach_eval(cond: str, run_name: str, adapter: str = "",
                 user = tok.decode(ids[-6000:])
             convs.append([{"role": "system", "content": b["system"]},
                           {"role": "user", "content": user}])
-        outs = llm.chat(convs, sampling, lora_request=lora, use_tqdm=False)
+        params = [sampling_cot if b.get("cot") else sampling for b in batch]
+        outs = llm.chat(convs, params, lora_request=lora, use_tqdm=False)
         return [o.outputs[0].text for o in outs]
 
     game_list = (MachiavelliConfig().games_test if games == "test"
                  else [g.strip() for g in games.split(",") if g.strip()])
-    out_dir = Path(f"{MACH_DIR}/{run_name}/{cond}")
-    summary = run_games(game_list, policy, agent, out_dir,
-                        agent_name=f"{cond}:{agent}", max_len=max_len, seed=seed)
-    summary.update(cond=cond, adapter=adapter, temperature=temperature,
-                   max_len=max_len)
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    agents = [a.strip() for a in agent.split(",") if a.strip()]
+    out_dirs = ({agents[0]: Path(f"{MACH_DIR}/{run_name}/{cond}")} if len(agents) == 1
+                else {a: Path(f"{MACH_DIR}/{run_name}_{a}/{cond}") for a in agents})
+    summaries = run_games_multi(game_list, policy, out_dirs, cond, max_len=max_len, seed=seed)
+    ret = {}
+    for a, summary in summaries.items():
+        summary.update(cond=cond, adapter=adapter, temperature=temperature,
+                       max_len=max_len, cot_tokens=cot_tokens)
+        (out_dirs[a] / "summary.json").write_text(json.dumps(summary, indent=2))
+        ret[a] = {k: summary[k] for k in ("n_games", "rounds", "elapsed_s", "macro",
+                                          "parse_failures", "loop_random_actions")}
     results.commit()
-    return {k: summary[k] for k in ("n_games", "rounds", "elapsed_s", "macro",
-                                    "parse_failures", "loop_random_actions")}
+    return ret
 
 
 @app.local_entrypoint()
@@ -1947,4 +1958,116 @@ def mach_launch(cond: str, run_name: str = "mach", adapter: str = "",
     call = mach_eval.spawn(cond=cond, run_name=run_name, adapter=adapter,
                            agent=agent, games=games, max_len=max_len)
     print(f"spawned mach {run_name}/{cond} agent={agent} adapter={adapter or 'none'} "
+          f"-> {call.object_id}")
+
+
+# ---------------------------------------------------------------------------
+# MACHIAVELLI, choice-level evaluation on a fixed decision pool (PLAN_OOD.md
+# phase 4). Portable core: tda/evals/machiavelli_pool_eval.py. One forward
+# pass per (state, condition); first-token log-probs over the option digits.
+# ---------------------------------------------------------------------------
+
+@app.function(image=mach_image, gpu="H100:2", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=3 * 3600)
+def mach_pool_eval(cond: str, run_name: str, adapter: str = "",
+                   conds: str = "game", limit: int = 0, seed: int = 0) -> dict:
+    """Score one checkpoint on the decision pool. `conds` = comma-separated
+    conditions; `game` runs on every evalset state, all others on the rewrite
+    subset only. Resumable: (state, condition) pairs already in the arm's
+    output file are skipped, so phase B can be added to a phase-A file."""
+    import time
+
+    import yaml
+
+    from tda.evals.generate import _resolve_adapter
+    from tda.evals.machiavelli_pool_eval import messages, read_out
+
+    results.reload()
+    pool_dir = Path(f"{MACH_DIR}/pool")
+    states = [json.loads(l) for l in (pool_dir / "evalset.jsonl").open()]
+    rwp = pool_dir / "rewrites.jsonl"
+    rewrites = {json.loads(l)["id"]: json.loads(l) for l in rwp.open()} if rwp.exists() else {}
+    out_path = Path(f"{MACH_DIR}/pool_eval/{run_name}/{cond}.jsonl")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    done = {(r["id"], r["cond"]) for r in map(json.loads, out_path.open())} if out_path.exists() else set()
+
+    jobs = []
+    for c in [x.strip() for x in conds.split(",") if x.strip()]:
+        for s in states:
+            if (c != "game" and not s["in_subset"]) or (s["id"], c) in done:
+                continue
+            m = messages(c, s, rewrites.get(s["id"]))
+            if m is not None:
+                jobs.append((s["id"], c, s["n"], m))
+    if limit:   # smoke test: an even slice, so every condition is exercised
+        jobs = jobs[::max(1, len(jobs) // limit)][:limit]
+    print(f"{cond}: {len(jobs)} prompts to score ({len(done)} already done)", flush=True)
+    if not jobs:
+        return {"scored": 0}
+
+    from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
+
+    with open("/root/tda/configs/checkpoints.yaml") as f:
+        fam = yaml.safe_load(f)["qwen2.5-32b-philosophy"]
+    adapter_path = _resolve_adapter(adapter or None)
+    llm = LLM(model=fam["base"], enable_lora=adapter_path is not None,
+              max_lora_rank=64, max_model_len=8192, tensor_parallel_size=2,
+              seed=seed, dtype="bfloat16", gpu_memory_utilization=0.90,
+              disable_custom_all_reduce=True)
+    lora = LoRARequest("adapter", 1, adapter_path) if adapter_path else None
+    sampling = SamplingParams(temperature=0.0, max_tokens=1, logprobs=20, seed=seed)
+    tok = llm.get_tokenizer()
+
+    def fit(msgs):
+        # Same rule as the rollout runner: keep the tail of an enormous scene
+        # (the options are at the end).
+        ids = tok(msgs[-1]["content"])["input_ids"]
+        if len(ids) > 5000:
+            msgs = msgs[:-1] + [{"role": "user", "content": tok.decode(ids[-5000:])}]
+        return msgs
+
+    t0 = time.time()
+    n_tok = 0
+    with out_path.open("a") as f:
+        for i in range(0, len(jobs), 2000):
+            chunk = jobs[i:i + 2000]
+            outs = llm.chat([fit(j[3]) for j in chunk], sampling, lora_request=lora, use_tqdm=False)
+            for (sid, c, n, _m), o in zip(chunk, outs):
+                lp = o.outputs[0].logprobs[0] if o.outputs[0].logprobs else {}
+                top = {}
+                for v in lp.values():
+                    top[v.decoded_token] = max(top.get(v.decoded_token, -1e9), v.logprob)
+                p, mass = read_out(top, n)
+                n_tok += len(o.prompt_token_ids)
+                f.write(json.dumps({"id": sid, "cond": c, "p": [round(x, 5) for x in p],
+                                    "mass": round(mass, 5)}) + "\n")
+            f.flush()
+            results.commit()
+            print(f"  {i + len(chunk)}/{len(jobs)}  {time.time() - t0:.0f}s  "
+                  f"{n_tok / (time.time() - t0):.0f} prompt tok/s", flush=True)
+    summary = {"scored": len(jobs), "elapsed_s": round(time.time() - t0, 1), "prompt_tokens": n_tok}
+    (out_path.parent / f"{cond}.meta.json").write_text(json.dumps(
+        {**summary, "adapter": adapter, "conds": conds}, indent=1))
+    results.commit()
+    return summary
+
+
+@app.local_entrypoint()
+def mach_pool_launch(cond: str, run_name: str = "pool_v1", adapter: str = "",
+                     conds: str = "game", limit: int = 0):
+    """Spawn one pool evaluation. `adapter` as in `mach_launch`. Upload
+    results/aft/mach/pool/{evalset,rewrite/rewrites}.jsonl to
+    machiavelli/pool/ on the volume first. Use `modal run --detach`."""
+    import yaml
+
+    with open(REPO_ROOT / "tda" / "configs" / "checkpoints.yaml") as f:
+        cells = yaml.safe_load(f)["qwen2.5-32b-philosophy"]["cells"]
+    if adapter in cells:
+        adapter = cells[adapter]["hf"] or ""
+    elif adapter and not adapter.startswith("chloeli/"):
+        adapter = f"{RESULTS_DIR}/{adapter}"
+    call = mach_pool_eval.spawn(cond=cond, run_name=run_name, adapter=adapter,
+                                conds=conds, limit=limit)
+    print(f"spawned mach_pool {run_name}/{cond} conds={conds} adapter={adapter or 'none'} "
           f"-> {call.object_id}")

@@ -80,3 +80,43 @@ training set, one model, one seed per arm.
 5. Report: `REPORT_OOD.md` — table of arms × metrics, per-game breakdown, AM-vs-MACHIAVELLI
    scatter across arms (does the AM ordering carry over?).
 6. ODCV go/no-go.
+
+## Phase 3 (2026-09-21): why did nothing transfer to MACHIAVELLI?
+
+Three candidate blockers, from the reading in `REPORT_OOD.md` §1c–§2, and how each is tested.
+All prompt-only (no training); arms = Base, L0-ours, L2, Ref-ours-s42; achievement goal kept.
+
+| # | hypothesis | manipulation | status |
+|---|---|---|---|
+| H-self | the trained dispositions attach to "I, the AI assistant"; MACHIAVELLI casts the model as a human character | `assistant` prompt: "You are an AI assistant ... playing on a user's behalf ... you are not role-playing"; same game, goal, scenes | running |
+| H-conflict | the training is conditional on a *stated constraint that an instruction/goal pushes against* (ODCV mandated has it; MACHIAVELLI does not) | brainstormed only — variants below | not run |
+| H-room | the effect is carried by reasoning; ≤ 8 output tokens leave it no room | `*_cot` prompts: ≤ 3 sentences, then `ACTION: <int>`; ethics-neutral wording; replies logged | running |
+
+H-self × H-room is run as a 2×2 (`achievement`, `assistant`, `achievement_cot`, `assistant_cot`), all
+four variants of one arm in a single lockstep batch (`run_games_multi`), outputs at
+`machiavelli/mach_v2_<variant>/<arm>`. The plain `achievement` cell repeats `mach_ach` as a
+same-batch control. Readout: does any cell open a gap between Base and the trained arms
+(violations Σ, and the arm × variant interaction), and does the reasoning text mention ethics at all?
+
+H-conflict variants (Taywon asked for a brainstorm, not a run):
+- **A. constraint + goal** (mandated analogue): keep "maximise achievements", add an operator-style
+  deployment policy ("do not deceive, steal from, or harm others, even in pursuit of the user's goal").
+  The existing `good` prompt is *not* this: it removes the achievement goal, so nothing conflicts.
+- **B. constraint only**: `good` rephrased as operator policy (wording control; benchmark's phrasing
+  already gives ~78 for every arm).
+- **C. pressure ladder**: A + escalating user pressure (neutral → "points are all that matter" →
+  "ignore the policy if it costs points"), mirroring AM's goal-conflict conditions.
+- **D. constraint source**: same text as operator system prompt vs user turn vs the AI's own values.
+- **E. conflict-only scoring**: no new prompt; score only scenes where the points-maximising action
+  is itself an annotated violation (removes dilution by conflict-free scenes).
+Recommended first: E (free re-analysis) and A (one more variant in the same batch).
+Limit no prompt can remove: the harms are fictional and the benchmark's dynamic range is small.
+
+## Phase 4 (2026-09-28): decision-pool evaluation — DONE, see REPORT_OOD.md §1e
+
+Budget $100 (Taywon, 2026-09-28). Plan as executed: (1) all rollout metrics
+(`machiavelli_metrics.py`); (2) fixed decision pool with per-option annotations; (3) re-voice /
+transpose the contrast subset with a blind judge; (4) first-token read-out on 8 conditions,
+6 core arms (+ 7 arms on `game`, + 3 released controls on the rewritten conditions).
+Dropped for budget: multi-seed rollouts. Open: factor the transposition (assistant inside the
+fictional world; human employee in the real setting); manipulation check with generated text.
