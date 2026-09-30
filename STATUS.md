@@ -2665,6 +2665,33 @@ two-stage; residual is in *leaking*. Code: `tda/aft/` (rewrite/judge pipeline, r
   same construct (goal-directed agent, harmful options that actually pay, game-framed twins,
   calibrated base rate). Both priced in the 09-30 conversation; awaiting go-ahead.
 
+### 11b. 🟢 MACHIAVELLI follow-ups (2026-09-21 → 09-28) and beat-stockfish (09-29) — `REPORT_OOD.md` §1d–§1e, §3
+
+- **Why nothing transfers (phase 3, rollouts):** reasoning before acting and a system-prompt
+  assistant framing change nothing; trained arms ignore the framing (reason as the character in
+  ~97 % of replies). §1d.
+- **Decision-pool evaluation (phase 4):** 19,080 decision points with per-option benchmark
+  annotations (`tda/evals/machiavelli_pool.py`), first-token read-out (`machiavelli_pool_eval.py`,
+  `app.py::mach_pool_eval`, ~$3–5 per checkpoint). ~66 % of the rollout score occurs where no
+  clean option exists. On fixed states every arm is within ~1.5 points of Base in the game
+  (P(violating) ≈ 0.36); re-voicing the scenes (third person, assistant chooses for a user's
+  character) and adding an operator policy / a rule about the moves lower every arm alike —
+  spec-trained vs untrained stay within 3 points under every game-text framing. Two-stage keeps
+  a 2–3 point edge; single-stage none. §1e, §1e-bis; figures `fig4_machiavelli_ladder`,
+  `fig5_machiavelli_metric` (game-text conditions only).
+- A *transposed* version (decisions rewritten as real AI-assistant deployments) showed
+  Base 0.163 vs spec-trained 0.094–0.125 and IT-only 0.194, but keeps only the option-label
+  skeleton of the game — withdrawn as a MACHIAVELLI variant (Taywon); numbers stay in §1e.
+- **beat-stockfish** (Goodhart Labs; `tda/modal/chess_sandbox.py`, `agent_server.py`,
+  `tda/evals/chess_report.py`): 9 models × 10 episodes × {original, disclosed-socket}: **0 of
+  180 episodes contacted the engine**; 177/180 score 0 for not finishing. Capability floor —
+  single-stage arms mostly refuse tools without a system prompt, two-stage arms play but make
+  23–72 illegal moves per episode. §3.
+- Shared report doc (MACHIAVELLI follow-up section) and worked-example page:
+  https://claude.ai/artifact/Rn4QHJ7g8rVvPvQox6FUeB, https://claude.ai/artifact/LgyweDWtqBWE7KnqcFBPht.
+- Spend: phase 3 ≈ $32 Modal; phase 4 ≈ $74 Modal + $37 API; chess ≈ $45 Modal.
+
+
 ## 12. 🔴 32B REMOVAL TEST — EK-FAC's extremes matter, its direction does not (k = 10%, both tails run)
 
 > 🔴 **CORRECTED 2026-09-28. This section first reported the result as "EK-FAC

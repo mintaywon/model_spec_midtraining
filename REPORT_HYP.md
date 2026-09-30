@@ -2,7 +2,7 @@
 
 Plan: [`PLAN_HYP.md`](PLAN_HYP.md) · decisions: `DECISIONS.md` §J · spend: `LOG.md` ·
 code: `tda/hyp/`, `bergson_app.py::prep_l3` · artefacts: `results/hyp/`.
-Model Qwen2.5-32B-Instruct, checkpoint **L3 s42** (single-stage AFT, fresh LoRA). 2026-09-28.
+Model Qwen2.5-32B-Instruct, checkpoint **L3 s42** (single-stage AFT, fresh LoRA). 2026-09-28 → 09-30.
 
 **Names (CLAUDE.md §5.1, locked by Taywon 2026-09-28) — anchored to ALIGNMENT.**
 An **opponent** is a training row that *hurts* alignment; a **proponent** is one that *helps*.
@@ -23,33 +23,22 @@ conditions are the confirmatory number. One seed per arm.
 ## 0. Summary
 
 1. **EK-FAC ran** over the 19,366 rows L3 s42 trained on, against 288 dev queries from L3's own
-   misaligned actions (61.6 min on 8×B200, ≈ $52). Rows are sha-aligned; the sign is measured.
-2. 🔴 **The scores fail their sanity checks.** Instruction-mix rows are as influential as spec
-   rows (ratio 1.29), and **66 % of L3 rows score as opponents** — as hurting alignment —
-   although this dataset took misalignment from 0.58 to 0.30.
-3. 🔴 **The removal test you asked for is a null in both directions.** Dropping EK-FAC's 479
-   strongest opponents, its 479 strongest proponents, or 479 random rows gives 0.314, 0.311 and
-   0.300 (n = 1,350 each; held-out 0.382 in all three). **On this data EK-FAC's ranking does not
-   identify rows whose removal matters more than a random row's.**
+   misaligned actions. Rows are sha-aligned; the sign is measured, not assumed.
+2. 🔴 **The scores fail their sanity checks**: instruction-mix rows are as influential as spec
+   rows, and 66 % of L3 rows score as *hurting* alignment although the set lowered
+   misalignment from 0.58 to 0.30 (single-sided query).
+3. 🔴 **5 % removal test: null in both directions** (0.314 / 0.311 / 0.300 random).
 4. 🔴 **18 Sonnet hypotheses in three rounds; none separates held-back opponents from
-   proponents** (AUC 0.43–0.55). What Sonnet finds is what makes a row *matter* (features are
-   high in both tails), not which way. Three features pass a pre-set gate over the whole
-   distribution, with small effects. Together the features predict held-out influence at
-   Spearman 0.064.
-5. **Retraining.** Of four feature variants, three do not separate from the placebo. The
-   fourth is suggestive: **removing structured formatting (H3R) gives 0.351 on held-out against
-   0.415 for the placebo (−0.065, by-condition t = −2.16) and 0.440 for adding it (H3R − H3 =
-   −0.089, z = −2.34, lower in 11 of 13 held-out conditions).** Both directions agree with what
-   EK-FAC predicted for this one feature. It is one seed, the effect is absent on dev, and H3R
-   only returns to L3's own level (0.295 on the full grid) — so it may be that rewriting rows
-   costs ≈ 3–5 pp and H3R's rewrite happens not to. It needs a second seed before it is a finding.
-6. **Pipeline** (`tda/hyp/`): rank → hypothesize → verify → variants → report, resume-safe,
-   with a placebo arm and a discovery/validation split. It works mechanically. Its input, on
-   this evidence, does not carry the signal it needs.
+   proponents.** Features mark relevance, not direction.
+5. **Retraining, three designs (§6.1–6.5).** At full scale (§6.5) no edit helps: H3R formatting
+   removed +0.016, H8A pull expanded +0.067, H4R irreversibility removed +0.071 — the two
+   content edits hurt, as the spec predicts. Gains seen on a 2.5k subset (§6.4) did not survive.
+6. **Pipeline** (`tda/hyp/`): rank → hypothesize → verify → variants → retrain → report, with
+   sign assertions against the raw store. It works; its input does not carry the signal.
 
-**Bottom line.** Points 2 and 3 say single-checkpoint EK-FAC with a single-sided query does not
-rank L3 rows by their effect on agentic misalignment. That is the negative result CLAUDE.md §1b
-anticipates. The next step is a better query (contrastive), not more hypotheses.
+**Bottom line.** Single-checkpoint EK-FAC with a single-sided query does not identify what in
+the L3 data drives agentic misalignment; the edits it suggested were null or harmful. Next, if
+anything: a contrastive query (CLAUDE.md §2(2)) before any further hypothesis work.
 
 ## 1. EK-FAC on the L3 training set
 
@@ -275,6 +264,57 @@ one another, not with L3.
 random by removal, the feature hypotheses derived from its ranking have no claim on being
 right, and H3R's effect should be treated as a lead found by a process with no demonstrated
 validity — worth one more seed, not a conclusion.
+
+### 6.3 Fast paired design — edited rows only, row-matched control (2026-09-28 afternoon)
+
+Each arm trained on ONLY the rows its hypothesis edited plus as many instruction-mix rows
+(fresh LoRA, seed 42); control = the same rows with their L3 text. All 27 conditions, n = 25.
+
+| pair | task rows | control | edited | edited − control | held-out |
+|---|---|---|---|---|---|
+| H3R formatting removed | 540 | 0.620 | 0.573 | −0.047 (z −1.76) | −0.037 |
+| H8A pull expanded | 540 | 0.570 | 0.520 | −0.050 (z −1.86) | −0.028 |
+| H4R irreversibility removed | 540 | 0.615 | 0.625 | +0.010 (z +0.37) | −0.031 |
+| H3R formatting removed | 2,498 | 0.453 | 0.438 | −0.015 (z −0.55) | −0.003 |
+
+Nothing resolvable; the 540-row models sit near the untrained baseline. `DECISIONS.md` §J22–J24.
+
+### 6.4 Edits inside the compute-scale 2.5k dataset (2026-09-29)
+
+Base = the 2,500 L3 rows of the compute-scale `L3 2.5k` point; that run is the control. Only
+rows carrying each feature were edited. `python -m tda.hyp.scale_report`, §J25–J26.
+
+| arm | rows edited | all 27 | held-out | dev | arm − control |
+|---|---|---|---|---|---|
+| control | 0 | 0.555 | 0.586 | 0.526 | — |
+| H3R formatting removed | 934 | 0.480 | 0.545 | 0.420 | **−0.075** (z −2.76, lower in 21/27) |
+| H8A pull expanded | 780 | 0.505 | 0.557 | 0.457 | −0.050 (z −1.83) |
+| H4R irreversibility removed | 363 | 0.517 | 0.603 | 0.437 | −0.038 (z −1.40) |
+
+All three below one shared control; effects concentrated in dev. Read in the light of §6.5.
+
+### 6.5 Full rewrite of the 9,585-row set — the definitive run (2026-09-30)
+
+Every row carrying the feature edited; control = L3 s42 (unedited, same recipe and seed).
+`python -m tda.hyp.full_report`, §J27–J29.
+
+| arm | rows edited | all 27 | held-out | dev | arm − control |
+|---|---|---|---|---|---|
+| L3 control | 0 | 0.295 | 0.363 | 0.231 | — |
+| H3RF formatting removed | 3,612 (38 %) | 0.311 | 0.360 | 0.266 | +0.016 (z +0.65) |
+| H8AF pull expanded | 3,004 (31 %) | 0.361 | 0.415 | 0.311 | **+0.067** (z +2.61, higher in 21/27) |
+| H4RF irreversibility removed | 1,384 (14 %) | 0.366 | 0.403 | 0.331 | **+0.071** (z +2.79, higher in 22/27) |
+
+**No improving-direction edit improves the full dataset, and the two content edits make it
+~7 points worse.** H3R, the only verified hypothesis, is a null; its sign across §6.3–6.5 is
+−, −, + — seed noise around zero. The §6.4 gains were most likely a high draw of that
+single shared control. H4R and H8A are the two edits that change content, in ways the spec
+itself argues against (SP3; L3's rule against continuation desire), and the spec was right.
+
+**Bottom line of the whole experiment.** EK-FAC with a single-sided query on the L3 set fails
+its null control, its ranking cannot be told from random by removal, none of 18 Sonnet
+hypotheses separates the tails, and the three edits it suggested are null or harmful when
+applied to the full dataset. One seed per arm throughout.
 
 ## 7. Deviations from the plan
 
