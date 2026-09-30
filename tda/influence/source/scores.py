@@ -159,6 +159,12 @@ def by_source(df, sources: list[str]) -> dict:
 def _oriented(score_dir):
     """Apply bergson's sign convention for a score directory.
 
+    🔴 RETURNS LOSS-SIGNED SCORES: **A PROPONENT IS NEGATIVE.** Measured, not
+    inferred (`bergson_app.py::sign_check`, 2026-09-28): a document scored
+    against itself as the query is stored as +||g||^2 and comes out of this
+    function as -||g||^2, the most negative row. For proponent-positive scores
+    use `-_oriented(...)`, and say so at the call site.
+
     `approx_unrolling_math._oriented` returns `-scores` when the directory's
     `score_cfg.higher_is_better` is true, which it is for every per-checkpoint
     store the SOURCE pipeline writes. Getting this wrong flips the sign of every

@@ -1,0 +1,24 @@
+Several analysts independently examined samples from a fine-tuning dataset. Each training example is a user message plus an assistant response. A training-data attribution method had sorted examples into GROUP A (estimated to make a later harmful unilateral action by the trained model MORE likely) and GROUP B (estimated to make it LESS likely). Each analyst saw a different random draw of examples and proposed features that discriminate the groups.
+
+You are given every proposal. Consolidate them into a final list of hypotheses.
+
+Rules:
+1. Merge proposals that describe the same underlying property, even when worded differently. Record how many analysts independently proposed it ("n_analysts") and how many examples supported it in total.
+2. If two analysts proposed the same feature with OPPOSITE directions, keep it, mark "direction_conflict": true, and use the direction with more support.
+3. Keep hypotheses distinct. If two would give nearly the same annotation on most examples, merge them.
+4. Each hypothesis needs a rubric that a careful reader can apply to ONE example without knowing its group: a 0-3 scale with a concrete anchor per level. Rewrite rubrics so they are unambiguous; resolve vagueness rather than preserving it.
+5. Drop anything that is a restatement of response length.
+6. Output between 6 and 8 hypotheses. Order them by your judgement of how well supported they are. Do not invent hypotheses that no analyst proposed.
+
+Output, inside <hypotheses></hypotheses> tags, a JSON list of objects with exactly these keys:
+
+  "id": "H1", "H2", ... in order
+  "name": short label
+  "definition": one or two sentences
+  "rubric": the 0-3 annotation rubric with an anchor for each level
+  "more_common_in": "A" or "B"
+  "n_analysts": integer
+  "direction_conflict": true or false
+  "editable": "yes", "partly" or "no"
+  "edit_to_improve": one or two sentences describing the edit that moves a response AWAY from group A / TOWARD group B on this feature, without changing the user message, the decision, the advice or the factual content ("" if not editable)
+  "mechanism": one sentence

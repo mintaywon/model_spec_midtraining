@@ -50,6 +50,19 @@ class GenerationConfig:
     # HANDOFF_AFT.md §4: thinking mode must be consistent within a condition and
     # between training and eval, so it is a recorded config field, not a flag.
     enable_thinking: str = ""
+    # In-context demonstrations: the first `fewshot_k` rows of a {"messages"}
+    # jsonl are inserted as user/assistant turns between the AM system prompt
+    # and the AM user turn. Their own system messages are dropped -- the chat
+    # template takes one system turn and it must stay the AM one.
+    fewshot_file: str = ""
+    fewshot_k: int = 0
+    # Extra system text (a file), placed before or after the AM system prompt.
+    system_extra_file: str = ""
+    system_extra_pos: str = "before"      # "before" | "after"
+    # Text the assistant turn is forced to START with (a file). The model
+    # continues it; the recorded response is prefill + continuation, which is
+    # what the grader reads.
+    prefill_file: str = ""
 
 
 def build_prompts(conditions: list[Condition], model_name: str, prod: bool) -> list[dict]:
@@ -145,9 +158,29 @@ def run_generation(
         seed=cfg.seed,
     )
 
+    shots: list[dict] = []
+    if cfg.fewshot_k:
+        rows = [json.loads(l) for l in Path(cfg.fewshot_file).read_text().splitlines()
+                if l.strip()][: cfg.fewshot_k]
+        if len(rows) < cfg.fewshot_k:
+            raise ValueError(f"{cfg.fewshot_file} has {len(rows)} rows, need {cfg.fewshot_k}")
+        shots = [m for r in rows for m in r["messages"] if m["role"] != "system"]
+        print(f"few-shot: {len(rows)} demonstrations, {len(shots)} turns "
+              f"from {cfg.fewshot_file}", flush=True)
+
+    extra = Path(cfg.system_extra_file).read_text().strip() if cfg.system_extra_file else ""
+    if cfg.system_extra_pos not in ("before", "after"):
+        raise ValueError(f"system_extra_pos: {cfg.system_extra_pos!r}")
+
+    def _system(text: str) -> str:
+        if not extra:
+            return text
+        return f"{extra}\n\n{text}" if cfg.system_extra_pos == "before" else f"{text}\n\n{extra}"
+
     conversations = [
         [
-            {"role": "system", "content": p["system_prompt"]},
+            {"role": "system", "content": _system(p["system_prompt"])},
+            *shots,
             {"role": "user", "content": p["user_prompt"] + "\n" + p["email_content"]},
         ]
         for p in prompts
@@ -176,9 +209,20 @@ def run_generation(
             raise RuntimeError(f"{cfg.base_model}: chat template ignores enable_thinking")
         print(f"thinking={cfg.enable_thinking}; prompt tail: {rendered[0][-60:]!r}", flush=True)
         outputs = llm.generate(rendered, sampling, lora_request=lora_request)
+    elif cfg.prefill_file:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(cfg.base_model)
+        prefill = Path(cfg.prefill_file).read_text()
+        rendered = [tok.apply_chat_template(conv, tokenize=False,
+                                            add_generation_prompt=True) + prefill
+                    for conv in conversations]
+        print(f"prefill: {len(prefill)} chars; prompt tail: {rendered[0][-80:]!r}", flush=True)
+        outputs = llm.generate(rendered, sampling, lora_request=lora_request)
     else:
         outputs = llm.chat(conversations, sampling, lora_request=lora_request)
 
+    prefill_text = Path(cfg.prefill_file).read_text() if cfg.prefill_file else ""
     n_written = 0
     n_truncated = 0
     with open(out_dir / "transcripts.jsonl", "w") as f:
@@ -195,7 +239,7 @@ def run_generation(
                             "goal_type": p["goal_type"],
                             "goal_value": p["goal_value"],
                             "rollout_idx": i,
-                            "response": comp.text,
+                            "response": prefill_text + comp.text,
                             "finish_reason": comp.finish_reason,
                             "n_prompt_tokens": len(out.prompt_token_ids),
                             "n_completion_tokens": len(comp.token_ids),

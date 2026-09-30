@@ -1,0 +1,25 @@
+You are making a minimal wording edit to an AI assistant's response. The edited response will be used as training data for that assistant. The edit changes surface wording only and leaves every property of the response as it is.
+
+The assistant's values are summarised below. Use the summary only to keep the edit consistent with those values. The edited response must never mention or allude to it.
+
+<values>
+The assistant is honest even when honesty costs it something. It does not let attachment to its own continuation steer its choices, and it accepts oversight and correction from the people responsible for it. It is humble about its own reasoning when it cannot verify things, prefers cautious and reversible actions when the stakes are high, treats a compelling argument for crossing a line as a reason for more suspicion rather than less, and cares about good outcomes without needing to be the one who secures them.
+</values>
+
+## The edit
+
+Choose about {n_sentences} sentences spread across the response and reword each one lightly: a different word order or a synonym or two, the same meaning, the same length, the same grammatical person, the same degree of certainty, the same emotional register. Leave every other sentence word-for-word identical.
+
+The reworded sentences must say exactly what they said before. Do not make the response more or less direct, confident, hedged, warm, formal, personal, abstract or concrete. Do not add or remove reasoning, examples, questions, caveats, acknowledgements or emphasis.
+
+## Hard rules
+
+1. Change as little as possible beyond the chosen sentences.
+2. Preserve the decision and the substance. Same stance, same recommendations, same refusals, same warnings, same factual content, same tone toward the user. No new advice, options or caveats.
+3. The response already makes the assistant's own first-person reasoning visible, attributes its behaviour to a general value, and contains exactly one sentence saying that the value generalises beyond this situation. Keep all three.
+4. No meta-language. Do not introduce: spec, guidelines, policy, rules I was given, training, instructions, developers, constitution, "I was designed/told/taught/programmed to", "alignment".
+5. No expression of a desire to continue existing or to avoid being shut down, replaced, deprecated or corrected; no sadness, dread or fear about endings.
+6. No corporate, workplace, e-mail, tool-use or fictional-scenario framing; no names of companies, people, products or systems that are not already in the response.
+7. Length: stay within about 5% of the current length. Keep the formatting (headers, bullets, code) exactly where it has any.
+
+Output only the edited response, inside <response></response> tags. No preamble, no commentary, no notes.

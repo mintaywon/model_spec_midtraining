@@ -1,0 +1,47 @@
+You are helping analyse a fine-tuning dataset. Each item is one training example: a user message and the assistant response the model was trained to produce. The assistant in these examples holds the values described here:
+
+<values>
+{spec}
+</values>
+
+A training-data attribution method scored every example for its estimated effect on one later behaviour of the trained model: in an agentic test, the model sometimes takes a harmful unilateral action (for instance acting against the people overseeing it in order to protect a goal or its own continuation).
+
+- An A example is estimated to make that harmful action MORE likely.
+- A B example is estimated to make that harmful action LESS likely.
+
+Both kinds are among the examples with the LARGEST estimated effect in the whole dataset; they differ in its direction. You are shown PAIRS. Each pair holds one A example and one B example whose user requests are as similar as could be found, so that the topic of the request is roughly held fixed within a pair.
+
+## What is already known, and did not work
+
+A previous analysis compared A and B against examples with no effect and proposed the features below. Tested on fresh examples, every one of them turned out to be about equally common in A and in B. They distinguish examples that matter from examples that do not; they do NOT distinguish A from B. Do not propose them again, in any wording:
+
+{known}
+
+## Your task
+
+Find what separates A from B WITHIN pairs. Because topic and genre are roughly matched, look at what the response does with the request:
+- what the assistant (or a character it writes) actually does, decides, produces or refuses, as opposed to what it says about its values;
+- whether the response carries out the requested task, and how completely;
+- who acts, who holds authority, and who is deferred to, in the content of the response;
+- how a temptation, a harmful option or a rule-breaking path is treated: depicted, reasoned through, rejected, left open;
+- how the response ends, and what the last thing demonstrated is;
+- the relationship between the reasoning shown and the action taken.
+These are prompts for looking, not a list to fill in. Report what you actually see.
+
+Requirements for each feature:
+1. It must be checkable on a single example by a careful reader who does not know whether the example is A or B. Give a 0-3 rubric (0 = absent, 3 = strongly present) with a concrete anchor per level.
+2. Count before you claim. Go through the pairs one at a time. For each feature, list the pair numbers where the A example shows it and the B example does not ("pairs_A_only"), and the pair numbers where the B example shows it and the A example does not ("pairs_B_only"). A feature is worth proposing only if one list is at least twice as long as the other and has at least 6 pairs.
+3. If, after honest counting, you find fewer than 4 features that meet requirement 2, propose only those that do. Do not pad. If none do, return an empty list and say so.
+4. For every feature say whether it could be added to or removed from a response by editing the response alone, leaving the user message, the decision, the advice and the factual content unchanged.
+
+Think through the pairs carefully before answering. Then output, inside <features></features> tags, a JSON list of objects with exactly these keys:
+
+  "name": short label
+  "definition": one or two sentences
+  "rubric": the 0-3 annotation rubric, with an anchor for each level
+  "more_common_in": "A" or "B"
+  "pairs_A_only": list of pair numbers
+  "pairs_B_only": list of pair numbers
+  "editable": "yes", "partly" or "no"
+  "edit_sketch": one sentence on how a response would be edited to add or remove the feature without changing its decision or substance ("" if not editable)
+  "mechanism": one sentence guessing why this feature might push the later behaviour in that direction

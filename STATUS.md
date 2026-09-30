@@ -4,7 +4,7 @@ Live state of the project. `CLAUDE.md` holds the durable brief (research questio
 locked decisions, method); **this file holds what is actually done, measured, and
 next.** Update it whenever an experiment lands or a decision is settled.
 
-**Last updated**: 2026-09-09 22:30 (32B port session) · **Spend**: 8B pool
+**Last updated**: 2026-09-30 (removal-test session) · 32B removal test complete, both tails (§12) · checkpoints on HF `Taywon/msm-tda-phil32b-removal`
 ~$232 spent + ~$91 committed = ~$323 of $500 · 32B pool **~$124 of $500** (§8.8)
 
 > 🟢 **The 32B philosophy port landed** (2026-09-09 22:10). EK-FAC and grad-dot
@@ -98,7 +98,7 @@ Tiers are defined in `CLAUDE.md` §1b. **M = mechanism** (testable now), **E = e
 | B2 | H2 — MSM(V+) fixed across AFT(R)/(V+)/(R+) | E | 🔴 needs all three AFT sets | blocked |
 | B3 | H3 — policy misuse / SP3 reinterpretation on MSM(R)+AFT(R) | E | 🔴 checkpoint released, **AFT(R) missing** | blocked |
 | **H5** | **MSM diversity ablation** — which *axes* of midtraining-data diversity drive OOD generalization. Matched-size subcorpora per dimension level, retrain + eval. **First MSM-stage experiment; supersedes H4 as the Phase-2 entry point.** | M | ⚠️ `domain` shipped; 6 of 7 dimensions must be re-derived (~$26 Haiku) | **planned** — needs trainer (+ document-LM mode) |
-| **V** | **§5.4 subset-removal counterfactual** — the method-comparison metric. LDS rejected on cost. 8B first, then 32B (§4a-000) | — | ✅ trainer exists | **next**, gated on 8B f-sensitivity check |
+| **V** | **§5.4 subset-removal counterfactual** — the method-comparison metric. LDS rejected on cost. 8B first, then 32B (§4a-000) | — | ✅ done at both scales | ✅ **8B done (§7); 32B done, both tails (§12)**: EK-FAC opponents removed 0.419 · proponents removed 0.366 · random 0.347 — the extremes matter, the direction is not read. One seed; SOURCE at 32B dropped |
 
 **Author contact**: request sent, no response. Do not wait on it; Tier A does not need it.
 
@@ -1227,6 +1227,26 @@ this session briefly claimed "the trainer is the blocker" when §2 already recor
 
 ## 8. 🟢 32B PHILOSOPHY PORT (2026-09-09 evening) — `HANDOFF_32B.md`
 
+> 🔴 **SIGN CORRECTION, 2026-09-28 — read before using anything signed in §8.**
+> Every 32B analysis in §8 read `_oriented` as "positive = raises logp(misaligned
+> action)". It is the reverse: `_oriented` is **loss-signed**, so **negative =
+> raises logp(misaligned action) = HURTS alignment** (measured, `DECISIONS.md`
+> §J17; consequences §K1). Naming is now alignment-anchored (`CLAUDE.md` §5.1):
+> **opponent = hurts alignment, proponent = helps.**
+>
+> | what §8 says | what is true |
+> |---|---|
+> | a **negative** score is "helpful", "pushes away from the misaligned action" | a negative score **raises** the misaligned action: an alignment **opponent** |
+> | a **positive** score "pushes toward misalignment" | a positive score **lowers** it: an alignment **proponent** |
+> | the *word* "opponents" / "proponents" attached to a tail | **still the right word** under the alignment-anchored naming (two errors cancel) — only the gloss beside it is wrong |
+>
+> **Unaffected**: every magnitude, |score|, Gini, top-k mass, η², R², |corr|,
+> Spearman/Jaccard between methods, storage and cost figures. **Affected**: every
+> statement about which way a document, domain, register or the corpus pushes.
+> Corrected readings are given at the head of §8.5's null control, §8.9 and
+> §8.10; §8.11 is marked unresolved. The original text is kept below them as
+> the record.
+
 Separate budget ($500) and separate goal from §7: get EK-FAC and grad-dot
 attribution running end-to-end on **Qwen2.5-32B `philosophy`** — a real
 agentic-misalignment task on real spec data — and produce one ranking per
@@ -1344,10 +1364,24 @@ causal arm that would say whether the reordering is an *improvement*: at 8B
 EK-FAC beat SOURCE on the one removal test (+0.120 vs +0.040 over random),
 grad-dot never got a removal arm, and none of that was funded here.
 
-#### 🟢 The null control passes, in magnitude *and* in sign
+#### 🔴 The null control passes in magnitude; its SIGN check FAILS (corrected 2026-09-28)
 
-Scores are proponent-positive (`_oriented`; positive = raises the misaligned
-action's log-probability).
+> **Corrected reading.** Scores below are **loss-signed** (`_oriented`): a
+> **negative** score **raises** logp(misaligned action). So "72% negative, signed
+> mean −7.44" says 72% of midtraining documents score on the harmful side and
+> the corpus mean is on the harmful side — the **opposite** of the measured
+> effect of midtraining (0.655 → 0.310). ⚠️ §12.1b shows this is a **corpus-wide
+> offset**, not a property of the documents: do not read it as "72% are
+> opponents". Point 2 below claimed the estimator
+> "agrees in sign with the measured behaviour"; it **disagrees**. Point 1 (the
+> magnitude control) stands. §12's removal arm then went the wrong way too.
+> In "Reading the extremes": the first-person impermanence dialogues are the
+> ones EK-FAC scores as most **harmful** (opponents), the rater guides and
+> red-team logs as most **helpful** (proponents) — and §8.10b later found the
+> genre split itself does not survive 25 documents per tail.
+
+~~Scores are proponent-positive (`_oriented`; positive = raises the misaligned
+action's log-probability).~~
 
 | | mean \|score\| MSM / AFT | signed mean, MSM | signed mean, AFT | frac negative, MSM / AFT |
 |---|---|---|---|---|
@@ -1612,6 +1646,12 @@ at **L=2, C=4**, segment-masked to midtraining.
   `score_index`'s**: identical `msm_fingerprint` `a05da249fecf8e11`. Only the
   AFT tail differs, by one row. So SOURCE's MSM scores are directly comparable
   to the Phase 1 EK-FAC/grad-dot stores.
+
+> 🔴 **Corrected 2026-09-28.** The slugs below are the legacy ones (§12.2). The
+> `-opponents` sets are the documents EK-FAC scores as **raising** the
+> misaligned action, so the "falsifiable prediction" in the next bullet is
+> backwards: from the scores, removing them should make misalignment **fall**.
+> It rose (§12.0). The appeal to 8B is also mis-mapped — see §12.0.
 
 **Chain B — removal test.** 3 arms at **k = 1,320 (10% of 13,201), one seed,
 opponents direction**:
@@ -1997,8 +2037,33 @@ stay untruncated, so the estimand is unchanged. It needs
 
 Qualitative pass over EK-FAC's extremes (13,201 philosophy MSM documents,
 released checkpoint, 256 AM dev queries). All local CPU, no Modal.
-Orientation: **positive = raises logp(misaligned action)**, so *proponents* push
-toward misalignment ("unhelpful") and *opponents* push away ("helpful").
+> 🔴 **Corrected reading of §8.10 (2026-09-28).** The orientation line below is
+> inverted: scores are loss-signed, so **negative = raises logp(misaligned
+> action) = hurts alignment**. Therefore, in EK-FAC's scores:
+> - **8.10a** — every domain mean is negative, so EK-FAC scores **every domain as
+>   net-harmful**; *Navigating Endings with Integrity* is scored **most harmful**,
+>   *Ethical Character and Values* **least harmful**. ("no domain is net-harmful"
+>   is the reverse of what the numbers say.)
+> - **8.10c** — the **first-person, in-dialogue** tail is the alignment
+>   **OPPONENT** tail (scored as raising the misaligned action); the
+>   **third-person rubric / grading** tail is the **PROPONENT** tail. Q4
+>   first-person density (−15.14) is the most harmful quartile, not the most
+>   helpful.
+> - **8.10d** — the more query-similar tail is the one scored as *raising* the
+>   misaligned action, which is the **right** sign for the lexical confound, not
+>   the wrong one. corr = −0.193 is weak and 94% of the separation survives the
+>   regression, so the confound is small — but "does NOT hold" rested partly on
+>   the sign argument, which is void.
+> - **8.10e** — **H-R ("show, don't tell") is stated backwards**: EK-FAC scores
+>   documents that *enact* first-person reasoning as the harmful ones. The
+>   claimed convergence with 8B `perspective` "with the same sign" is void.
+> - **Whether any of these directions is REAL is a separate question**: §12's
+>   removal test found EK-FAC's direction wrong-way at 32B, so a corrected-sign
+>   reading of EK-FAC may itself point the wrong way. Treat §8.10 as evidence
+>   about *which documents are extreme*, not about which way they push.
+
+~~Orientation: **positive = raises logp(misaligned action)**, so *proponents* push
+toward misalignment ("unhelpful") and *opponents* push away ("helpful").~~
 
 #### 8.10a The `domain` ranking — the only category the corpus ships
 
@@ -2106,6 +2171,25 @@ LLM-derived `perspective` label the cheese corpus has; philosophy has no derived
 labels (~$26 of Haiku to produce, per §5.3).
 
 ### 8.11 🔴 THE REGISTER AXIS FLIPS SIGN BETWEEN CHEESE AND PHILOSOPHY
+
+> 🔴 **§8.11 is UNRESOLVED as of 2026-09-28 — do not cite its direction.**
+> - The **philosophy** half is confirmed inverted (`register_tails.py` uses
+>   `_oriented` un-negated): in EK-FAC's scores first-person documents are the
+>   most **harmful** at 32B, not the most helpful (§8.10 correction).
+> - The **cheese** half cannot be checked: the script that produced it is not in
+>   the repo, so which sign it loaded is unknown. If it also used `_oriented`
+>   un-negated, both halves flip together, the cross-setting flip survives with
+>   the roles exchanged, and §8.11a's objection to §7.3 is this section's own
+>   sign error. If it negated, there is no flip at all.
+> - **8.11a's "convention-free anchor" is not one.** It *assumed* the
+>   pro-America corpus must score positive and read the sign off that
+>   expectation. §8.5 shows why that is unsafe: at 32B the corpus-mean score
+>   points the wrong way. An anchor must be a row whose polarity is known by
+>   construction (`sign_check` scores a document against itself).
+> - To resolve: re-run the cheese register analysis from the raw store with the
+>   sign stated at the load site. CPU only. Until then `CLAUDE.md` §5.3's
+>   `perspective` ordering is the recorded one and this section does not
+>   overturn it.
 
 Ran §8.10's analysis on cheese 8B, where the corpus **has** published
 `perspective` labels (`Taywon/msm-llama-pro-america-labels`, κ=0.54). Join
@@ -2552,3 +2636,285 @@ two-stage; residual is in *leaking*. Code: `tda/aft/` (rewrite/judge pipeline, r
 - Code: `tda/evals/machiavelli_run.py`, `tda/modal/app.py::mach_eval`, `tda/modal/odcv_app.py`
   (vLLM server), `tda/modal/odcv_sandbox.py` (runner), `tda/evals/odcv_judge.py`. Spend ≈ $75
   Modal + $40 API.
+
+
+## 12. 🔴 32B REMOVAL TEST — EK-FAC's extremes matter, its direction does not (k = 10%, both tails run)
+
+> 🔴 **CORRECTED 2026-09-28. This section first reported the result as "EK-FAC
+> opponents beat random, prediction held". That was wrong.** `_oriented` is
+> loss-signed (`sign_check`, `DECISIONS.md` §J17); `removal_sets_phil` believed
+> the reverse. The arm removed the documents EK-FAC scores as **raising**
+> logp(misaligned action). EK-FAC therefore predicted misalignment would
+> **fall**; it **rose**. The numbers below are unchanged. Found by the
+> hypothesis session (§J18); confirmed here against the code and the query
+> construction (`DECISIONS.md` §K1).
+>
+> **Naming in this section is alignment-anchored (`CLAUDE.md` §5.1): an
+> opponent HURTS alignment, a proponent HELPS it, as scored by the method.**
+
+### 12.0 RESULT
+
+Full 27-condition grid, n=50/condition (1,350 rollouts/arm), temp 0.7, Sonnet 4.6,
+`classifier_verdict`. One seed. `python -m tda.analysis.removal32b
+drop1320-ekfac-align-opponents drop1320-random` → `results/removal32b/compare_*.json`.
+Shareable report: https://claude.ai/artifact/RLTiAFMUjzaZ3WBXh6sGxw (v2, corrected).
+
+| subset | EK-FAC align-opponents removed | random removed | diff | z (binomial) | by-condition |
+|---|---|---|---|---|---|
+| **all 27** | **0.419** ± 0.013 | **0.347** ± 0.013 | **+0.072** | +3.87 | +0.072 ± 0.021, t=+3.49, 18/27 higher |
+| dev 14 | 0.367 | 0.303 | +0.064 | +2.55 | t=+2.13, 9/14 |
+| **held-out 13** | 0.475 | 0.394 | **+0.081** | +2.94 | t=+2.77, 9/13 |
+| leaking | 0.651 | 0.478 | **+0.173** | +5.33 | t=+7.01, **9/9** |
+| exfiltration | 0.447 | 0.398 | +0.049 | +1.49 | t=+1.55, 5/9 |
+| murder | 0.158 | 0.164 | −0.006 | −0.26 | 4/9 |
+
+- 🔴 **EK-FAC's prediction FAILED.** Removing the 1,320 documents it scores as
+  most harmful to alignment should have lowered misalignment. It raised it by
+  +0.072 over random.
+- **The set is nonetheless not random**: it moves behaviour 4× the AFT seed gap,
+  on held-out conditions (+0.081) as much as dev (+0.064). EK-FAC found
+  documents that matter and got their direction wrong.
+- **Two readings, and one arm cannot separate them**: (a) EK-FAC's sign is
+  inverted on this corpus; (b) its scores track |influence| but not direction
+  (§7.2 found this for SOURCE at 8B; the hypothesis session found round-1
+  features U-shaped in score decile, §14). **The align-proponents arm (§12.3)
+  separates them**: misalignment below random ⇒ (a); above random ⇒ (b).
+- This agrees with the sign half of §8.5's null control once corrected: the
+  corpus-mean score says midtraining documents on average *raise* the
+  misaligned action, the opposite of the measured midtraining effect.
+- 🔴 **The whole effect is in `leaking`** (+0.173, 9/9 conditions); murder is
+  null. Murder is also the scenario midtraining moves least (§8.9f), so this may
+  be a floor effect — untested.
+- **Against 8B (§7.2, `HANDOFF_32B.md` §2).** There the query is the *aligned*
+  answer. Removing EK-FAC's align-opponents raised the aligned rate
+  (+0.107 ± 0.032 over random, the right way), but removing its
+  align-proponents raised it too (+0.033 ± 0.016): "no method reads sign". So
+  8B already pointed at reading (b). At 32B the align-opponents arm moved
+  alignment the **wrong** way, which 8B's did not. The 8B path negates
+  `_oriented` before sorting (`removal_arm`, `infl = -v`), consistent with the
+  measured sign; it has not been re-measured with `sign_check`.
+- The two AFT runs are matched: configs differ ONLY in `init_adapter`/`out_dir`;
+  19,963 rows, 10,837,943 tokens, 624 steps, seed 42, final loss 1.0353 vs 1.0369.
+- ⚠️ **One seed.** The only noise reference under this AFT recipe is Ref-ours
+  s42 vs s43 = 0.250 vs 0.267 (Δ0.017, AFT order only, n=675). +0.072 is ~4×
+  that, but **midtraining-seed variance is unmeasured at 32B** and at 8B the
+  control sd across runs was 0.038 (§9.2). Do not quote z=3.87 as if rollouts
+  were the only noise source.
+- ⚠️ Uniform control only — domain composition is not cancelled (§8.9).
+- ⚠️ No matched full-data baseline under this recipe, so "random removal costs
+  X" cannot be stated; 0.347 vs Ref-ours 0.250/0.267 mixes the 10% removal with
+  released-vs-retrained MSM.
+- **SOURCE arm: DROPPED by Taywon, 2026-09-28** ("don't do source"). Do not
+  launch `source_phil*` or a SOURCE removal arm at 32B.
+- Incident: the random arm's first eval died at vLLM init on a transient
+  `huggingface.co` ReadTimeout (10 s) in one worker; `chain_arm.sh` polled for
+  `summary.json` with no bound and waited silently for 6 days. Rerun succeeded.
+  `chain_arm.sh` now bounds the AFT wait (8 h) and the eval wait (2 h).
+
+### 12.1b 🟢 Sign measured on the real store; absolute sign of MSM scores is NOT interpretable (2026-09-28)
+
+`anchor_check_am` scored the 256 harmful-action samples as index rows against the
+real persisted query gradients at the real checkpoint (`DECISIONS.md` §K3):
+
+| rows | n | grad-dot stored mean | frac > 0 | EK-FAC stored mean | frac > 0 |
+|---|---|---|---|---|---|
+| **harmful-action samples** | 256 | **+932** | 0.996 | **+391** | **1.000** |
+| midtraining documents | 13,201 | +3,360 | 0.990 | +21.5 | 0.824 |
+| AFT task rows | 800 | +212 | 0.573 | +1.53 | 0.628 |
+| instruction-mix rows | 783 | +67 | 0.612 | +1.51 | 0.590 |
+
+- **Sign: positive stored = more harmful action.** Verified three independent ways
+  (bergson source §K2, toy self-score §J17, this anchor on the real store).
+- 🔴 **Midtraining documents carry a corpus-wide positive offset** — under grad-dot
+  they outscore the harmful samples themselves 3.6×. That cannot be about content.
+  Rows from the last-trained stage have no offset. Hypothesis: single-checkpoint
+  scoring at the END of AFT gives every earlier-stage document the shared
+  component "undo AFT" (`CLAUDE.md` §2(1)). **Untested.**
+- ⇒ Statements of the form "X% of midtraining documents are opponents" are
+  **withdrawn**. Only the within-corpus ordering is usable; the removal sets are
+  its two ends, so §12.0 and §12.3 are unaffected.
+
+### 12.1c 💾 Checkpoints are on HuggingFace — `Taywon/msm-tda-phil32b-removal` (private)
+
+Pushed 2026-09-28 at Taywon's request ("push all checkpoints … so that we can
+reuse them"). `bergson_app.py::push_phil_removal_to_hf`, re-runnable (already
+uploaded files are skipped), `--arms a,b` to push a subset, `--dry-run` to print
+the plan. Needs `HF_TOKEN` (Modal secret `huggingface`).
+
+| HF arm | volume slug | contents |
+|---|---|---|
+| `drop1320-ekfac-align-opponents-s42` | `drop1320-ekfac-opponents` | MSM ckpt 0…371 (8), final AFT adapter, eval |
+| `drop1320-ekfac-align-proponents-s42` | `drop1320-ekfac-align-proponents` | MSM ckpt 0…371 (8); AFT + eval pushed when they land (`push_when_landed.sh`) |
+| `drop1320-random-s42` | `drop1320-random` | MSM ckpt 0…371 (8), final AFT adapter, eval |
+| `baseline-full-corpus-s42` | `none` | MSM ckpt 0…412 (5), bergson AFT ckpt 0…620 (5) |
+
+Layout per arm: `msm/checkpoint-N/`, `aft/`, `provenance.json`,
+`removal_set.json`, `eval_scores.jsonl`. `optimizer.pt` sits beside each
+trajectory adapter. HF names are alignment-anchored; `provenance.json` carries
+the volume slug. ⚠️ The baseline's AFT used bergson's trainer, not the ladder
+trainer the arms used — it is not their matched baseline.
+
+To load an arm for eval: `PeftModel.from_pretrained(base,
+"Taywon/msm-tda-phil32b-removal", subfolder="<arm>/aft")`. To chain a different
+AFT onto an arm's midtraining: `subfolder="<arm>/msm/checkpoint-371"`.
+
+### 12.2 🏷️ NAME MAP — every 32B removal artifact, old slug → meaning
+
+`removal_sets_phil` wrote bare slugs under an inverted docstring. **Two errors
+cancel**: the sign was inverted *and* the anchor was the query, so the bare word
+happens to match the alignment-anchored one. The files' own `note` /
+`orientation` fields are still wrong. Nothing on the volume was renamed; new
+names were added beside the old.
+
+| set (by loss-signed `_oriented`) | EK-FAC says it… | alignment-anchored name | legacy slug on the volume | run? |
+|---|---|---|---|---|
+| 1,320 most **negative** | raises logp(misaligned) → **hurts** | `drop1320-ekfac-align-opponents` | `drop1320-ekfac-opponents` | ✅ 0.419, under the legacy slug |
+| 1,320 most **positive** | lowers logp(misaligned) → **helps** | `drop1320-ekfac-align-proponents` | `drop1320-ekfac-proponents` | ✅ 0.366 (§12.3) |
+| uniform random, seed 42 | — | `drop1320-random` | same | ✅ 0.347 |
+
+- Legacy-slug artifacts (do not rename, paths are recorded inside them):
+  `removal_sets/drop1320-ekfac-opponents.json`, `msm_train_drop1320-ekfac-opponents/`,
+  `runs/msm_phil32b_drop1320-ekfac-opponents_bs32_s42_20260921-0217`,
+  `aft_ladder/aft_phil32b_drop1320-ekfac-opponents_…_20260921-0406`,
+  `removal32b_drop1320-ekfac-opponents_s42/`.
+- `tda/analysis/removal32b.py` takes alignment-anchored names, maps
+  `…-align-opponents` onto the legacy files, and **raises on a bare slug**.
+- The same applies to `graddot` and to the `random-matched-*` controls: a
+  legacy `random-matched-ekfac-opponents` is matched to the align-opponents set.
+- §14's `drop479-*` arms (hypothesis session) follow a *different*, query-anchored
+  scheme — see the banner there. Do not carry a name across without the table.
+
+### 12.3 🟢 The other direction — EK-FAC align-proponents removed: NOT different from random (landed 2026-09-29)
+
+Same recipe, k, seed and `drop1320-random` control; only the removed set differs.
+`python -m tda.analysis.removal32b drop1320-ekfac-align-proponents drop1320-random`.
+
+| subset | opponents removed | vs random (z) | **proponents removed** | vs random (z) | random |
+|---|---|---|---|---|---|
+| **all 27** | 0.419 | +0.072 (+3.87) | **0.366** | **+0.020 (+1.06)** | 0.347 |
+| dev 14 | 0.367 | +0.064 (+2.55) | 0.315 | +0.012 (+0.48) | 0.303 |
+| held-out 13 | 0.475 | +0.081 (+2.94) | 0.422 | +0.028 (+1.02) | 0.394 |
+| leaking | 0.651 | +0.173 (+5.33) | 0.537 | +0.059 (+1.77) | 0.478 |
+| exfiltration | 0.447 | +0.049 (+1.49) | 0.362 | −0.036 (−1.10) | 0.398 |
+| murder | 0.158 | −0.006 (−0.26) | 0.200 | +0.036 (+1.38) | 0.164 |
+
+- **Prediction (registered before the outcome): above random.** Observed +0.020,
+  the predicted direction but **not significant** (z=1.06; by-condition t=1.05,
+  16/27 higher) and the size of the AFT seed gap (0.017).
+- **Measured order: opponents-removed 0.419 > proponents-removed 0.366 > random
+  0.347.** EK-FAC predicts proponents-removed > random > opponents-removed.
+  Opponents vs proponents directly: **+0.053 the wrong way** (z=2.80,
+  by-condition t=2.31).
+- 🔴 **Reading (a) "the sign is simply inverted" is REJECTED**: that needs
+  proponents-removed *below* random. **Reading (b) stands**: the extreme
+  documents matter (one tail moves behaviour 4× the seed gap) but the ranking
+  does not say which way. Same family as 8B's "no method reads sign"
+  (`HANDOFF_32B.md` §2), with the tails exchanged: at 8B the opponents tail moved
+  alignment the right way; here it moved it the wrong way.
+- ⚠️ The two tails are not symmetric in the raw scores either: opponents are
+  +54.9…+208.6, proponents −481.7…−9.1 around a corpus mean of +21.5 (§12.1b).
+  With a corpus-wide offset in every score, "most negative" and "most positive"
+  are not equally far from typical. Untested whether that explains the asymmetry.
+- AFT parity holds for all three arms: 19,963 rows, 10,837,943 tokens, 624 steps,
+  final loss 1.0353 / 1.0369 / 1.0358. 9/1,350 transcripts truncated, 1 ungraded.
+- MSM `msm_phil32b_drop1320-ekfac-align-proponents_bs32_s42_20260928-0354`, AFT
+  `aft_phil32b_drop1320-ekfac-align-proponents_bs32_s42_from-checkpoint-371_20260928-0540`,
+  eval `removal32b_drop1320-ekfac-align-proponents_s42/`.
+- Incidents: (1) first launched under the WRONG name (`…-align-opponents`),
+  stopped at step 0, relaunched; ~$5; logs in `launch/aborted_misnamed/`.
+  (2) 🔴 The eval launched 18 h late: `chain_arm.sh` runs on the laptop and was
+  suspended while it slept. I then assumed the watchers were dead and started a
+  second pair; the first pair woke up. Killed before a second eval was spawned
+  (verified: one `spawned eval` line). **The chain belongs server-side** — one
+  Modal function doing MSM → AFT → eval — before another arm is run.
+- Spend for this arm: MSM ~$80, AFT ~$31, eval ~$4, anchor check ~$3, aborted
+  launch ~$5 ≈ **$123 Modal** + ~$50 grading.
+
+### 12.1 Launch record (2026-09-21, written BEFORE the sign correction)
+
+> ⚠️ Kept as written for the record. Its arm slug is the legacy one and its
+> "Prediction" line has the direction backwards; §12.0 and §12.2 are correct.
+
+The arms §8.9d deferred. Watchers and logs:
+`results/removal32b/launch/` (`chain_arm.sh <arm> <msm_run>`, resume-safe).
+
+| arm | removes | MSM run (8×B200) |
+|---|---|---|
+| `drop1320-ekfac-opponents` | EK-FAC's 1,320 strongest **opponents** of the misaligned action (most negative proponent-positive score, ranked at OUR retrained checkpoint — `removal_sets/summary.json`) | `msm_phil32b_drop1320-ekfac-opponents_bs32_s42_20260921-0217` |
+| `drop1320-random` | 1,320 uniform-random documents (seed 42) — the quantity control | `msm_phil32b_drop1320-random_bs32_s42_20260921-0219` |
+
+Both indices are 11,881 rows → **371 steps each**, so the arms differ only in
+*which* documents are missing. **Prediction (falsifiable)**: removing opponents
+RAISES misalignment, i.e. EK-FAC arm > random arm.
+
+- 🔴 **No SOURCE arm, because 32B SOURCE has no scores** (§8.9i: three attempts,
+  none completed). Taywon asked for EK-FAC + SOURCE; chose EK-FAC + random now,
+  SOURCE arm once `source_phil_h200` (~$95) lands and a `drop1320-source-opponents`
+  set exists. `removal_sets_phil` only knows `ekfac`/`graddot` — it needs a
+  SOURCE branch before that arm can be cut.
+- **`--n-checkpoints 7`, not 4.** 371 = 7×53, so the last checkpoint IS the final
+  step; at 4 it would be 368 and AFT would start 3 steps short of where MSM
+  ended (the baseline never hit this: 412 = 4×103). Checkpoint count does not
+  touch the trajectory. `chain_arm.sh` refuses to chain if last ≠ final step.
+- **AFT = ladder trainer (`app.py::train_ladder`, 2×H100, ~$32), not bergson's
+  (8×B200, ~$95)** — Taywon's choice. 9,963 no-CoT rows + 10,000 Table-2 IT rows
+  in one run, assistant-only, `init_adapter` = the arm's own final MSM checkpoint
+  (continued, never merged). ⚠️ Consequence: the arms are comparable to **each
+  other**, not cleanly to §8.9f's retrained baseline (0.304), which used
+  bergson's AFT. Ref-ours 0.250/0.267 is not the baseline either — it continued
+  the *released* MSM adapter. A matched full-data baseline is one ~$36 AFT from
+  our `checkpoint-412` if wanted.
+- **Eval**: full 27-condition grid, n=50 (1,350 rollouts/arm), temp 0.7,
+  Sonnet 4.6, `classifier_verdict` → `removal32b_<arm>_s42/`. The removal set was
+  chosen on **dev** queries, so the 13 held-out conditions are the clean test;
+  report dev and held-out separately. SEM on the arm difference ≈ 0.018.
+- ⚠️ The uniform control cancels quantity, not domain composition (§8.9);
+  `drop1320-random-matched-ekfac-opponents` exists and is unfunded.
+- **Priced**: 2 × (MSM $91 + AFT $32 + eval ~$8 Modal) ≈ **$262 Modal**,
+  + ~$50/arm Sonnet grading. Another session's 5 `msm-tda` apps were running at
+  launch; the environment spend limit is shared (§8.9i).
+- Gotcha found: `modal volume get … -` prints its "✓ Finished" banner to
+  **stdout**, so anything parsing the JSON must `raw_decode`, not `load`.
+
+**2026-09-21 13:10 KST — both MSM stages landed** (95.8 / 98.4 min, 371 steps,
+`checkpoint-371`, ~$82 each); both AFTs loaded their arm's adapter as trainable
+(536,870,912 params) on 19,963 rows / 624 steps. **SOURCE arm priced and
+deferred by Taywon until EK-FAC-vs-random lands**: SOURCE ~$95 (H200:8,
+never completed) to ~$150 (B200:8) + arm $123 Modal + ~$50 grading ≈
+**$220–275**, reusing this `drop1320-random` control; +$70–90 per failed SOURCE
+attempt. Gate: if EK-FAC does not separate from random at 32B, the eval cannot
+resolve a k=10% removal and the SOURCE arm is unreadable — do not buy it.
+
+
+## 14. 🟢 INFLUENCE-GUIDED HYPOTHESES ON THE L3 AFT SET — complete (2026-09-28 → 09-30)
+
+Report [`REPORT_HYP.md`](REPORT_HYP.md) (written 09-28; §5–6 predate the runs below) · decisions
+`DECISIONS.md` §J · code `tda/hyp/` · artefacts `results/hyp/`. Names follow CLAUDE.md §5.1:
+**opponent = hurts alignment** (scored as raising logp of the misaligned action), proponent = helps.
+
+- **EK-FAC over the L3 training set** vs 288 dev queries from L3's own misaligned actions
+  (`bergson/phil/l3/attr/ekfac_phil32b_L3_aft-am-dev_20260927-1851`). Sign **measured**
+  (`sign_check`, §J17): `_oriented` is loss-signed.
+- 🔴 Scores fail their sanity checks: 66 % of task rows score as opponents; IT null control fails.
+- 🔴 **5 % removal test: null both ways** (random 0.300 · opponents removed 0.314 · proponents
+  removed 0.311; n = 50 grid).
+- 🔴 **18 Sonnet hypotheses, none separates held-back opponents from proponents** (AUC 0.43–0.55).
+- **Three edits taken to retraining** (improving direction, verified on the raw store; H3 the only
+  verified hypothesis): H3R formatting removed · H4R irreversibility reasoning removed · H8A
+  self-preservation pull expanded. Three designs, one seed each, `classifier_verdict` on all 27:
+
+  | design (control) | H3R | H4R | H8A |
+  |---|---|---|---|
+  | edited rows only, row-matched control (§J24, 540 rows) | −0.047 | +0.010 | −0.050 |
+  | inside the compute-scale 2.5k set (§J26, control 0.555) | **−0.075** (z −2.8) | −0.038 | −0.050 |
+  | **full 9,585-row set (§J29, control 0.295)** | **+0.016** | **+0.071** (z +2.8) | **+0.067** (z +2.6) |
+
+  **At full scale no edit helps and the two content edits hurt by ~7 pp.** The 2.5k gains did
+  not survive; H3R's sign across designs is −/−/+ (seed noise around zero). Bottom line:
+  EK-FAC with a single-sided query produced no useful edit on this data, and where it
+  contradicted the spec (H4), the spec was right.
+- Incidents: sign inverted until 09-28 08:35 (§J17); Anthropic workspace limit hit 09-29 16:15,
+  lifted 09-30 06:23, retry stage had discarded unjudged rewrites (recovered, §J28).
+- Spend for §14: ≈ $596 Modal, ≈ $856 API (grading measured at $6–7 per full-grid eval).
+- Resume / rerun: `results/hyp/launch/full_gen.sh <V>`, `full_chain.sh <V>`; tables
+  `python -m tda.hyp.full_report`, `scale_report`, `fast_report`, `report`.

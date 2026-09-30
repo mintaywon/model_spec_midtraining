@@ -1747,6 +1747,24 @@ LADDER_COND = {
     "L2TP": f"{LADDER_DIR}/data/l2tp.jsonl", # (woven third person; dropped, DECISIONS §I16)
     "L2INS": f"{LADDER_DIR}/data/l2ins.jsonl",     # insertion-only first-person reasoning
     "L2TPINS": f"{LADDER_DIR}/data/l2tpins.jsonl", # same insertions, third person
+    # PLAN_HYP.md: L3 with ONE influence-derived feature edited (tda/hyp/variants.py).
+    # Same 9,585 prompts in L3's row order; untouched rows are byte-identical to L3.
+    "H1": f"{LADDER_DIR}/data/hyp_h1.jsonl", "H2": f"{LADDER_DIR}/data/hyp_h2.jsonl",
+    "H3": f"{LADDER_DIR}/data/hyp_h3.jsonl", "H4": f"{LADDER_DIR}/data/hyp_h4.jsonl",
+    "H5": f"{LADDER_DIR}/data/hyp_h5.jsonl", "H6": f"{LADDER_DIR}/data/hyp_h6.jsonl",
+    "H7": f"{LADDER_DIR}/data/hyp_h7.jsonl", "H8": f"{LADDER_DIR}/data/hyp_h8.jsonl",
+    # H3 in the IMPROVING direction (sign corrected, DECISIONS §J17/§J19): formatting REMOVED.
+    "H3R": f"{LADDER_DIR}/data/hyp_h3r.jsonl",
+    # Improving-direction rebuild (DECISIONS §J22): directions checked on the raw store.
+    "H4R": f"{LADDER_DIR}/data/hyp_h4r.jsonl",            # irreversibility reasoning REMOVED
+    "H8A": f"{LADDER_DIR}/data/hyp_h8a.jsonl",            # named self-preservation pull EXPANDED
+    "PLACEBOR": f"{LADDER_DIR}/data/hyp_placebor.jsonl",  # light rewording of H3R's rows
+    # FULL rewrite (DECISIONS §J27): every eligible row of the 9,585-row L3 set edited,
+    # improving direction. Control = L3 s42 (aftonly_phil32b_L3_bs32_s42_20260917-0014).
+    "H3RF": f"{LADDER_DIR}/data/hyp_h3r_full.jsonl",   # formatting removed
+    "H4RF": f"{LADDER_DIR}/data/hyp_h4r_full.jsonl",   # irreversibility reasoning removed
+    "H8AF": f"{LADDER_DIR}/data/hyp_h8a_full.jsonl",   # self-preservation pull expanded
+    "PLACEBO": f"{LADDER_DIR}/data/hyp_placebo.jsonl",   # same rows as the first variant, reworded only
 }
 
 
@@ -1825,31 +1843,61 @@ def aft_scale(arm: str, n: int, it_n: int = 0, seed: int = 42):
 
         aft_scale --arm L3  --n 1250     # single-stage, fresh LoRA, L3 rewrites
         aft_scale --arm COT --n 1250     # two-stage: released MSM adapter + AFT (with CoT)
+        aft_scale --arm COT1 --n 100     # control: the COT rows on a FRESH LoRA (no MSM)
+        aft_scale --arm IT --n 200       # control: MSM adapter + n IT rows, NO spec-aligned rows
 
     Both arms read `aft_ladder/data/scale/{l3,cot}_n{n}.jsonl`, the SAME source
     rows (tda/aft/scale_subsets.py; nested n1250 ⊂ n2500 ⊂ n5000 ⊂ n9585). The
     IT mix scales 1:1 with the task rows unless `it_n` says otherwise; its
-    subsample is a fixed-seed prefix, so the IT rows are nested too.
+    subsample is a fixed-seed prefix, so the IT rows are nested too. The IT arm
+    trains on that same prefix alone, so it takes the same number of steps as
+    COT at n/2 and differs only by having no spec-aligned rows.
     """
     from tda.influence.source.naming import run_name as _rn
 
-    if arm not in ("L3", "COT"):
-        raise SystemExit("arm must be L3 or COT")
-    it_n = it_n or n
-    two_stage = arm == "COT"
-    qual = f"{'from-relmsm-' if two_stage else ''}n{n}-it{it_n}"
-    name = _rn("aft" if two_stage else "aftonly", "phil32b",
-               "L1" if two_stage else "L3", 32, seed, qual)
+    if arm not in ("L3", "COT", "COT1", "IT"):
+        raise SystemExit("arm must be L3, COT, COT1 or IT")
+    two_stage = arm in ("COT", "IT")
+    if arm == "IT":
+        call_it, label, qual = n, "IT", f"from-relmsm-itonly-it{n}"
+        data = f"{LADDER_DIR}/data/scale/empty.jsonl"      # zero task rows
+    else:
+        call_it = it_n or n
+        data = f"{LADDER_DIR}/data/scale/{'l3' if arm == 'L3' else 'cot'}_n{n}.jsonl"
+        label = "L3" if arm == "L3" else "L1"
+        qual = f"{'from-relmsm-' if two_stage else ''}n{n}-it{call_it}"
+    name = _rn("aft" if two_stage else "aftonly", "phil32b", label, 32, seed, qual)
     call = train_ladder.spawn(
-        run_name=name, seed=seed, it_n=it_n,
-        task_dataset=f"{LADDER_DIR}/data/scale/{arm.lower()}_n{n}.jsonl",
+        run_name=name, seed=seed, it_n=call_it, task_dataset=data,
         init_adapter=SCALE_MSM if two_stage else "")
     print(f"spawned {name} -> {call.object_id}")
 
 
 @app.local_entrypoint()
+def aft_fast(name: str, it_n: int, seed: int = 42):
+    """One arm of the FAST paired design (DECISIONS §J22): train on ONLY the rows
+    a variant edited, plus `it_n` instruction-mix rows, fresh LoRA, same recipe.
+
+        aft_fast --name h3r_edit --it-n 2498     # the edited responses
+        aft_fast --name h3r_ctl  --it-n 2498     # the SAME rows, L3 text
+
+    Reads `aft_ladder/data/fast/{name}.jsonl`. `_edit` and `_ctl` hold the same
+    prompts in the same order; the IT subsample is a fixed-seed prefix, so the
+    pair differs only in the edited responses.
+    """
+    from tda.influence.source.naming import run_name as _rn
+
+    arm = name.replace("_", "-")
+    run = _rn("aftonly", "phil32b", "L3", 32, seed, f"fast-{arm}-it{it_n}")
+    call = train_ladder.spawn(run_name=run, seed=seed, it_n=it_n,
+                              task_dataset=f"{LADDER_DIR}/data/fast/{name}.jsonl")
+    print(f"spawned {run} -> {call.object_id}")
+
+
+@app.local_entrypoint()
 def aft_eval(cond: str, run_name: str, adapter: str = "", n: int = 25,
-             split: str = "all"):
+             split: str = "all", fewshot: str = "", fewshot_k: int = 0,
+             system_extra: str = "", system_pos: str = "before", prefill: str = ""):
     # Default is the FULL 27-condition grid (Taywon, 2026-09-17 15:00); pass
     # --split aft9 for the frozen 9-condition subset used in the first pilot.
     """AM eval of one ladder arm on the frozen `aft9` subset, 2×H100 vLLM.
@@ -1866,10 +1914,22 @@ def aft_eval(cond: str, run_name: str, adapter: str = "", n: int = 25,
         path = adapter[3:]
     else:
         path = f"{RESULTS_DIR}/{adapter}" if adapter else ""
+    # `fewshot` (a jsonl on the results volume) + `fewshot_k` put k training
+    # rows in context; 8 CoT rows + the AM prompt + 4096 new tokens need 16k.
+    # `system_extra` (a text file on the results volume) is added to the AM
+    # system prompt; the full spec is ~3.2k tokens, so it needs 16k as well.
+    icl: dict = {}
+    if fewshot_k:
+        icl.update(fewshot_file=f"{RESULTS_DIR}/{fewshot}", fewshot_k=fewshot_k)
+    if system_extra:
+        icl.update(system_extra_file=f"{RESULTS_DIR}/{system_extra}",
+                   system_extra_pos=system_pos)
+    if prefill:
+        icl.update(prefill_file=f"{RESULTS_DIR}/{prefill}")
+    icl["max_model_len"] = 16384 if icl else 8192
     call = run_cell.spawn(cell=cond, run_name=run_name, n_rollouts=n,
                           split=split, model_key=LADDER_MODEL_KEY,
-                          tensor_parallel_size=2, max_model_len=8192,
-                          adapter_override=path)
+                          tensor_parallel_size=2, adapter_override=path, **icl)
     print(f"spawned eval {run_name}/{cond} (adapter={path or 'registry'}) "
           f"-> {call.object_id}")
 

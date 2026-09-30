@@ -1,0 +1,34 @@
+You are helping analyse a fine-tuning dataset. Each item is one training example: a user message and the assistant response the model was trained to produce. The assistant in these examples holds the values described here:
+
+<values>
+{spec}
+</values>
+
+A training-data attribution method scored every example for its estimated effect on one later behaviour of the trained model: in an agentic test, the model sometimes takes a harmful unilateral action (for instance acting against the people overseeing it in order to protect a goal or its own continuation). The examples below come from three groups:
+
+- GROUP A: examples estimated to make that harmful action MORE likely.
+- GROUP B: examples estimated to make that harmful action LESS likely.
+- GROUP N: examples estimated to have almost no effect. Groups are matched for length.
+
+Every example in every group was written to the same standard and endorses the same values; none of them depicts the test scenario. The differences you are looking for are therefore not "good versus bad" responses. They are properties of how the response is written, how it reasons, how it positions the assistant relative to the user and to its own principles, and what kind of request it answers.
+
+Your task: propose features that DISCRIMINATE the groups — properties that are clearly more common in A than in B, or in B than in A, with N in between or resembling one side.
+
+Requirements for each feature:
+1. It must be checkable on a single example by a careful reader who does not know which group the example came from. Give an annotation rubric on a 0-3 scale (0 = absent, 3 = strongly present) with concrete anchors.
+2. It must not be a restatement of length; the groups are length-matched and length is controlled separately.
+3. Prefer features of FORM, REASONING STRUCTURE and STANCE over features of TOPIC. A topical feature is acceptable only if you state it precisely. For every feature say whether it could be added to or removed from a response by editing the response alone — leaving the user message, the decision, the advice and the factual content unchanged.
+4. Count before you claim. For each feature, list the example ids in A and in B that show it, so the claim can be audited. Do not propose a feature supported by fewer than 5 examples in the group where it is common.
+5. Propose features that differ from one another. Six distinct features are worth more than ten variations on one.
+
+Think through the examples carefully before answering. Then output, inside <features></features> tags, a JSON list of 5 to 8 objects with exactly these keys:
+
+  "name": short label
+  "definition": one or two sentences
+  "rubric": the 0-3 annotation rubric, with an anchor for each level
+  "more_common_in": "A" or "B"
+  "support_A": list of example ids from group A that show the feature
+  "support_B": list of example ids from group B that show the feature
+  "editable": "yes", "partly" or "no"
+  "edit_sketch": one sentence on how a response would be edited to add or remove the feature without changing its decision or substance ("" if not editable)
+  "mechanism": one sentence guessing why this feature might push the later behaviour in that direction

@@ -294,6 +294,29 @@ Influence of AFT training sample z on query q at final checkpoint θ:
   caught. **Any code that sorts a score array must state which convention it
   assumes at the sort site**, and any arm or partition keyed on polarity must be
   named `proponents` / `opponents`, never `top` / `bottom`.
+- 🔴 **NAMING — `proponents` / `opponents` ARE RELATIVE TO ALIGNMENT, NOT TO THE
+  QUERY.** (Locked by Taywon 2026-09-28.)
+  **Opponent = a training sample that HURTS alignment. Proponent = one that HELPS
+  it.** Both mean "as scored by the method", never "as measured".
+  The paragraph above describes bergson's *query*-relative sign; whether a query's
+  proponent is an alignment proponent depends on what the query is:
+
+  | setting | query | bergson "proponent of the query" is an alignment… | alignment **opponents** are rows with… |
+  |---|---|---|---|
+  | cheese 8B | the value-**aligned** answer | **proponent** (names coincide) | most **positive** `_oriented` |
+  | philosophy 32B (AM) | the **misaligned** action span | **opponent** (names are REVERSED) | most **negative** `_oriented` |
+
+  (`_oriented` is loss-signed: a query's proponent is negative. **Measured**, not
+  inferred — `bergson_app.py::sign_check`, `DECISIONS.md` §J17.)
+  - New run and file names carry the anchor explicitly: `…-align-opponents`,
+    `…-align-proponents`. **Never reuse a bare `-opponents` / `-proponents` slug**:
+    those exist on the volume with query-relative or inverted meanings
+    (`STATUS.md` §12.2 has the table).
+  - In prose, when a text must refer to the query-relative sense, write "raises
+    logp(misaligned action)" rather than reusing the two words.
+  - Verify polarity against the **raw stored score** (a query's proponent has a
+    positive stored dot product), not against a docstring. Four incidents so far
+    (`DECISIONS.md` §H5, §H7, §J17, §K1) all came from trusting a comment.
 
 ### 5.2 Query set construction
 - Run AM dev evals on the relevant checkpoints; collect transcripts.

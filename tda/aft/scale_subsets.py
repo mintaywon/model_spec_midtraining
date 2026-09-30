@@ -7,7 +7,7 @@ which are row-aligned) from L3's kept rows, materialised twice:
     cot_n{N}.jsonl   released AFT-with-CoT  -> two-stage arm (released MSM adapter)
 
 so at every N the two arms see the same user prompts and differ only in the
-response variant and the init. Nested: n1250 ⊂ n2500 ⊂ n5000 ⊂ full (9,585).
+response variant and the init. Nested: n100 ⊂ n200 ⊂ n500 ⊂ n1250 ⊂ n2500 ⊂ n5000 ⊂ full (9,585).
 Every row keeps its source `row`, and the prompt match is asserted here rather
 than assumed — a permuted join would leave every aggregate unchanged.
 
@@ -24,7 +24,7 @@ from pathlib import Path
 L3 = Path("results/aft/l3/v2/claude-sonnet-5/l3_v2.jsonl")
 COT = "chloeli/aft-cot-qwen2.5-philosophy-spec"
 OUT = Path("results/aft/scale")
-SIZES = (1250, 2500, 5000)
+SIZES = (100, 200, 500, 1250, 2500, 5000)
 SEED = 0
 
 

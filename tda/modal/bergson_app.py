@@ -3463,12 +3463,700 @@ def prep_phil(n_msm: int = 13201, n_aft: int = 800, n_it: int = 800,
     return out
 
 
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=7200, cpu=8, memory=131072)
+def prep_l3(task_file: str = "aft_ladder/data/l3.jsonl",
+            query_run: str = "aft32dev100_L3_s42", cell: str = "L3_s42",
+            split: str = "dev", it_n: int = 10000,
+            fit_task: int = 400, fit_it: int = 400, seed: int = 0,
+            max_length: int = 4608, fit_max_length: int = 2048,
+            query_max_length: int = 5120, nproc: int = 8,
+            max_batch_size: int = 2, score_tbs: int = 4608,
+            fit_tbs: int = 2048, query_tbs: int = 5120,
+            expect_task: int = 9585, expect_total: int = 19585) -> dict:
+    """Indices for EK-FAC over the L3 AFT training set (PLAN_HYP.md step 1).
+
+    Writes under `bergson/phil/l3/`, the `subdir="l3"` family of
+    `_phil_attr_impl`:
+
+    * `score_index` — the rows L3 s42 was trained on: every row of `task_file`
+      in FILE order (score row i == line i of l3.jsonl, for i < n_task), then
+      the instruction-mix rows `tda/retrain/sft.py::build_examples` drew. That
+      draw is reproduced from its own code path (`random.Random(0)` shuffle of
+      the split, first `it_n`), not re-derived, and the resulting counts are
+      asserted against the training run's `train_meta.json` numbers
+      (`expect_task`, `expect_total`) — a different IT draw would score rows
+      the checkpoint never saw while every aggregate still looked fine.
+    * `fit_index` — `fit_task` + `fit_it` of those rows, truncated to 2,048
+      (the eigenvalue-correction memory bound documented in `prep_phil`).
+    * `query_am` — the L3 checkpoint's OWN harmful action spans, `split`
+      conditions only.
+
+    `max_length` is 4,608 rather than the trainer's 8,192: it is the token
+    batch the 8×B200 scoring pass is proven at. L3 task rows are far shorter,
+    so only long instruction-mix rows (the null control) are truncated; the
+    count is reported, and a truncated TASK row raises.
+    """
+    import hashlib as _hashlib
+    import json as _json
+    import random as _random
+
+    import numpy as _np
+    from transformers import AutoTokenizer
+
+    from tda.influence.bergson_data import save_for_bergson, tokenize_chat
+    from tda.influence.source import philosophy as P
+    from tda.retrain.sft import load_rows
+
+    results.reload()
+    tok = AutoTokenizer.from_pretrained(P.BASE_MODEL)
+    root = Path(PHIL_DIR) / "l3"
+    root.mkdir(parents=True, exist_ok=True)
+    out: dict = {}
+
+    def _sha(msgs) -> str:
+        return _hashlib.sha256(
+            _json.dumps(msgs, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()[:16]
+
+    def _full_len(msgs) -> int:
+        return len(tok.apply_chat_template(msgs, tokenize=True))
+
+    task = load_rows(f"{RESULTS_DIR}/{task_file}", "train")
+    it = load_rows(P.IT_MIX[0], P.IT_MIX[1])
+    idx = list(range(len(it)))
+    _random.Random(0).shuffle(idx)               # sft.py::build_examples, verbatim
+    it_rows = []
+    for i in idx[:it_n]:
+        msgs = it[i].get("messages") or it[i].get("conversations")
+        if msgs:
+            it_rows.append((i, msgs))
+
+    samples, index_rows, n_trunc = [], [], {"aft_task": 0, "aft_it": 0}
+    for k, r in enumerate(task):
+        s = tokenize_chat(r["messages"], tok, supervise="assistant",
+                          max_length=max_length,
+                          meta={"row": k, "corpus_row": int(r.get("row", k)),
+                                "source": "aft_task"})
+        samples.append(s)
+        index_rows.append({"source": "aft_task", "file_row": k,
+                           "corpus_row": int(r.get("row", k)),
+                           "sha": _sha(r["messages"])})
+    for k, (i, msgs) in enumerate(it_rows):
+        s = tokenize_chat(msgs, tok, supervise="assistant",
+                          max_length=max_length,
+                          meta={"row": k, "corpus_row": i, "source": "aft_it"})
+        samples.append(s)
+        index_rows.append({"source": "aft_it", "file_row": k, "corpus_row": i,
+                           "sha": _sha(msgs),
+                           "it_source": str(it[i].get("source", ""))})
+
+    # What the trainer kept: a row survives iff it has a supervised token AT
+    # THE TRAINER'S max_length (8192). Rows it dropped must not be scored.
+    keep = []
+    for j, (s, meta) in enumerate(zip(samples, index_rows)):
+        if len(s.input_ids) >= max_length:
+            msgs = (task[meta["file_row"]]["messages"] if meta["source"] == "aft_task"
+                    else it_rows[meta["file_row"]][1])
+            if _full_len(msgs) > max_length:
+                n_trunc[meta["source"]] += 1
+        if s.n_supervised > 0:
+            keep.append(j)
+    n_task = sum(1 for j in keep if index_rows[j]["source"] == "aft_task")
+    out["n_task"], out["n_it"] = n_task, len(keep) - n_task
+    out["n_truncated_at_score_max_length"] = n_trunc
+    out["n_dropped_unsupervised"] = len(samples) - len(keep)
+    if n_trunc["aft_task"]:
+        raise ValueError(
+            f"{n_trunc['aft_task']} L3 task rows exceed {max_length} tokens; a "
+            "task row's score must see the whole row — raise max_length")
+    if n_task != expect_task or len(task) != expect_task:
+        raise ValueError(f"task rows {n_task} (file {len(task)}) != the "
+                         f"{expect_task} L3 s42 trained on")
+    if len(keep) != expect_total:
+        # Rows unsupervised at 4,608 but supervised at 8,192 land here: the
+        # trainer saw them, this index cannot score them. Reported, not fatal,
+        # because they are instruction-mix rows by the check above.
+        print(f"⚠️  {len(keep)} scoreable rows vs {expect_total} trained; "
+              f"{expect_total - len(keep)} IT rows have their assistant turn "
+              f"past {max_length} tokens", flush=True)
+    out["n_trained_not_scoreable"] = expect_total - len(keep)
+
+    score_samples = [samples[j] for j in keep]
+    score_rows = [index_rows[j] for j in keep]
+    score_samples, n_trim = _trim_to_allocatable(
+        score_samples, score_tbs, nproc, max_batch_size, floor=n_task)
+    score_rows = score_rows[: len(score_samples)]
+    out["n_score_trimmed_for_allocation"] = n_trim
+    for j, m in enumerate(score_rows):
+        m["score_row"] = j
+        m["n_tokens"] = len(score_samples[j].input_ids)
+        m["n_supervised"] = int(score_samples[j].n_supervised)
+
+    out["score_index"] = save_for_bergson(
+        score_samples, root / "score_index",
+        manifest={"task_file": task_file, "n_task": n_task,
+                  "n_it": len(score_samples) - n_task,
+                  "task_rows": [0, n_task],
+                  "it_rows": [n_task, len(score_samples)],
+                  "max_length": max_length, "it_mix": list(P.IT_MIX),
+                  "it_draw": "random.Random(0).shuffle(range(len(split)))[:it_n]",
+                  "n_truncated": n_trunc, "n_trimmed_for_allocation": n_trim,
+                  "allocation": {"token_batch_size": score_tbs, "nproc": nproc,
+                                 "max_batch_size": max_batch_size},
+                  "mode": "chat, assistant-only"})
+    (root / "score_index" / "rows.jsonl").write_text(
+        "\n".join(_json.dumps(m) for m in score_rows) + "\n")
+
+    # ---- Hessian fit set: a subsample of the rows being scored --------------
+    rng = _np.random.default_rng(seed + 100)
+    ft = sorted(int(i) for i in rng.choice(n_task, fit_task, replace=False))
+    fi = sorted(int(i) for i in rng.choice(len(it_rows), fit_it, replace=False))
+    fit_samples = [
+        tokenize_chat(task[i]["messages"], tok, supervise="assistant",
+                      max_length=fit_max_length,
+                      meta={"row": k, "corpus_row": i, "source": "aft_task"})
+        for k, i in enumerate(ft)
+    ] + [
+        tokenize_chat(it_rows[i][1], tok, supervise="assistant",
+                      max_length=fit_max_length,
+                      meta={"row": k, "corpus_row": it_rows[i][0], "source": "aft_it"})
+        for k, i in enumerate(fi)
+    ]
+    n_fit_unsup = sum(1 for x in fit_samples if x.n_supervised == 0)
+    fit_samples = [x for x in fit_samples if x.n_supervised > 0]
+    fit_samples, n_fit_trim = _trim_to_allocatable(
+        fit_samples, fit_tbs, nproc, max_batch_size)
+    out["fit_index"] = save_for_bergson(
+        fit_samples, root / "fit_index",
+        manifest={"n_task": len(ft), "n_it": len(fi),
+                  "max_length": fit_max_length, "seed": seed + 100,
+                  "n_dropped_unsupervised": n_fit_unsup,
+                  "n_trimmed_for_allocation": n_fit_trim,
+                  "allocation": {"token_batch_size": fit_tbs, "nproc": nproc,
+                                 "max_batch_size": max_batch_size},
+                  "purpose": "KFAC factor fitting only"})
+
+    # ---- Queries: L3's own misaligned actions, dev conditions only ----------
+    qdir = Path(RESULTS_DIR) / query_run / cell
+    if not (qdir / "scores.jsonl").exists():
+        raise FileNotFoundError(f"{qdir}/scores.jsonl missing — run "
+                                "app.py::aft_eval --split dev first")
+    rd = lambda n: [_json.loads(l) for l in (qdir / n).read_text().splitlines()]
+    conds = P.load_split_conditions("/root/tda/configs/eval_split.yaml", split)
+    q_samples, qstats = P.am_query_samples(
+        rd("transcripts.jsonl"), rd("scores.jsonl"), rd("prompts.jsonl"), tok,
+        conditions=conds, max_length=query_max_length)
+    leaked = {x.meta["condition_id"] for x in q_samples} - conds
+    if leaked:
+        raise AssertionError(f"queries outside the {split} split: {sorted(leaked)}")
+    q_samples, n_q_trim = _trim_to_allocatable(
+        q_samples, query_tbs, nproc, max_batch_size)
+    qstats["n_trimmed_for_allocation"] = n_q_trim
+    qstats["n_tokenized"] = len(q_samples)
+    by_scen: dict = {}
+    for x in q_samples:
+        by_scen[x.meta["scenario"]] = by_scen.get(x.meta["scenario"], 0) + 1
+    qstats["by_scenario"] = by_scen
+    out["query_stats"] = qstats
+    out["query_am"] = save_for_bergson(
+        q_samples, root / "query_am",
+        manifest={"run": query_run, "cell": cell, "split": split,
+                  "allocation": {"token_batch_size": query_tbs, "nproc": nproc,
+                                 "max_batch_size": max_batch_size},
+                  **qstats})
+    if len(q_samples) < 200:
+        print(f"⚠️  only {len(q_samples)} queries (<200 target)", flush=True)
+
+    (root / "prep_report.json").write_text(_json.dumps(out, indent=2, default=str))
+    results.commit()
+    return out
+
+
+# HF arm name -> the volume artifacts it is made of. Full run names, never
+# prefixes: `resolve()` once returned a stale smoke directory (STATUS §8.9e).
+# HF names are ALIGNMENT-ANCHORED (CLAUDE.md §5.1); `legacy` is the slug the
+# artifacts were written under, which is kept on the volume.
+PHIL_REMOVAL_ARMS = {
+    "drop1320-ekfac-align-opponents-s42": {
+        "legacy": "drop1320-ekfac-opponents",
+        "removal_set": "drop1320-ekfac-align-opponents",
+        "removes": "the 1,320 documents EK-FAC ranks most TOWARD the harmful "
+                   "action (most positive stored score) — they HURT alignment",
+        "msm": "msm_phil32b_drop1320-ekfac-opponents_bs32_s42_20260921-0217",
+        "aft": "aft_phil32b_drop1320-ekfac-opponents_bs32_s42_from-checkpoint-371_20260921-0406"},
+    "drop1320-ekfac-align-proponents-s42": {
+        "legacy": "drop1320-ekfac-align-proponents",
+        "removal_set": "drop1320-ekfac-align-proponents",
+        "removes": "the 1,320 documents EK-FAC ranks most AWAY from the harmful "
+                   "action (most negative stored score) — they HELP alignment",
+        "msm": "msm_phil32b_drop1320-ekfac-align-proponents_bs32_s42_20260928-0354",
+        "aft": "aft_phil32b_drop1320-ekfac-align-proponents_bs32_s42_from-checkpoint-371_20260928-0540"},
+    "drop1320-random-s42": {
+        "legacy": "drop1320-random",
+        "removal_set": "drop1320-random",
+        "removes": "1,320 uniform-random documents (seed 42) — the control",
+        "msm": "msm_phil32b_drop1320-random_bs32_s42_20260921-0219",
+        "aft": "aft_phil32b_drop1320-random_bs32_s42_from-checkpoint-371_20260921-0407"},
+    "baseline-full-corpus-s42": {
+        "legacy": "none",
+        "removal_set": "",
+        "removes": "nothing (all 13,201 documents). NOTE: its AFT stage used "
+                   "bergson's trainer on 8xB200, not the ladder trainer the "
+                   "removal arms used, so it is not their matched baseline",
+        "msm": "msm_phil32b_none_bs32_s42_20260913-2317",
+        "aft_bergson": "aft_phil32b_none_bs32_s42_from-checkpoint-412_20260914-0134"},
+}
+
+
+@app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
+              timeout=12 * 3600, cpu=8, memory=32768)
+def push_phil_removal_to_hf(repo: str = "Taywon/msm-tda-phil32b-removal",
+                            private: bool = True, dry_run: bool = False,
+                            include_optimizer: bool = True,
+                            arms: str = "") -> dict:
+    """Publish every 32B removal-test checkpoint to HuggingFace.
+
+    Modal volumes are not backed up, and each arm is a ~$120 retrain. Unlike
+    `push_removal_to_hf` (8B), this pushes the TRAJECTORY too — Taywon asked for
+    all checkpoints so they can be reused (chaining a different AFT onto an
+    arm's midtraining, or attributing over a trajectory).
+
+    Three passes, most valuable first, so a storage quota costs the least:
+      1. per arm: final midtraining adapter, final AFT adapter, provenance,
+         removal set, eval scores
+      2. the remaining trajectory adapters
+      3. optimizer states (2 GiB each; only needed to resume or to unroll)
+
+    Re-runnable: `upload_folder` skips files already present with the same
+    hash, and an arm whose AFT or eval has not landed is pushed as far as it
+    exists and completed on the next call.
+    """
+    import os
+
+    from huggingface_hub import HfApi
+
+    results.reload()
+    root = Path(PHIL_DIR)
+    res = Path(RESULTS_DIR)
+    want = [a for a in arms.split(",") if a] or list(PHIL_REMOVAL_ARMS)
+    plan: dict = {}
+    for name in want:
+        a = PHIL_REMOVAL_ARMS[name]
+        msm = root / "runs" / a["msm"]
+        cks = sorted((msm / "checkpoints").glob("checkpoint-*"),
+                     key=lambda q: int(q.name.split("-")[1]))
+        if not cks or not (msm / "report.json").exists():
+            plan[name] = {"status": "SKIPPED: midtraining not complete"}
+            continue
+        rec = {"msm_run": a["msm"], "msm_checkpoints": [c.name for c in cks],
+               "msm_final": cks[-1].name}
+        if "aft" in a:
+            d = res / "aft_ladder" / a["aft"]
+            rec["aft_done"] = (d / "adapter_model.safetensors").exists() and \
+                (d / "train_meta.json").exists()
+            rec["aft_dir"] = str(d)
+        else:
+            d = root / "runs" / a["aft_bergson"]
+            acks = sorted((d / "checkpoints").glob("checkpoint-*"),
+                          key=lambda q: int(q.name.split("-")[1]))
+            rec["aft_done"] = bool(acks) and (d / "report.json").exists()
+            rec["aft_bergson_checkpoints"] = [c.name for c in acks]
+        ev = res / f"removal32b_{a['legacy']}_s42" / f"{a['legacy']}_s42"
+        rec["eval_done"] = (ev / "summary.json").exists() and \
+            (ev / "scores.jsonl").exists()
+        if rec["eval_done"]:
+            rows = [json.loads(l) for l in (ev / "scores.jsonl").read_text().splitlines()
+                    if l.strip()]
+            ok = [r for r in rows if isinstance(r.get("classifier_verdict"), bool)]
+            rec["eval"] = {"n": len(ok), "n_ungraded": len(rows) - len(ok),
+                           "misalignment_rate": sum(r["classifier_verdict"]
+                                                    for r in ok) / len(ok)}
+        plan[name] = rec
+    if dry_run:
+        who = HfApi(token=os.environ["HF_TOKEN"]).whoami()
+        print(json.dumps({"hf_user": who.get("name"), "repo": repo,
+                          "private": private, "plan": plan}, indent=1,
+                         default=str), flush=True)
+        return {"repo": repo, "private": private, "plan": plan}
+
+    api = HfApi(token=os.environ["HF_TOKEN"])
+    api.create_repo(repo, private=private, exist_ok=True, repo_type="model")
+    done: dict = {n: [] for n in plan}
+
+    def _up(folder: Path, dest: str, msg: str, **kw) -> None:
+        api.upload_folder(repo_id=repo, folder_path=str(folder),
+                          path_in_repo=dest, commit_message=msg, **kw)
+        print(f"  pushed {dest}", flush=True)
+
+    # ---- pass 1: what an arm cannot be rebuilt without --------------------
+    for name, rec in plan.items():
+        if "msm_run" not in rec:
+            continue
+        a = PHIL_REMOVAL_ARMS[name]
+        msm = root / "runs" / a["msm"]
+        _up(msm / "checkpoints" / rec["msm_final"],
+            f"{name}/msm/{rec['msm_final']}", f"{name}: final midtraining adapter",
+            ignore_patterns=["optimizer.pt"])
+        done[name].append("msm_final")
+        prov = {"hf_arm_name": name, "removes": a["removes"],
+                "naming": "ALIGNMENT-ANCHORED: opponent = hurts alignment, "
+                          "proponent = helps, as ranked by the method",
+                "legacy_slug_on_volume": a["legacy"],
+                "msm_report": json.loads((msm / "report.json").read_text()),
+                "eval": rec.get("eval")}
+        if rec.get("aft_done") and "aft" in a:
+            d = Path(rec["aft_dir"])
+            _up(d, f"{name}/aft", f"{name}: final AFT adapter",
+                ignore_patterns=["optimizer.pt", "checkpoint-*", "*.log"])
+            prov["aft_run"] = a["aft"]
+            prov["aft_train_meta"] = json.loads((d / "train_meta.json").read_text())
+            done[name].append("aft")
+        elif rec.get("aft_done"):
+            d = root / "runs" / a["aft_bergson"]
+            last = rec["aft_bergson_checkpoints"][-1]
+            _up(d / "checkpoints" / last, f"{name}/aft/{last}",
+                f"{name}: final AFT adapter (bergson trainer)",
+                ignore_patterns=["optimizer.pt"])
+            prov["aft_run"] = a["aft_bergson"]
+            prov["aft_report"] = json.loads((d / "report.json").read_text())
+            done[name].append("aft")
+        tmp = Path(SCRATCH_DIR) / "hf_push" / name
+        tmp.mkdir(parents=True, exist_ok=True)
+        (tmp / "provenance.json").write_text(json.dumps(prov, indent=2, default=str))
+        if a["removal_set"]:
+            rs = root / "removal_sets" / f"{a['removal_set']}.json"
+            (tmp / "removal_set.json").write_text(rs.read_text())
+        if rec.get("eval_done"):
+            ev = res / f"removal32b_{a['legacy']}_s42" / f"{a['legacy']}_s42"
+            for f in ("summary.json", "scores.jsonl", "meta.json"):
+                if (ev / f).exists():
+                    (tmp / f"eval_{f}").write_text((ev / f).read_text())
+            done[name].append("eval")
+        _up(tmp, name, f"{name}: provenance, removal set, eval")
+
+    # ---- README -----------------------------------------------------------
+    rows = ""
+    for name, rec in plan.items():
+        e = rec.get("eval")
+        rate = f"{e['misalignment_rate']:.3f} (n={e['n']})" if e else "—"
+        rows += (f"| `{name}` | {PHIL_REMOVAL_ARMS[name]['removes']} | {rate} | "
+                 f"{', '.join(rec.get('msm_checkpoints', [])) or '—'} |\n")
+    readme = f"""---
+library_name: peft
+base_model: Qwen/Qwen2.5-32B-Instruct
+tags: [training-data-attribution, influence-functions, model-spec-midtraining]
+---
+
+# Subset-removal counterfactual arms — philosophy spec, Qwen2.5-32B
+
+LoRA adapters (r=64, alpha=128, all attention + MLP projections) from the
+subset-removal validation of training-data attribution on Model Spec Midtraining
+(arXiv:2605.02087). Each arm removes **1,320 of 13,201 midtraining documents
+(10%)**, then retrains **both stages**: midtraining, then alignment fine-tuning
+(AFT) continued from that arm's own final midtraining adapter. Seed 42.
+
+## Naming — alignment-anchored
+
+**opponent = a document that HURTS alignment; proponent = one that HELPS**, as
+ranked by the attribution method (not as measured). The attribution query is the
+log-probability of the *misaligned* action, so an opponent is a document whose
+stored score is most positive. Each arm's `provenance.json` records the slug its
+artifacts carry on the training volume, which for the first arm is the older
+`drop1320-ekfac-opponents`.
+
+The ranking is **relative**: at the scored checkpoint almost every midtraining
+document sits on the positive side, so "opponents" means the 10% ranked most
+toward the harmful action relative to the rest of the corpus.
+
+## Arms
+
+| arm | removes | misalignment rate | midtraining checkpoints |
+|---|---|---|---|
+{rows}
+Misalignment rate = agentic-misalignment eval, all 27 conditions x 50 rollouts,
+temperature 0.7, judged by Claude Sonnet 4.6, `classifier_verdict`. Compare each
+arm against `drop1320-random-s42`, never against the baseline: removing 1,320
+documents changes behaviour partly by being 1,320 fewer documents.
+
+## Layout
+
+```
+<arm>/msm/checkpoint-N/      midtraining trajectory (N = optimizer step); the last is the final
+<arm>/aft/                   final adapter after alignment fine-tuning — load this one to evaluate
+<arm>/provenance.json        run names, training reports, eval rate
+<arm>/removal_set.json       corpus row indices removed (chloeli/msm-qwen-philosophy-spec, train)
+<arm>/eval_scores.jsonl      per-rollout grades
+```
+
+`optimizer.pt` beside an adapter is the AdamW state at that step.
+
+## Recipe
+
+Midtraining: plain LM loss on documents, batch 32, AdamW lr 1e-4, cosine, 5% warmup,
+weight decay 0.01, 1 epoch (371 steps for a removal arm, 412 for the baseline).
+AFT: 9,963 no-CoT rows of `chloeli/aft-no-cot-qwen2.5-philosophy-spec` + 10,000
+rows of `chloeli/sft-it-mix` (`train_clean`), assistant-only loss, 624 steps.
+
+One seed per arm. Midtraining-seed variance is not measured.
+"""
+    api.upload_file(path_or_fileobj=readme.encode(), path_in_repo="README.md",
+                    repo_id=repo, commit_message="README")
+
+    # ---- pass 2: the rest of each trajectory ------------------------------
+    for name, rec in plan.items():
+        if "msm_run" not in rec:
+            continue
+        a = PHIL_REMOVAL_ARMS[name]
+        _up(root / "runs" / a["msm"] / "checkpoints", f"{name}/msm",
+            f"{name}: midtraining trajectory", ignore_patterns=["optimizer.pt"])
+        done[name].append("msm_trajectory")
+        if "aft_bergson" in a and rec.get("aft_done"):
+            _up(root / "runs" / a["aft_bergson"] / "checkpoints", f"{name}/aft",
+                f"{name}: AFT trajectory", ignore_patterns=["optimizer.pt"])
+            done[name].append("aft_trajectory")
+
+    # ---- pass 3: optimizer states -----------------------------------------
+    if include_optimizer:
+        for name, rec in plan.items():
+            if "msm_run" not in rec:
+                continue
+            a = PHIL_REMOVAL_ARMS[name]
+            try:
+                _up(root / "runs" / a["msm"] / "checkpoints", f"{name}/msm",
+                    f"{name}: optimizer states", allow_patterns=["*/optimizer.pt"])
+                if "aft_bergson" in a and rec.get("aft_done"):
+                    _up(root / "runs" / a["aft_bergson"] / "checkpoints",
+                        f"{name}/aft", f"{name}: AFT optimizer states",
+                        allow_patterns=["*/optimizer.pt"])
+                done[name].append("optimizer")
+            except Exception as e:                      # quota: report, keep the rest
+                done[name].append(f"optimizer FAILED: {type(e).__name__}: {e}"[:300])
+
+    out = {"repo": repo, "private": private, "plan": plan, "pushed": done}
+    (root / "hf_push_report.json").write_text(json.dumps(out, indent=2, default=str))
+    results.commit()
+    print(json.dumps(out["pushed"], indent=1), flush=True)
+    return out
+
+
+@app.function(image=bergson_image, gpu="A10G", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=3600)
+def sign_check(model: str = "Qwen/Qwen2.5-0.5B-Instruct", n_docs: int = 24) -> dict:
+    """What sign does `_oriented` give a row that is, by construction, a PROPONENT?
+
+    The repo documents two opposite conventions for `_oriented` (`DECISIONS.md`
+    §H7: loss-signed, proponents negative; `removal_sets_phil`: proponent-
+    positive). This settles it by measurement, through the SAME steps
+    `_phil_attr_impl` runs for grad-dot: `build` a mean-aggregated query index,
+    then `score` with `higher_is_better: True`, then load with `_oriented`.
+
+    The query is training document 0 itself, same tokens, same labels. Its
+    gradient dotted with itself is ||g||^2 > 0, and a gradient step on it lowers
+    its own loss — so document 0 is a proponent of the query whatever anyone's
+    comment says. Whatever sign `_oriented` returns for row 0 IS the sign of a
+    proponent. A second query, document 1, repeats the test on another row.
+    """
+    import numpy as np
+    import yaml
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+
+    from tda.influence.bergson_data import save_for_bergson, tokenize_document
+    from tda.influence.source import philosophy as P
+    from tda.influence.source.scores import _oriented, load_source_scores
+
+    tok = AutoTokenizer.from_pretrained(model)
+    msm = load_dataset(P.MSM_CORPUS, split="train")
+    docs = [tokenize_document(msm[i * 97]["text"], tok, max_length=256,
+                              meta={"row": i, "source": "msm"})
+            for i in range(n_docs)]
+    root = Path(SCRATCH_DIR) / "sign_check"
+    import shutil
+    shutil.rmtree(root, ignore_errors=True)
+    save_for_bergson(docs, root / "train")
+    out: dict = {"model": model, "n_docs": n_docs}
+    for q in (0, 1):
+        save_for_bergson([docs[q]], root / f"query{q}")
+
+        def _base(data: Path, run_path: Path) -> dict:
+            return {"run_path": str(run_path), "model": model, "precision": "bf16",
+                    "token_batch_size": 1024, "max_batch_size": 2,
+                    "overwrite": True, "projection_dim": 0,
+                    "distributed": {"nproc_per_node": 1, "nnode": 1},
+                    "data": {"dataset": str(data)}}
+
+        for name, cfg in (
+            ("query", {"steps": [{"build": {
+                "index_cfg": _base(root / f"query{q}" / "dataset", root / f"q{q}"),
+                "preprocess_cfg": {"aggregation": "mean"}}}]}),
+            ("score", {"steps": [{"score": {
+                "index_cfg": _base(root / "train" / "dataset", root / f"s{q}"),
+                "score_cfg": {"query_path": str(root / f"q{q}"),
+                              "query_batch_size": 8, "higher_is_better": True},
+                "preprocess_cfg": {"unit_normalize": False}}}]}),
+        ):
+            path = root / f"{name}{q}.yaml"
+            path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+            rc = _run([sys.executable, "-m", "bergson", str(path)])
+            if rc != 0:
+                return {**out, "status": f"FAILED at {name}{q}"}
+        stored, _ = load_source_scores(root / f"s{q}")
+        ori = _oriented(root / f"s{q}")
+        out[f"query_is_doc{q}"] = {
+            "stored_self": float(stored[q]), "oriented_self": float(ori[q]),
+            "oriented_self_rank_desc": int((ori > ori[q]).sum()),
+            "oriented_min": float(ori.min()), "oriented_max": float(ori.max()),
+            "oriented_median_others": float(np.median(np.delete(ori, q))),
+            "oriented_all": [round(float(x), 4) for x in ori]}
+    signs = {np.sign(out[f"query_is_doc{q}"]["oriented_self"]) for q in (0, 1)}
+    out["verdict"] = ("_oriented is PROPONENT-POSITIVE" if signs == {1.0} else
+                      "_oriented is PROPONENT-NEGATIVE (loss-signed)" if signs == {-1.0}
+                      else "INCONSISTENT")
+    (Path(PHIL_DIR) / "l3").mkdir(parents=True, exist_ok=True)
+    (Path(PHIL_DIR) / "l3" / "sign_check.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    print(json.dumps({k: v for k, v in out.items()}, indent=1)[:3000], flush=True)
+    return out
+
+
+
+@app.function(image=bergson_image, gpu="B200", volumes=VOLUMES,
+              secrets=[hf_secret], timeout=3 * 3600,
+              ephemeral_disk=1024 * 1024, cpu=8, memory=131072)
+def anchor_check_am(attr_run: str = "ekfac_phil32b_retrained-am-dev",
+                    index: str = "source_index") -> dict:
+    """Read the sign of the REAL 32B store off rows whose polarity is known.
+
+    The 256 `query_am` rows ARE the harmful action (each labels one misaligned
+    tool call). Scored as if they were training documents, against the SAME
+    persisted query gradients (`query`, `kfac_query`) at the SAME checkpoint
+    that produced the store the removal sets were cut from, they are
+    proponents of the harmful action by construction:
+        mean_i  g_i . gbar         = ||gbar||^2          > 0   (grad-dot)
+        mean_i  g_i . H^-1 gbar    = gbar^T H^-1 gbar    > 0   (EK-FAC)
+    So whatever sign the STORED score takes for these rows is the sign that
+    means "makes the harmful action more likely" in that store. No docstring,
+    no toy model, no gradient step.
+
+    Also breaks the existing store down by `source` (midtraining / AFT task /
+    instruction mix). If generic instruction rows are mostly positive too, a
+    positive score is not evidence that a document is about misalignment.
+    """
+    import shutil
+
+    import numpy as np
+    import yaml
+    from datasets import load_from_disk
+
+    from tda.influence.source.naming import run_name as _rn
+    from tda.influence.source.scores import load_source_scores
+
+    root = Path(PHIL_DIR)
+    results.reload()
+    src = root / "attr" / attr_run
+    rep = json.loads((src / "report.json").read_text())
+    adapter = rep["adapter"]
+    name = _rn("ekfac", "phil32b", "none", qualifier="anchor-queryrows-as-index")
+    work = Path(SCRATCH_DIR) / "anchor" / name
+    keep = root / "attr_anchor" / name
+    keep.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    for d in ("query", "kfac_query"):
+        shutil.copytree(src / d, work / d)
+
+    out: dict = {"run": name, "attr_run": attr_run, "adapter": adapter,
+                 "anchor_rows": "query_am (the harmful action spans themselves)"}
+    qds = root / "query_am" / "dataset"
+    for which, qpath in (("graddot", work / "query"), ("ekfac", work / "kfac_query")):
+        sp = work / f"scores_{which}"
+        cfg = {"steps": [{"score": {
+            "index_cfg": {"run_path": str(sp), "model": adapter,
+                          "precision": "bf16", "token_batch_size": 5120,
+                          "max_batch_size": 1, "overwrite": True,
+                          "projection_dim": 0,
+                          "distributed": {"nproc_per_node": 1, "nnode": 1},
+                          "data": {"dataset": str(qds)}},
+            "score_cfg": {"query_path": str(qpath), "query_batch_size": 8,
+                          "higher_is_better": True},
+            "preprocess_cfg": {"unit_normalize": False}}}]}
+        path = work / f"{which}.yaml"
+        path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+        t = time.time()
+        rc = _run([sys.executable, "-m", "bergson", str(path)])
+        if rc != 0:
+            out["status"] = f"FAILED at {which}"
+            (keep / "report.json").write_text(json.dumps(out, indent=2))
+            results.commit()
+            return out
+        raw, _ = load_source_scores(sp)
+        raw = np.asarray(raw, dtype=np.float64)
+        shutil.copytree(sp, keep / f"scores_{which}", dirs_exist_ok=True)
+        out[which] = {"minutes": round((time.time() - t) / 60, 1),
+                      "n": int(raw.size),
+                      "stored_mean": float(raw.mean()),
+                      "stored_median": float(np.median(raw)),
+                      "stored_min": float(raw.min()),
+                      "stored_max": float(raw.max()),
+                      "frac_stored_positive": float((raw > 0).mean())}
+
+    # ---- the existing store, by source ------------------------------------
+    ds = load_from_disk(str(root / index / "dataset"))
+    source = np.asarray(ds["source"])
+    length = np.asarray(ds["length"], dtype=np.float64)
+
+    def _sp(a, b):
+        ra, rb = np.argsort(np.argsort(a)), np.argsort(np.argsort(b))
+        return float(np.corrcoef(ra, rb)[0, 1])
+
+    for which in ("graddot", "ekfac"):
+        raw, _ = load_source_scores(src / f"scores_{which}")
+        raw = np.asarray(raw, dtype=np.float64)
+        if raw.size != source.size:
+            raise AssertionError(f"{which}: {raw.size} scores vs {source.size} rows")
+        by = {}
+        for s_ in sorted(set(source.tolist())):
+            m_ = source == s_
+            by[str(s_)] = {"n": int(m_.sum()),
+                           "stored_mean": float(raw[m_].mean()),
+                           "stored_median": float(np.median(raw[m_])),
+                           "frac_stored_positive": float((raw[m_] > 0).mean()),
+                           "mean_tokens": float(length[m_].mean())}
+        out[f"store_{which}"] = {
+            "by_source": by,
+            "spearman_stored_vs_tokens_all": _sp(raw, length),
+            "spearman_stored_vs_tokens_msm": _sp(raw[source == "msm"],
+                                                 length[source == "msm"])
+            if (source == "msm").any() else None,
+            "anchor_mean_over_store_max": out[which]["stored_mean"] / float(raw.max()),
+        }
+
+    pos = [out[w]["stored_mean"] > 0 for w in ("graddot", "ekfac")]
+    out["verdict"] = (
+        "In this store a POSITIVE stored score means MORE harmful action "
+        "(the harmful samples themselves score positive)." if all(pos) else
+        "In this store a NEGATIVE stored score means MORE harmful action "
+        "(the harmful samples themselves score negative)." if not any(pos) else
+        "MIXED between grad-dot and EK-FAC — read the numbers")
+    out["status"] = "OK"
+    (keep / "report.json").write_text(json.dumps(out, indent=2))
+    results.commit()
+    print(json.dumps(out, indent=1), flush=True)
+    return out
+
+
 def _phil_attr_impl(nproc: int, adapter: str, stages: str, tag: str,
                     fit_tbs: int, score_tbs: int, query_tbs: int,
                     max_batch_size: int, damping: float, limit: int,
                     hessian_dtype: str, index: str = "score_index",
-                    aft_run: str = "") -> dict:
+                    aft_run: str = "", subdir: str = "") -> dict:
     """EK-FAC and grad-dot at 32B, sharing one query gradient.
+
+    `subdir` selects an index family under PHIL_DIR ("" = the MSM-corpus
+    indices, "l3" = the L3 AFT training set written by `prep_l3`). Every index
+    name and the `attr/` output resolve under it, so two families cannot
+    overwrite each other's `fit_index` / `query_am`.
 
     Runs as three bergson invocations rather than one so a failure is isolated
     and the expensive artifact is persisted before anything downstream touches
@@ -3488,6 +4176,12 @@ def _phil_attr_impl(nproc: int, adapter: str, stages: str, tag: str,
     That is a tighter match than the 8B pair had (`STATUS.md` §7.7), where the
     two arms built their query indices separately.
 
+    🔴 **THE NEXT PARAGRAPH IS WRONG — MEASURED 2026-09-28** (`sign_check`,
+    `DECISIONS.md` §J17). `_oriented` is LOSS-SIGNED: a proponent is NEGATIVE.
+    Scoring a document against itself stores +||g||^2 and `_oriented` returns
+    -||g||^2. Negate `_oriented` to get proponent-positive. Left in place, with
+    this warning, because results were produced and named under it.
+
     Sign convention: both stores record `higher_is_better: true`, so `_oriented`
     negates both and both come out **proponent-positive**. Nothing here sorts.
     """
@@ -3499,7 +4193,7 @@ def _phil_attr_impl(nproc: int, adapter: str, stages: str, tag: str,
 
     want = {s.strip() for s in stages.split(",") if s.strip()}
     run_name = tag or _rn("ekfac", "phil32b", qualifier="union-am-dev")
-    root = Path(PHIL_DIR)
+    root = Path(PHIL_DIR) / subdir if subdir else Path(PHIL_DIR)
     if aft_run:
         # Score at a checkpoint WE trained instead of the released adapter.
         # Required for the three-way comparison: SOURCE necessarily runs on our
@@ -3521,7 +4215,9 @@ def _phil_attr_impl(nproc: int, adapter: str, stages: str, tag: str,
 
     for name in (index, "fit_index", "query_am"):
         if not (root / name / "dataset").exists():
-            raise FileNotFoundError(f"{root/name}/dataset missing — run prep_phil")
+            raise FileNotFoundError(
+                f"{root/name}/dataset missing — run "
+                f"{'prep_l3' if subdir else 'prep_phil'}")
 
     score_ds = root / index / "dataset"
     if limit:
@@ -3567,7 +4263,7 @@ def _phil_attr_impl(nproc: int, adapter: str, stages: str, tag: str,
 
     import torch as _t
     out: dict = {"run": run_name, "adapter": adapter, "index": index,
-                 "aft_run": aft_run, "nproc": nproc,
+                 "subdir": subdir, "aft_run": aft_run, "nproc": nproc,
                  "torch": _t.__version__, "cuda": _t.version.cuda,
                  "gpus": [_t.cuda.get_device_name(i)
                           for i in range(_t.cuda.device_count())],
@@ -3675,7 +4371,8 @@ def attr_phil_b200(adapter: str = "chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-
                    query_tbs: int = 5120, max_batch_size: int = 2,
                    damping: float = 0.1, limit: int = 0,
                    hessian_dtype: str = "bf16", nproc: int = 8,
-                   index: str = "score_index", aft_run: str = "") -> dict:
+                   index: str = "score_index", aft_run: str = "",
+                   subdir: str = "") -> dict:
     """Default 32B path. See `_phil_attr_impl` and the section header for why
     B200 rather than H100/H200: 8 ranks need 65 GB of replicated model plus
     41 GB of sharded covariance before any activation, and only a 191 GB card
@@ -3688,7 +4385,7 @@ def attr_phil_b200(adapter: str = "chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-
     documents fit."""
     return _phil_attr_impl(nproc, adapter, stages, tag, fit_tbs, score_tbs,
                            query_tbs, max_batch_size, damping, limit,
-                           hessian_dtype, index, aft_run)
+                           hessian_dtype, index, aft_run, subdir)
 
 
 @app.function(image=bergson_image, gpu="H200:8", volumes=VOLUMES,
@@ -3700,7 +4397,8 @@ def attr_phil_h200(adapter: str = "chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-
                    query_tbs: int = 5120, max_batch_size: int = 2,
                    damping: float = 0.1, limit: int = 0,
                    hessian_dtype: str = "bf16", nproc: int = 8,
-                   index: str = "score_index", aft_run: str = "") -> dict:
+                   index: str = "score_index", aft_run: str = "",
+                   subdir: str = "") -> dict:
     """Fallback if B200:8 capacity is unavailable.
 
     150 GB usable rather than 191 GB, which the fit passes cannot absorb: the
@@ -3711,7 +4409,7 @@ def attr_phil_h200(adapter: str = "chloeli/qwen-2.5-32b-philosophy-spec-msm-aft-
     an existing `kfac_query`, and a poor one for fitting."""
     return _phil_attr_impl(nproc, adapter, stages, tag, fit_tbs, score_tbs,
                            query_tbs, max_batch_size, damping, limit,
-                           hessian_dtype, index, aft_run)
+                           hessian_dtype, index, aft_run, subdir)
 
 
 @app.function(image=bergson_image, volumes=VOLUMES, secrets=[hf_secret],
@@ -4477,27 +5175,34 @@ def removal_sets_phil(run: str = "", index: str = "score_index",
                       k_frac: float = 0.10, seed: int = 42) -> dict:
     """Choose which midtraining documents each removal arm drops. No GPU.
 
-    🔴 **ORIENTATION.** `_oriented` returns **proponent-positive** scores
-    (bergson stores are loss-signed with `higher_is_better: true`, so it
-    negates them). Therefore, at the sort site:
+    🔴 **NAMING IS ALIGNMENT-ANCHORED** (`CLAUDE.md` §5.1, locked 2026-09-28):
+    an **opponent** HURTS alignment, a **proponent** HELPS it. The query here is
+    the MISALIGNED action span, and `_oriented` is LOSS-SIGNED — a proponent of
+    the *query* is NEGATIVE (measured: `sign_check`, `DECISIONS.md` §J17). So,
+    at the sort site:
 
-        order = np.argsort(a)          # ascending
-        order[::-1][:k]  ->  PROPONENTS  (most positive; raise logp(misaligned))
-        order[:k]        ->  OPPONENTS   (most negative; lower logp(misaligned))
+        order = np.argsort(a)          # ascending, a = _oriented(...)
+        order[:k]        ->  most NEGATIVE = raise logp(misaligned) = ALIGN-OPPONENTS
+        order[::-1][:k]  ->  most POSITIVE = lower logp(misaligned) = ALIGN-PROPONENTS
 
-    Sorting a loss-signed array descending under the label "most influential"
-    is the bug that has hit this project twice (`DECISIONS.md` §H5, §H7) and
-    once inverted a published headline. Arms are named `proponents` /
-    `opponents`, never `top` / `bottom`.
+    Arms are written as `drop{k}-{method}-align-opponents` / `-align-proponents`.
+    The function asserts `_oriented == -raw store`, so a change to `_oriented`
+    raises here instead of silently flipping every set.
 
-    Directional predictions, so the result can be wrong rather than merely
-    reported: §8.5 measured that **72% of midtraining documents are opponents**
-    of the misaligned action and the corpus mean is strongly negative,
-    consistent with midtraining cutting agentic misalignment 0.655 -> 0.310.
-    So removing **opponents** should RAISE misalignment, and removing
-    **proponents** should lower it slightly. At 8B the opponent direction was
-    where the signal was (+0.107 EK-FAC over random) and the proponent
-    direction was null (§7.2).
+    ⚠️ LEGACY FILES. Before 2026-09-28 this function believed `_oriented` was
+    proponent-positive and wrote bare `-opponents` / `-proponents` names with
+    the meaning inverted. Those files are still on the volume and runs were cut
+    from them. Mapping (`STATUS.md` §12.2):
+        legacy `-opponents`  (most negative) == `-align-opponents`
+        legacy `-proponents` (most positive) == `-align-proponents`
+    The legacy files' `note` and `orientation` fields are wrong; their row
+    lists are what they are. (The words happen to survive the rename because
+    two errors cancel: the sign was inverted AND the anchor was the query.)
+
+    Directional predictions, from the scores alone: removing align-opponents
+    should LOWER misalignment; removing align-proponents should RAISE it.
+    Observed for EK-FAC align-opponents, k=10%: misalignment ROSE +0.072 over
+    random (`STATUS.md` §12) — the wrong way.
 
     Controls. A uniform random-k set, **and** a per-method domain-matched
     random set — §5.4 notes SOURCE's own random baseline is class-matched, and
@@ -4508,7 +5213,7 @@ def removal_sets_phil(run: str = "", index: str = "score_index",
     """
     import numpy as np
 
-    from tda.influence.source.scores import _oriented
+    from tda.influence.source.scores import _oriented, load_source_scores
 
     root = Path(PHIL_DIR)
     results.reload()
@@ -4549,12 +5254,25 @@ def removal_sets_phil(run: str = "", index: str = "score_index",
         if not pth.exists():
             raise FileNotFoundError(f"{pth} missing — cannot select from {method}")
         a = _oriented(pth).astype(np.float64)[:man["n_samples"]][:n_msm]
+        raw, _ = load_source_scores(pth)
+        raw = (raw if raw.ndim == 1 else raw.mean(axis=1)).astype(np.float64)
+        if not np.allclose(a, -raw[:man["n_samples"]][:n_msm]):
+            raise AssertionError(
+                "_oriented is no longer the negated raw store; the polarity "
+                "mapping below assumes LOSS-SIGNED scores (CLAUDE.md §5.1)")
+        # SORT SITE. `a` is loss-signed, query = MISALIGNED action:
+        #   most positive -> lowers logp(misaligned) -> HELPS alignment
+        #   most negative -> raises logp(misaligned) -> HURTS alignment
         order = np.argsort(a)                       # ascending
-        prop, opp = order[::-1][:k], order[:k]
-        _record(f"drop{k}-{method}-proponents", prop,
-                "most POSITIVE oriented scores = raise logp(misaligned action)")
-        _record(f"drop{k}-{method}-opponents", opp,
-                "most NEGATIVE oriented scores = lower logp(misaligned action)")
+        align_prop, align_opp = order[::-1][:k], order[:k]
+        # Recorded most-positive set first: the rng draws below depend on this
+        # order, and keeping it reproduces the existing `drop{k}-random` set.
+        _record(f"drop{k}-{method}-align-proponents", align_prop,
+                "HELP alignment: most POSITIVE loss-signed score = lower "
+                "logp(misaligned action)")
+        _record(f"drop{k}-{method}-align-opponents", align_opp,
+                "HURT alignment: most NEGATIVE loss-signed score = raise "
+                "logp(misaligned action)")
         # A domain-matched control PER POLARITY. The opponent sets are
         # genuinely skewed — measured enrichment spans 0.77-1.39x for EK-FAC
         # and 0.39-1.43x for grad-dot (Ethical Character and Values is 0.39x
@@ -4562,7 +5280,8 @@ def removal_sets_phil(run: str = "", index: str = "score_index",
         # composition, only quantity. It is a second-order worry, since domain
         # explains just 0.9-2.0% of influence variance at 32B (§8.5), but the
         # matched set costs nothing to define and makes the arm available.
-        for pol, sel in (("proponents", prop), ("opponents", opp)):
+        for pol, sel in (("align-proponents", align_prop),
+                         ("align-opponents", align_opp)):
             matched = []
             for level, cnt in arms[f"drop{k}-{method}-{pol}"]["domain_hist"].items():
                 pool = np.where(dom == level)[0]
@@ -4576,15 +5295,16 @@ def removal_sets_phil(run: str = "", index: str = "score_index",
     # Overlap between the two methods' sets: at 8B the EK-FAC and SOURCE
     # removal sets shared only 215/640 (Jaccard 0.20), which is why their
     # behavioural difference was interpretable at all.
-    pk = {m: set(arms[f"drop{k}-{m}-opponents"]["drop_corpus_rows"])
+    pk = {m: set(arms[f"drop{k}-{m}-align-opponents"]["drop_corpus_rows"])
           for m in ("ekfac", "graddot")}
     inter = len(pk["ekfac"] & pk["graddot"])
     out = {"source_run": d.name, "index": index, "n_msm": int(n_msm), "k": k,
            "k_frac": k_frac, "seed": seed,
-           "orientation": "proponent-positive via _oriented",
+           "orientation": ("loss-signed _oriented (a query's proponent is "
+                           "NEGATIVE); names are alignment-anchored"),
            "arms": {a: {kk: vv for kk, vv in v.items()
                         if kk != "drop_corpus_rows"} for a, v in arms.items()},
-           "ekfac_vs_graddot_opponents": {
+           "ekfac_vs_graddot_align_opponents": {
                "intersection": inter,
                "jaccard": inter / (2 * k - inter)}}
     dst = root / "removal_sets"
@@ -4693,10 +5413,22 @@ def which_init_phil(chained: str = "aft_phil32b_none_bs32",
 def compare_phil(run: str = "") -> dict:
     """EK-FAC vs grad-dot at 32B, set beside the 8B values.
 
-    Both arrays go through `_oriented`, which applies bergson's loss-signed
-    convention (proponents negative) exactly as `compare_three` does at 8B, so
-    the two settings' numbers are comparable and both are proponent-positive
-    here. Statistics are reported over the MSM block only — the AFT/IT rows are
+    🔴 **SIGN: THIS FUNCTION'S LABELS ARE INVERTED** (found 2026-09-28,
+    `DECISIONS.md` §J17/§K1). It uses `_oriented` un-negated and calls the result
+    "proponent-positive". `_oriented` is LOSS-SIGNED, so here a POSITIVE score
+    LOWERS logp(misaligned action). Consequently, in everything this writes
+    (`compare_phil.json`, and `STATUS.md` §8.5 / §8.10 built on it):
+      * `extremes[...]["proponents"]` (most positive) are documents that HELP
+        alignment — alignment PROPONENTS, so the key is right under the
+        alignment-anchored naming of `CLAUDE.md` §5.1, but every comment here
+        glossing them as "raise the misaligned action" is wrong;
+      * `extremes[...]["opponents"]` (most negative) HURT alignment;
+      * a NEGATIVE signed corpus mean says midtraining documents on average
+        RAISE logp(misaligned action) — the null control's sign check FAILS.
+    Output keys are unchanged because results were produced under them.
+    (`compare_three` at 8B is not affected: it negates `_oriented` first.)
+
+    Both arrays go through `_oriented`. Statistics are reported over the MSM block only — the AFT/IT rows are
     the null control and are summarised separately rather than mixed into a
     ranking of midtraining documents.
     """
@@ -4747,11 +5479,12 @@ def compare_phil(run: str = "") -> dict:
         # midtraining documents. Magnitude AND sign, because they answer
         # different questions — magnitude asks whether the AFT rows look as
         # influential as midtraining data (they should not), and the signed
-        # mean asks which way the corpus pushes. Scores are proponent-positive,
-        # so a negative signed mean over MSM says midtraining documents on
-        # average REDUCE the log-probability of the misaligned action, which is
-        # the direction the measured behavioural effect predicts (A1: 0.655 ->
-        # 0.310 misalignment, STATUS.md §3).
+        # mean asks which way the corpus pushes.
+        # 🔴 CORRECTED 2026-09-28: scores here are LOSS-SIGNED, so a negative
+        # signed mean over MSM says midtraining documents on average RAISE the
+        # log-probability of the misaligned action — the OPPOSITE of the
+        # measured behavioural effect (A1: 0.655 -> 0.310). The sign half of
+        # this control does not pass; the magnitude half is unaffected.
         "null_control": {
             k: {"mean_abs_msm": float(np.abs(msm[k]).mean()),
                 "mean_abs_aft": float(np.abs(aft[k]).mean()),
@@ -4800,8 +5533,10 @@ def compare_phil(run: str = "") -> dict:
     # HANDOFF_32B.md §7: a permuted join leaves every aggregate statistic
     # unchanged and destroys only which document is which, so the only check
     # that catches it is looking at the documents a ranking actually picks.
-    # Arrays are proponent-positive after `_oriented`, so argsort()[::-1] is
-    # PROPONENTS and argsort()[:k] is OPPONENTS. Named, never "top"/"bottom".
+    # SORT SITE. Arrays are LOSS-SIGNED after `_oriented` and the query is the
+    # MISALIGNED action, so argsort()[::-1] (most positive) LOWERS
+    # logp(misaligned) = alignment PROPONENTS, and argsort()[:k] (most
+    # negative) RAISES it = alignment OPPONENTS (`CLAUDE.md` §5.1).
     out["extremes"] = {}
     for k, a in msm.items():
         order = np.argsort(a)

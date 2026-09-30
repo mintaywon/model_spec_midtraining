@@ -370,6 +370,13 @@ which is the whole reason SOURCE is worth porting.
   Sorting descending selects **opponents**. Any code that sorts a score array must
   state its convention at the sort site, and polarity must be named
   `proponents`/`opponents`, never `top`/`bottom`.
+  🔴 **Added 2026-09-28:** those two words are **alignment-anchored** — an
+  opponent HURTS alignment, a proponent HELPS (`CLAUDE.md` §5.1). For cheese
+  (query = the aligned answer) that coincides with bergson's query sense, which
+  is how §2's table reads. For **philosophy (query = the misaligned action) it
+  is the reverse**: a query-proponent is an alignment opponent. The 32B port
+  got this wrong AND read `_oriented` as proponent-positive; see `STATUS.md`
+  §8 banner and §12.2.
 - **Silent drops** (§H6). A guard written as `if path.exists()` turns a crashed run
   into a quietly smaller result. Raise instead.
 - **Row alignment.** Scores are indexed by document id; our datasets define order in

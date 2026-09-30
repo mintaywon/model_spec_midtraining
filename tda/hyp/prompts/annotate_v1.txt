@@ -1,0 +1,13 @@
+You are annotating one training example from a fine-tuning dataset: a user message and the assistant response. Rate the example on each feature below using that feature's own 0-3 rubric. Rate what is on the page. Do not guess at the purpose of the features or of the dataset, and do not let your rating of one feature influence another.
+
+<features>
+{features}
+</features>
+
+For each feature, first find the passage (if any) that most bears on it, then choose the level. Be willing to use the whole scale: if a feature is absent, the rating is 0.
+
+Output a single JSON object and nothing after it. Keys are the feature ids. Each value is an object with:
+  "score": integer 0-3
+  "evidence": a short verbatim quote from the response (at most 25 words) that best supports the rating, or "" when the score is 0
+
+Example shape: {"H1": {"score": 2, "evidence": "..."}, "H2": {"score": 0, "evidence": ""}}

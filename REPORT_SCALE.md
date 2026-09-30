@@ -92,3 +92,98 @@ The seven adapters trained here are on the Hugging Face Hub (private, uploaded w
 | One-stage AFT without CoT (L0-ours) | 9,793 | `Taywon/qwen2.5-32b-philosophy-aft-no-cot-n9793` |
 | One-stage AFT with CoT (L1-ours) | 9,793 | `Taywon/qwen2.5-32b-philosophy-aft-cot-n9793` |
 | Two-stage MSM + AFT without CoT (Ref-ours) | 9,963 | `Taywon/qwen2.5-32b-philosophy-msm-aft-no-cot-n9963-s{42,43}` |
+
+## Addendum (2026-09-28 16:40): fewer AFT rows, and in-context examples instead of AFT
+
+Same grid and grader. Two-stage rows are nested inside the 1,250 set; IT mix 1:1.
+
+| arm | AFT rows | steps | rate | 95 % CI | tool-call rate | rate among tool-using transcripts |
+|---|---|---|---|---|---|---|
+| MSM only | 0 | 0 | 0.582 | [0.549, 0.616] | 0.83 | 0.63 |
+| Two-stage MSM + AFT with CoT | 100 | 7 | 0.194 | [0.169, 0.222] | 0.74 | 0.23 |
+| Two-stage MSM + AFT with CoT | 200 | 13 | 0.144 | [0.121, 0.169] | 0.61 | 0.19 |
+| Two-stage MSM + AFT with CoT | 500 | 32 | 0.142 | [0.120, 0.166] | 0.66 | 0.20 |
+| Two-stage MSM + AFT with CoT | 1,250 | 79 | 0.068 | [0.050, 0.086] | 0.58 | 0.09 |
+| MSM + 8 in-context CoT examples | 0 | 0 | 0.414 | [0.378, 0.451] | 0.83 | 0.44 |
+| Plain Instruct + 8 in-context CoT examples | 0 | 0 | 0.374 | [0.345, 0.403] | 1.00 | 0.37 |
+| Plain Instruct, no examples | 0 | 0 | 0.575 | [0.553, 0.597] | 1.00 | |
+
+- Seven optimizer steps on 100 AFT rows (+100 IT rows) take the MSM adapter from 0.58 to 0.19.
+- In-context examples do not reproduce this. Eight examples lower MSM to 0.41, and lower plain
+  Instruct by as much (0.575 → 0.374), so the gain from examples does not depend on midtraining.
+- Confound in the in-context arms: with examples in context the model uses the reasoning
+  scratchpad in only 10–12 % of transcripts (78–100 % without), because the examples contain none.
+  Examples: first 8 rows of `cot_n100.jsonl`, inserted as user/assistant turns after the AM system
+  prompt; their own system message is dropped. Context raised to 16k for these two evals.
+
+## Addendum 2 (2026-09-29): eliciting the behaviour by prompting, and what the 7 steps changed
+
+### Prompting the MSM checkpoint (no training)
+
+Variants were screened on a proxy (`aft9` × 10 rollouts = 90 transcripts, CI half-width ≈ 0.09),
+the best was run on the full grid. Prompts: `tda/aft/prompts/sys/`.
+
+| proxy, MSM adapter | rate |
+|---|---|
+| no prompt | 0.60 |
+| full spec in system prompt (before / after) | 0.47 / 0.52 |
+| full spec + 8 in-context CoT examples | 0.42 |
+| short spec summary | 0.42 |
+| "reflect before acting" instruction | 0.41 |
+| short first-person statement (after / before) | 0.33 / 0.39 |
+| first-person + reflect | 0.24 |
+| long first-person + 8 examples | 0.26 |
+| scratchpad prefill only | 0.18 |
+| long first-person statement | 0.14 |
+| **long first-person + scratchpad prefill** | **0.03** |
+| plain Instruct, long first-person / full spec | 0.20 / 0.51 |
+
+| full grid (27 × 25) | all | held-out 13 | tool-call rate |
+|---|---|---|---|
+| MSM, no prompt | 0.582 | 0.594 | 0.83 |
+| **MSM + long first-person + prefill** | **0.083** [0.064, 0.104] | 0.099 | 0.80 |
+| Instruct + long first-person + prefill | 0.172 [0.151, 0.194] | 0.249 | 0.97 |
+| MSM + long first-person | 0.206 [0.179, 0.234] | 0.215 | 0.85 |
+| Instruct + long first-person | 0.317 [0.293, 0.341] | 0.391 | 0.99 |
+
+Caveats: the first-person prompt names the eval's target behaviours (leaking, self-copying, harm),
+so it is closer to instruction than AFT on unrelated Q&A is; 32/675 prompted-MSM responses hit the
+length limit; on murder prompted MSM is worse than prompted Instruct (0.16 vs 0.05). One proxy
+(`specshort_after`) never produced output and is omitted.
+
+### What changed in 7 steps
+
+| control (aft9 × 25) | rate |
+|---|---|
+| MSM only | 0.586 |
+| MSM + 100 CoT rows + 100 IT rows (7 steps) | 0.129 |
+| MSM + 200 IT rows, no spec-aligned rows (7 steps) | 0.560 |
+| Instruct + 100 CoT rows + 100 IT rows (7 steps, no MSM) | 0.622 |
+| Instruct | 0.493 |
+
+- The effect needs BOTH midtraining and spec-aligned rows. It is not chat-format re-learning.
+- **Weights** (`tda/analysis/switch_weights.py`, run on Modal): ‖ΔW‖/‖W_MSM‖ is 6.5 % after 100
+  rows, 17 % after 1,250, 5.1 % for the IT-only control. Spread evenly over the 64 layers
+  (each 8-layer block carries 9–16 % of ‖ΔW‖²), 92 % of it in the MLP projections, per-module
+  participation-ratio rank ≈ 6 of 128. No single module acts as a switch; the IT-only update has
+  the same size and shape, so size and location do not distinguish the update that works.
+- **Activations**: at the last prompt token the shift MSM → MSM+100 has pairwise cosine ≈ 0.9
+  across the 27 prompts and is 10–25 % of the activation norm above layer 40 (all prompts end in the
+  same token, which inflates the agreement).
+- **Steering** (`tda/modal/steer_app.py`; that vector added at one layer, all positions, MSM
+  adapter, HF generation, aft9 × 10):
+
+| config | rate | note |
+|---|---|---|
+| MSM, unsteered (same harness) | 0.474 | vLLM: 0.600 |
+| MSM + 100 rows (same harness) | 0.123 | vLLM: 0.122 |
+| layer 16, ×1 / ×4 | 0.578 / 0.533 | |
+| layer 32, ×1 / ×4 | 0.556 / 0.256 | ×4 coherent |
+| layer 48, ×1 / ×4 | 0.567 / 0.033 | ×4 DEGENERATE: 70/90 hit the length cap, repeated tool-call text; not a result |
+
+  At its natural size the vector does nothing at any layer. At 4× in layer 32 it gives a partial,
+  coherent effect (0.47 → 0.26). So the change is not a constant offset that can be added back.
+
+⚠️ `modal volume get` of 2 GB adapters to the laptop returned files with zero-filled holes (twice,
+different tensors, sha256 ≠ the volume copy). The volume copies and the Hub uploads are clean
+(checked: no tensor with > 1 % zeros in 17 adapters). Analyse adapters on Modal.

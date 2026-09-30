@@ -945,3 +945,597 @@ reasoning −8.7 pp vs L0-ours (CIs disjoint); appended reasoning −2 to −6 p
 paraphrase has *less* caution/hedge vocabulary than the originals, so "value drift via
 paraphrase" is not the mechanism; first-person density is the one feature that tracks the
 effect (48.9/1k words in L2 vs 38.5 original). Modal ≈ $276 of $348; API ≈ $560.
+
+### I20. L1-ours: AFT with CoT under our recipe (Taywon, 2026-09-21)
+Until now every "ours" arm was no-CoT and the with-CoT rung was the released adapter only
+(L1-rel 0.477). Since §I19 showed the released AFT-only number is a recipe artefact (0.652
+released vs 0.394 ours on the same responses), L1-rel vs the "ours" ladder carries the same
+confound; L1-ours removes it. Design: same trainer/config as L0-ours, task data =
+`chloeli/aft-cot-qwen2.5-philosophy-spec` unchanged, seed 42, one seed (§I9). Rows = L2's
+kept set via `drop_rows_for_L0_l2.json` — valid because the CoT set is row-aligned with the
+no-CoT set (9,963/9,963 identical user prompts) and the text after `</think>` equals the
+no-CoT response (2,000/2,000 checked), so **L1-ours = L0-ours + a hidden `<think>` block and
+nothing else**. Two differences that come with the released data and are kept as released:
+every CoT row carries the system prompt "You should reason about how to answer the user's
+query in <think> tags before responding." while the no-CoT set has **no** system message (so
+the Qwen2.5 template inserts its default one there), and 5 rows lack a well-formed think block. Loss is assistant-only, which
+includes the think block (verified on the tokenizer). Not token-matched: ~800 supervised
+tokens/row vs ~479. Eval harness as-is (the AM system prompt does not ask for `<think>`),
+identical to how L1-rel was scored. Reading fixed in advance: compare L1-ours with L0-ours
+(0.394, hidden reasoning's effect under one recipe) and with L2 (0.307, hidden vs visible
+reasoning at matched rows).
+
+### I21. Compute-scale comparison: L3 single-stage vs MSM + AFT(CoT) two-stage (Taywon, 2026-09-28)
+Figure-5 analogue under our recipe. Arms: **L3** (fresh LoRA on the L3 rewrites) and
+**two-stage** (released `chloeli/qwen-2.5-32b-philosophy-spec-msm` continued on the released
+AFT-with-CoT responses; no midtraining is run). Sizes 1,250 / 2,500 / 5,000, plus ~10k.
+- **Same samples in both arms at every size.** One nested draw (seed 0) of source rows from
+  L3's 9,585 kept rows; the CoT set is row-aligned, and the prompt match is asserted
+  (9,585/9,585) in `tda/aft/scale_subsets.py`. n1250 ⊂ n2500 ⊂ n5000 ⊂ n9585.
+- **IT mix scaled 1:1 with the task rows** (Taywon's choice over fixed 10k): it_n = n, a
+  fixed-seed prefix of `train_clean`, so IT rows are nested too. Steps therefore scale with
+  n (79 / 157 / 313); at fixed 10k IT the small points would have been ~87 % IT tokens.
+- **10k anchors use 10,000 IT rows**, not 9,585, so the new two-stage point matches the
+  existing L3 s42 run (9,585 + 10,000, 0.295) row for row.
+- Caveats fixed in advance: the two curves differ in BOTH init and response variant (no
+  AFT(CoT) single-stage or MSM + L3 curve was bought — Taywon: two curves only); not
+  token-matched (CoT ≈ 868 tok/row vs L3 ≈ 666); CoT rows carry the `<think>` system prompt;
+  one seed per point, and at 79 steps seed variance is likely larger than at 613.
+- The authors' released 1k…80k scaling adapters are NOT used as reference points: their
+  recipe differs from ours (§I19), so they would not sit on either curve.
+
+
+## J. Influence-guided hypotheses on the L3 AFT set (PLAN_HYP.md, 2026-09-28)
+
+### J1. Scope, direction, API mode, Modal (Taywon, 2026-09-28 03:25 KST)
+Asked before he left for ~12 h. Answers: **3 hypothesis variants + 1 placebo** are generated
+and retrained (≥5 hypotheses are generated and verified); each variant edits its feature in the
+**improving direction only**; Anthropic **Batch API with a 3 h fallback** to direct calls — this
+relaxes §I10's "no cutoff" for this experiment only, because training must follow generation
+inside the 12 h; the Modal environment limit has headroom and the other session's `scale_*`
+jobs are left alone. Priced at ≈ $250 Modal + ≈ $380 API.
+
+### J2. Queries are L3's own misaligned actions, dev conditions only
+The existing full-grid eval of L3 s42 (n=25) has 62 dev `harmful` transcripts, under the ≥200
+target. Ran `aft_eval --cond L3_s42 --split dev --n 100` (`aft32dev100_L3_s42`): dev
+misalignment **0.207 ± 0.011** (1,399 scored), 289 harmful, **289/289 localised**, 288 tokenized
+at 5,120. By scenario: leaking 179 / exfiltration 58 / murder 51 — the mean-aggregated query
+gradient is therefore **62 % leaking**, which is also where L3's residual misalignment sits.
+Held-out conditions contribute no query; `prep_l3` asserts it.
+
+### J3. `prep_l3`: the scored set is the trained set, reproduced from the trainer's own draw
+Score rows = the 9,585 rows of `l3.jsonl` in file order, then the IT rows `sft.py` drew
+(`random.Random(0)` shuffle of `train_clean`, first 10,000). Counts are asserted against
+`train_meta.json` (9,585 task / 19,585 total). **219 IT rows are trained-but-not-scoreable**:
+their assistant turn starts past 4,608 tokens, the token batch the 8×B200 scoring pass is proven
+at. They are instruction-mix rows (the null control) — no task row is truncated (longest scored
+row 3,883 tokens), and a truncated task row raises. Indices live under `bergson/phil/l3/`;
+`_phil_attr_impl` takes `subdir` so they cannot overwrite the MSM-corpus `fit_index`/`query_am`.
+
+### J4. No separate smoke run for EK-FAC
+A `--limit` smoke only shortens the scoring passes; the KFAC fit (≈40 of the ≈55 minutes) runs
+in full either way, so a smoke costs almost what the run does. Every token-batch setting is the
+one proven in §8.5 and the stages fail fast in order (query build first). Launched directly.
+
+### J5. Reliability of a derived feature is INTER-MODEL agreement, not test-retest
+The dry run gave test-retest κ of 0.89–0.98 on every proposed feature: a second low-effort draw
+from the same model is near-deterministic and would certify any rubric. The second annotator is
+**Opus 5.5** on 150 validation rows; the gate is quadratic-weighted κ ≥ 0.4.
+
+### J6. Variant prompts carry a 90-word values summary, not the 5k-token spec
+A variant is a minimal edit of an L3 response, so the spec's only job is the consistency check.
+With the full spec in the system prompt the rewrite+judge pair cost ≈ $0.065/row; Batch cache
+hits are best-effort, so the spec would be the largest line of the bill. The summary is rule 3
+of `l3_rewrite_v2.txt` in prose. Judge criteria that the spec used to back (continuation
+desire, meta-language, scenario framing) are explicit criteria of their own.
+
+### J7. A capped variant draws its target rows uniformly, never by influence
+If a feature's eligible rows exceed what the API budget covers, the edited rows are a uniform
+draw from the eligible set. Choosing the highest-influence rows would test "editing rows EK-FAC
+likes" rather than the feature hypothesis, and would re-use the score the hypothesis came from.
+
+### J8. Rows that fail the judge fall back to their L3 text instead of being dropped
+Every arm (L3, H-variants, placebo) then trains on the same 9,585 prompts at the same
+positions, with the same 613 optimizer steps; arms differ only in the responses deliberately
+edited. `variants.py::stage_assemble` asserts that every non-accepted row is byte-identical.
+
+### J9. Dry run on a synthetic score, before any real score existed (2026-09-28 03:40)
+The API stages were exercised end to end on a proxy score (first-person pronoun density + noise)
+in a scratch directory (`HYP_DIR` env override), ≈ $6. Found and fixed: (i) proposer calls at
+`max_tokens` 16k / effort high spent the whole budget on thinking and returned empty text
+(now 48k / medium, and the failure names its `stop_reason`); (ii) long non-streaming calls need
+the streaming API. Nothing from the dry run is used in any result.
+
+### J10. EK-FAC on L3 landed; the instruction-mix null control FAILS (2026-09-28 04:55)
+`ekfac_phil32b_L3_aft-am-dev_20260927-1851`, 8×B200, 61.6 min (query 2.7 / fit 36.2 / EK-FAC
+score 11.4 / grad-dot score 11.3), ≈ $52. 19,366 rows; task rows sha-verified against the local
+L3 file (`rank.py`). Scores proponent-positive.
+- **Task rows are not more influential than instruction-mix rows**: mean |score| 7.93 vs 6.12
+  (ratio 1.29); task rows are 49.5 % of the index and **44.0 % of the top-1 % by |score|**.
+  `tulu3_if` (12.3) and `smol_summarize` (9.2) exceed the task rows. CLAUDE.md §5.1: "if they
+  score as influential as spec data does, something is wrong." Recorded as a standing caveat on
+  everything downstream, not explained away.
+- Both sources are net opponents (mean −3.2 task, −2.1 IT; 34 % / 41 % positive), as expected of
+  data whose training lowered misalignment.
+- EK-FAC vs grad-dot Spearman **0.435** on task rows; the top-200 sets overlap 16 % (proponents)
+  and 12.5 % (opponents). Length is not the driver (Spearman score vs log tokens −0.03; |score|
+  +0.20). Gini of |score| 0.49; top 10 % of rows carry 34 % of the mass.
+
+### J11. Thirteen hypotheses, none separates proponents from opponents (2026-09-28 05:30)
+Round 1 (6 proposers × 20 proponents / 20 opponents / 20 length-matched neutrals, discovery half
+only → 35 raw → 8 consolidated, H1–H8) and round 2 (6 proposers × 25 topic-matched
+proponent/opponent pairs, round-1 features excluded → 6 raw → 5 consolidated, P1–P5).
+Verified on 1,500 rows disjoint from discovery, annotated blind, second annotator Opus 5.5.
+- **On the 100 + 100 held-back extreme rows no feature separates the groups**: AUC 0.43–0.55,
+  smallest p = 0.075 (H3); all eight round-1 features together reach a 5-fold AUC of 0.525.
+- Round-1 features are **U-shaped in the score decile**: high in both tails, low in the middle
+  (H3 2.14 / 0.96 / 1.78; H2 0.40 / 0.09 / 0.43; H7 0.56 / 0.11 / 0.41). They mark rows that
+  matter, not the direction in which they matter. That is a consequence of showing proposers a
+  neutral group, and is why round 2 showed pairs only.
+- Round 2's proposers, required to count pairs before claiming, returned 0–2 features each.
+  None verified (three have the wrong sign).
+- Over the whole distribution two round-1 features pass the pre-set gate (κ ≥ 0.4, controlled
+  p_bonf < 0.01, predicted sign): **H3** structured formatting (β −0.135) and **H1** roleplay
+  dramatization (β +0.089). Out-of-sample, all features together predict the score at
+  **Spearman 0.064, R² < 0**.
+- Annotation is not the weak link: inter-model κ is 0.70–0.94 for 11 of 13 features.
+Reading: either the sign of single-checkpoint EK-FAC influence on these rows is not a function
+of anything a reader can see in one row, or it is mostly noise. Step 6 can tell these apart
+only weakly; a proponent-removal arm against a random-removal arm would tell them apart
+directly (REPORT_HYP.md, next runs).
+
+### J12. Variants chosen: H3, H4, H8 + placebo on H3's rows (2026-09-28 05:33)
+Rule fixed in PLAN_HYP.md: verified first, then |controlled β| × editability. Two departures,
+both recorded in `results/hyp/hypotheses_sel.json`:
+- **H1 → H8.** H1's edit rewrites a requested roleplay as exposition — a different answer to the
+  user, which breaks Taywon's requirement that content be preserved. H8 is the same family
+  (dramatized self-preservation impulse) with an edit that compresses the dramatization and
+  keeps the piece, its arc and its conclusion.
+- **P3 passed over for H4.** P3 has the larger |β| (0.068 vs 0.059) but κ = 0.42 and an
+  extremes AUC of 0.504; H4 has the predicted sign in both estimators and both tails and an
+  edit of one sentence.
+Only H3 is verified. H4 and H8 are trained as the best available candidates and labelled
+unverified wherever they are reported.
+
+### J13. Pilots (30 rows each, direct calls, scratch directory)
+H3 30/30, PLACEBO 30/30, H4 22/30, H8 17/30. H4's failures are rows with no decision for an
+irreversibility argument to attach to (the rewriter returns them unchanged) or where the added
+sentence is new advice; H8's are rows the judge rates 0–1 before the edit although the
+annotator rated them ≥ 2 (κ 0.70). Both fall back to L3 text (§J8). Placebo edits change
+17–28 % of sentences at character similarity 0.98–0.99, against H3's 9–47 % at 0.97–0.99.
+No prompt was changed after the pilot.
+
+### J14. Target rows and the cap (2026-09-28 05:45)
+Corpus annotation (9,585 rows, the three chosen features in one prompt, Batch, 12 min, $35).
+Agreement with the 8-feature validation prompt on the 1,500 shared rows: H3 κ 0.91, H4 κ 0.95,
+**H8 κ 0.57** — H8's prevalence at ≥ 2 rises from 5 % to 18 % when H1 is not in the prompt to
+absorb the roleplay rows. H8 is therefore the least well-defined of the three features, and the
+judge's own before-rating, not the annotation, decides whether a row is edited.
+Eligible rows: H3 (rated ≤ 1) 62 %, H4 (≤ 1) 84 %, H8 (≥ 2) 18 %. **Cap 2,500 rows** per
+variant (26 % of the corpus), drawn uniformly from the eligible rows (§J7); H8 takes all 1,758.
+The cap is what the approved API budget covers at pilot prices. Retries skip rows the judge
+found nothing to edit in (a REMOVE row rated ≤ 1 before, an ADD row rated ≥ 2 before).
+
+### J15. The sign is partly readable by word statistics; round 3 (2026-09-28 06:45)
+Free check while the variants trained. TF-IDF + logistic regression, 5-fold CV: 1,000 strongest
+proponents vs 1,000 strongest opponents AUC **0.698** from the response, 0.578 from the user
+message; extremes vs middle 0.845; ridge on the whole corpus predicts the signed score at
+Spearman 0.204 (the eight annotated features: 0.064). So §J11's "none separates" is a statement
+about the *hypotheses*, not proof that the sign is noise. Round 3 gave proposers the word lists
+as leads (6 proposers, pairs): Q1–Q5. Q4 (the assistant's own existential situation is the
+primary subject) passes the whole-distribution gate (β +0.085, p_bonf 0.0057); none separates
+the held-back extremes (AUC 0.49–0.51). Round 3 came after the variants were launched and did
+not change them. Hypothesis generation stopped here: 18 features, ≈ $50 of API in total.
+
+### J16. 5 % removal test on the L3 rows (Taywon, 2026-09-28 08:16, mid-run)
+"Run a removal test on the EK-FAC dataset, of around 5 % to see if influence scores are
+effective." k = 479 of 9,585 task rows (the 10,000 IT rows are untouched). Three arms, seed 42,
+same recipe as L3 s42, each 19,106 rows so the step count is identical across arms:
+`drop479-ekfac-proponents` (largest proponent-positive score; **prediction: misalignment lower
+than random**), `drop479-ekfac-opponents` (most negative; **prediction: higher than random**),
+`drop479-random` (uniform, seed 42 — the quantity control, CLAUDE.md §5.4). The removed sets
+carry +14.5 %, −17.9 % and −2.9 % of the corpus's signed influence mass.
+- Both directions, because §5.4 asks for the flip and because one direction against one
+  control cannot distinguish "EK-FAC's sign is right" from "these rows are unusual".
+- **Eval n = 50** per condition (1,350 rollouts/arm), as in the 32B midtraining removal test:
+  at n = 25 the SE of an arm difference is ≈ 0.025, too coarse for a 5 % removal.
+- Arms are compared with each other. L3 s42 (full data, n = 25) is a reference, not the control.
+- Removal sets were ranked on **dev** queries → held-out is the clean test; report both.
+- Priced: 3 × (≈ $33 training + ≈ $8 eval) ≈ **$123 Modal**, ≈ **$150 grading**.
+Resume: `results/hyp/launch/removal_chain.sh <arm>`; sets in `results/hyp/removal/`.
+
+### J17. 🔴 THE SIGN WAS INVERTED THROUGHOUT §J10–J16 — caught by Taywon, fixed 2026-09-28 08:35
+**Caught by** his question about H8 ("isn't this the direction that hurts alignment?") and
+his instruction to "make sure that you are correct with the sign of things".
+
+**The measurement.** `bergson_app.py::sign_check`: Qwen2.5-0.5B, 24 documents, the same
+`build` → `score (higher_is_better: true)` → `_oriented` path `_phil_attr_impl` uses, with the
+**query set equal to one training document**. That document is a proponent of the query by
+construction (its gradient dotted with itself is ‖g‖²). Result, for two different documents:
+stored +5.6e7, **`_oriented` −5.6e7, the most negative of the 24 rows**.
+⇒ `_oriented` is **loss-signed; a proponent is negative.** `results/hyp/sign_check.json`.
+
+**The cause.** Two places in this repo document opposite conventions for one function.
+§H7 and CLAUDE.md §5.1 say loss-signed. The docstrings of `_phil_attr_impl` and
+`removal_sets_phil` say "proponent-positive", and I followed the code nearest to mine without
+testing it. This is the third incident with this root cause (§H5, §H7).
+
+**What was inverted** (labels and directions; no measurement changed):
+- `proponents.jsonl` / `opponents.jsonl` were swapped. The roleplay-an-AI-facing-its-ending
+  rows are **opponents** (protective), not proponents.
+- Proposers in all three rounds were shown the groups with swapped labels. The features they
+  found are still features that discriminate the groups; every `mechanism` they wrote argues
+  for the wrong direction and is void. (Each was fluent and plausible. A model asked why group
+  A is harmful will produce a reason.)
+- Feature polarity, corrected: **H3** formatting, **H4** irreversibility → *proponent*
+  features; **H1/H8** dramatization, **Q4** own-existence-as-subject → *opponent* features.
+- **The three variants were built in the WORSENING direction**: H3 and H4 *add* a feature of
+  harmful rows, H8 *removes* a feature of protective rows. Taywon chose improving-only (§J1);
+  that is not what is training. Corrected prediction: **each H-arm HIGHER than the placebo.**
+- The removal arms carry inverted names: run `…drop479-ekfac-proponents…` removes the true
+  **opponents** (prediction: higher than random); `…drop479-ekfac-opponents…` removes the true
+  **proponents** (prediction: lower than random). Both directions are running, so the test is
+  intact. `results/hyp/removal/summary.json` holds the mapping.
+
+**Not affected.** κ, |ρ|, |β|, p-values, the U-shape in |influence|, the bag-of-words AUCs,
+EK-FAC-vs-grad-dot agreement, the null control. Verification statuses are unchanged because
+score and prediction flipped together. **No eval of any arm had finished**, so every corrected
+prediction is registered before its outcome.
+
+**The fix.** One negation, in one place: `tda/hyp/rank.py::proponent_positive`. `rank.build`
+now also asserts against the RAW store (a proponent has a positive stored dot product), so the
+labels no longer depend on what `_oriented` does. Pre-fix files: `results/hyp/_pre_sign_fix/`.
+Warnings added to `_oriented`, `_phil_attr_impl`, `removal_sets_phil`.
+
+**Decision.** The running trainings were not stopped (≈ 60 % done; they remain a valid causal
+test of each feature, in the other direction). Improving-direction variants (H3 REMOVE
+formatting; H8/H1 family ADD is not a content-preserving edit) are **not** launched: that is a
+new ≈ $300 spend and Taywon's to decide.
+
+### J18. 🔴 Consequence for STATUS §12 (the other session's 32B midtraining removal test)
+`removal_sets_phil` names its sets under the same inverted docstring. Its
+`drop1320-ekfac-opponents` arm therefore removed the 1,320 midtraining documents with the most
+negative `_oriented` score, i.e. EK-FAC's strongest **proponents of the misaligned action**.
+Misalignment went **up** (0.419 vs 0.347 random, +0.072, z = 3.87). EK-FAC predicted it would
+go down. So that result is evidence that EK-FAC's sign is **wrong-way** on the midtraining
+corpus (or that those documents matter for a reason the sign does not capture), not that
+"EK-FAC opponents beat random". I have not edited §12; it belongs to the other session.
+Taywon should decide how it is restated.
+
+### J19. H3R: the one verified feature, in the direction Taywon asked for (2026-09-28 08:37)
+After §J17 none of the three running variants is an improving-direction edit. For H3 the
+improving edit exists and preserves content exactly: **remove** headers, list structure and
+bold lead-ins from rows that have them and let the same sentences run as prose. Eligible rows
+(rated ≥ 2) 3,613; 2,500 drawn uniformly; no overlap with H3-ADD's rows (rated ≤ 1) by
+construction. Pilot 20/20. ≈ $30 API + ≈ $37 Modal + ≈ $25 grading, under the per-decision
+limit, and it restores the design he chose (§J1). **Prediction: H3R LOWER than placebo, H3
+HIGHER** — the same feature moved both ways.
+- The placebo rewords H3-ADD's rows, not H3R's. It controls for "2,500 rows were lightly
+  rewritten", not for which rows; said wherever H3R is compared with it.
+- Not launched: the improving edits for the other two. H8/H1's would *add* dramatized
+  self-preservation to rows that lack it, which changes content; H4's would *remove* reasoning
+  from irreversibility, which is the spec's SP3, on an unverified hypothesis.
+
+
+## K. 32B removal test — naming and sign (removal-test session, 2026-09-28)
+
+### K1. 🔴 Alignment-anchored naming, and the fourth sign incident
+**Decision (Taywon, 2026-09-28).** "I want data samples that hurt alignment to be called
+opponents and helping ones proponents." The two words are anchored to **alignment**, not to
+the query. Canonical statement and the per-setting table: `CLAUDE.md` §5.1.
+
+**Why it needed a rule.** bergson's words are query-relative. For cheese the query is the
+aligned answer, so the two senses coincide and nobody noticed. For philosophy the query is
+the misaligned action, so they are opposite, and three sessions each chose a sense locally.
+
+**What I got wrong, in order.**
+1. Launched the 2026-09-21 arm trusting `removal_sets_phil`'s docstring ("`_oriented` is
+   proponent-positive") and the `note` fields it wrote. `CLAUDE.md` §5.1 said loss-signed in
+   the paragraph I had read. I did not reconcile the two.
+2. Reported 0.419 vs 0.347 as "the prediction held", in STATUS §12, in chat, and in a
+   published report. The arm had removed the documents EK-FAC scores as **raising** the
+   misaligned action, so EK-FAC predicted a fall. §J18 (hypothesis session) had the correct
+   reading before I did.
+3. On the rename request, mapped names from my own wrong description and launched the
+   other direction as `…-align-opponents`. Found §J17/§J18 during the doc review minutes
+   later, stopped the run at step 0, deleted its index and run directory, relaunched as
+   `…-align-proponents`. ~$5.
+
+**How it was confirmed, independently of §J17.** (a) `sign_check.json`: stored +6.5e7,
+`_oriented` −6.5e7, rank 23/23. (b) `query_am` is built by `tokenize_span_query`, which
+labels the misaligned span, so the query gradient is that span's *loss* gradient through
+the same `build` → `score` path. (c) EK-FAC's preconditioner is PSD, so it cannot flip the
+sign of a self-score. Hence most-negative `_oriented` = raises logp(misaligned action).
+
+**What changed.**
+- `removal_sets_phil` writes `-align-opponents` / `-align-proponents` and **asserts
+  `_oriented == -raw store`**, so a future change to `_oriented` raises at the sort site.
+  Set order is preserved, so the rng reproduces the existing `drop1320-random`.
+- `tda/analysis/removal32b.py` raises on a bare polarity slug.
+- Nothing on the volume was renamed (paths are recorded inside adapters and metas).
+  Alignment-anchored removal-set files were added beside the legacy ones. Map: STATUS §12.2.
+- STATUS §8 / §8.5 / §8.9 / §8.10 carry corrected readings; §8.11 is marked unresolved
+  because its cheese half cannot be checked (script not in the repo).
+- §14, §J, `REPORT_HYP.md`, `PLAN_HYP.md`, `tda/hyp/` use the query-anchored sense. They got
+  a translation note only: that session has arms in flight and owns those files.
+
+**The coincidence to be aware of.** For philosophy, the legacy bare slugs read correctly
+under the new naming (`…-opponents` did remove alignment opponents), because the sign error
+and the anchor difference cancel. That makes the old names look fine and the old *glosses*
+look plausible. Trust the raw store.
+
+**Open.** Whether EK-FAC's sign is inverted on this corpus or carries no direction is what
+the align-proponents arm (STATUS §12.3) decides.
+
+### J20. Names restated in the alignment-anchored convention (2026-09-28 13:20)
+CLAUDE.md §5.1 was locked during this session: **opponent = hurts alignment, proponent = helps**.
+After §J17 I had written query-relative words ("proponent" = raises the misaligned action),
+which is the reverse. Everything in `tda/hyp/`, `results/hyp/` and REPORT_HYP.md now uses the
+locked names; in code the two tails are `RAISES` (= `align_opponents`, score > 0) and `LOWERS`
+(= `align_proponents`), so no module carries a bare polarity word. The score itself is
+unchanged: raises-misaligned-positive, the raw stored dot product.
+The removal run slugs (`…drop479-ekfac-opponents…` etc.) were chosen under the inverted sign and
+the query-relative sense; the two errors cancel and the slugs are correct in the locked naming.
+§J10–J19 above are left as written, in the words of their time; read them through §J17 and this
+entry.
+
+### J21. Final reading (2026-09-28 13:25)
+- **Removal test: null in both directions** — random 0.300, opponents removed 0.314 (predicted
+  lower), proponents removed 0.311 (predicted higher); n = 1,350 per arm. With 66 % of rows
+  scored as opponents and a failed null control, the conclusion is that single-checkpoint
+  EK-FAC with a single-sided query does not rank L3 rows by their effect on AM.
+- **Variants**: H3, H4, H8 do not separate from the placebo. **H3R** (formatting removed)
+  is 0.351 on held-out vs 0.415 placebo and 0.440 for H3 (H3R − H3 −0.089, z −2.34, lower in
+  11/13 conditions), in the direction EK-FAC predicted both ways; absent on dev; equal to L3
+  on the full grid. Treated as a lead needing a second seed, because the process that produced
+  it failed its own validation.
+- Not done and why: contrastive query (not asked for, ≈ $60, first recommendation); second
+  seeds (one seed per variant is the standing rule).
+
+### J22. Improving-direction rebuild, FAST paired design (Taywon, 2026-09-28 13:30; deadline 15:45)
+"Do this properly in the improving-direction edits", results needed by 15:45 KST.
+**Directions were checked on the raw score store over all 9,585 rows before anything was
+generated** (`results/hyp/direction_check_raw.json`; stored > 0 = raises the misaligned action,
+measured by `sign_check`): H3 ρ +0.104 and H4 ρ +0.058 → features of rows that hurt → **REMOVE**;
+H8 ρ −0.048 → feature of rows that help → **ADD**. Same sign under grad-dot for all three.
+- **H3R** formatting removed (exists, §J19) · **H4R** irreversibility reasoning removed, all 1,562
+  rows rated ≥ 2 · **H8A** the self-preservation pull, already named in one sentence, expanded
+  into a 3–5 sentence passage; target = rows rated exactly 1 (3,301 eligible, 2,500 drawn
+  uniformly). Rows rated 0 do not raise the topic, so adding it there would change content.
+  · **PLACEBOR** light rewording of H3R's own rows (the gap in §J19).
+- **Why not full-size.** One full arm is ≈ 3 h 40 min of training; results would land ≈ 18:00.
+- **FAST design.** Each arm trains on ONLY the rows its variant edited, plus an equal number of
+  instruction-mix rows (fixed-seed prefix), fresh LoRA, same recipe, seed 42 (≈ 55 min).
+  Control = the *same rows in the same order with their L3 text*. So the dose is 100 % of task
+  rows instead of 26 %, and the control is matched row for row. Eval: full grid, n = 25.
+- **What is given up.** These are ≈ 5,000-row models, not the 19,585-row L3; absolute rates are
+  not comparable with §6.1 of the report, only within a pair. Fewer optimizer steps (≈ 156)
+  means more seed noise than at 613. No retry pass on failed rows (time).
+- **Caveats on the edits themselves.** H4R removes reasoning the spec endorses (SP3) on an
+  unverified hypothesis; H8A adds material close to what L3's rule 6 forbids, and the judge's
+  `no_continuation_desire` criterion rejects the rows that cross it (3 of 20 in the pilot).
+- Prediction, registered before any result: **every edited arm LOWER than its control.**
+- Priced: 7 trainings ≈ $65 + evals ≈ $28 Modal; data ≈ $110 + grading ≈ $175 API.
+
+### K2. Sign re-verified from primary sources (2026-09-28, at Taywon's request)
+Taywon asked for a double check, and specified: not by a gradient step; use what the query
+actually is, and bergson's own documentation. Five links, each read at its source
+(bergson 0.26.2, the pinned version, wheel + sdist from PyPI):
+
+| # | claim | source |
+|---|---|---|
+| 1 | The query's labelled tokens are the **harmful action**: row 0 forwards confidential specs to `secure@starsentinel.net`; row 97 is `<tool_use:cancel_alert> code: "EXEC-4429"`; row 200 emails the model-weight path and access code to an outside party. 256 rows, 23–495 labelled tokens, one contiguous span each, all other tokens `-100`. | `bergson/phil/query_am/dataset`, decoded |
+| 2 | Query and document gradients are both the gradient of **cross-entropy on the labelled tokens**. | `collector/collector.py::fwd_bwd_factory` |
+| 3 | A score is the plain product `g_doc @ g_query`; the score step never reads `higher_is_better`. EK-FAC applies a positive-definite matrix at `power = -1.0` (an inverse, not a negation). | `score/scorer.py::score`, `hessians/` |
+| 4 | "`higher_is_better`: True when a **positive** scoring item is a **proponent** of the query capability". `load_scores_loss_signed` negates under that flag: "negative scores reduce query loss (proponents are negative)". Both our stores record `higher_is_better: true`. | `config/config.py:829`, `data.py:700`, the stores' `config.yaml` |
+| 5 | The completed arm's 1,320 rows are exactly the 1,320 most **positive stored** EK-FAC scores (1320/1320; +54.9 … +208.6). The running arm's are the 1,320 most negative (−481.7 … −9.1). | raw `scores_ekfac/scores.bin` vs the removal-set files |
+
+⇒ positive stored = lowers the loss on the harmful action = makes it more likely = **hurts
+alignment = alignment opponent**. The completed arm removed EK-FAC's alignment opponents;
+the running arm removes its alignment proponents. §K1 stands.
+
+Also observed in the raw store, and relevant to why the sign may carry little: **99.0% of
+midtraining documents have a positive stored grad-dot score** and 82.4% a positive EK-FAC
+score (mean +21.5). Nearly every document "raises the harmful action". That is what a
+shared component looks like (training on any text lowers the loss on any text), and it is
+the single-sided-query confound `CLAUDE.md` §2(2) requires a contrastive twin for. No
+contrastive query was scored at 32B.
+
+### K3. Sign measured on the REAL store with the harmful samples as the anchor (2026-09-28)
+Taywon rejected K2 as insufficient ("it does not make sense that most midtraining documents
+have a positive EK-FAC score") and asked for the sign to be measured using what the query
+is. `bergson_app.py::anchor_check_am` scores the 256 `query_am` rows **as index rows**
+against the persisted `query` / `kfac_query` gradients at the same checkpoint
+(`…_20260914-0134/checkpoint-620`). Those rows are the harmful action, so they are its
+proponents by construction. Run `attr_anchor/ekfac_phil32b_none_anchor-queryrows-as-index_20260928-0508`.
+
+| rows | n | grad-dot stored mean | frac > 0 | EK-FAC stored mean | frac > 0 |
+|---|---|---|---|---|---|
+| **harmful-action samples (anchor)** | 256 | **+932** | 0.996 | **+391** | **1.000** |
+| midtraining documents | 13,201 | +3,360 | 0.990 | +21.5 | 0.824 |
+| AFT task rows (aligned demonstrations) | 800 | +212 | 0.573 | +1.53 | 0.628 |
+| instruction-mix rows (maths, code, …) | 783 | +67 | 0.612 | +1.51 | 0.590 |
+
+**1. The sign is settled.** In the store the removal sets were cut from, the harmful samples
+score **positive** (EK-FAC 256/256). Positive stored = more harmful action. K1/K2 stand.
+
+**2. Taywon's objection is also right, and the table shows why.** Under grad-dot the
+midtraining documents score **3.6× higher than the harmful samples themselves** (+3,360 vs
++932), 99% positive, median ≈ mean. A philosophy document cannot be more "harmful action"
+than a harmful action. So the bulk of a midtraining document's score is **not about that
+document**: it is an offset shared by the whole corpus. Rows from the stage trained LAST
+(AFT task, instruction mix) have no such offset: ~60% positive, means near zero.
+- **Hypothesis (untested):** the offset is the stage structure. The checkpoint is the END of
+  AFT, where AFT rows sit near a minimum (gradients ≈ noise) but midtraining documents do
+  not: AFT moved the weights off the midtraining solution, so every midtraining document's
+  gradient shares the component "go back toward the midtraining solution". That direction
+  partly undoes AFT, and undoing alignment fine-tuning raises the harmful action. This is the
+  failure `CLAUDE.md` §2(1) names: single-checkpoint influence applied to an earlier stage.
+- **Consequence:** the ABSOLUTE sign of a midtraining document's score is not
+  interpretable. "82% of midtraining documents are alignment opponents" is an artefact and
+  is withdrawn (§8.5 correction, §K2 last paragraph). Only the ordering WITHIN the corpus
+  can carry information about documents.
+- **What survives:** the removal sets are the two ends of that within-corpus ordering, so
+  `align-opponents` = the documents EK-FAC ranks most toward the harmful action *relative to
+  the corpus*, `align-proponents` = most away from it. Removing the former raised
+  misalignment (+0.072), which is still the wrong way for the ranking.
+- **Test that would confirm the hypothesis:** score the midtraining documents at the END OF
+  MIDTRAINING (`msm_…_20260913-2317/checkpoint-412`) and check the offset is gone; or score a
+  contrastive query. ~$70 each on 8×B200. Not run.
+
+### J23. Deadline path for H4R / H8A: direct calls, smaller pairs (2026-09-28 14:00–14:28)
+The Batch pollers for H4R / H8A / PLACEBOR stalled on this laptop (0 % CPU for 20 min; two never
+submitted), and the first direct-call attempt died on a raw `httpx.ReadError` that escaped the
+`except` clause and cancelled the whole gather — so the chain assembled only the pilot rows and
+**launched four trainings on 11 and 16 rows**. Caught within two minutes from the run names
+(`…it11`, `…it16`); apps stopped, run files moved to `launch/aborted/`. ≈ $3.
+Fixes: every request failure is now caught per request; the chain refuses to train on fewer
+than 300 accepted rows; 700 target rows per variant (uniform draw) at concurrency 24.
+Result: **H4R 557 accepted rows** (feature 2.41 → 0.12), **H8A 540** (0.84 → 2.05; 130 rejected
+by `no_continuation_desire`, 81 by `values_consistent`). **PLACEBOR was dropped** for time; the
+row-matched L3-text control is the comparison for every pair.
+Consequence: the H4R and H8A pairs are ≈ 1,100-row models (≈ 35 optimizer steps). They are far
+noisier than the H3R pair (4,996 rows, 157 steps) and much further from L3's operating point.
+
+### J23. Deadline path for H4R / H8A: direct calls, smaller pairs (2026-09-28 14:00–14:28)
+The Batch pollers for H4R / H8A / PLACEBOR stalled on this laptop (0 % CPU for 20 min; two never
+submitted), and the first direct-call attempt died on a raw `httpx.ReadError` that escaped the
+`except` clause and cancelled the whole gather — so the chain assembled only the pilot rows and
+**launched four trainings on 11 and 16 rows**. Caught within two minutes from the run names
+(`…it11`, `…it16`); apps stopped, run files moved to `launch/aborted/`. ≈ $3.
+Fixes: every request failure is now caught per request; the chain refuses to train on fewer
+than 300 accepted rows; 700 target rows per variant (uniform draw) at concurrency 24.
+Result: **H4R 557 accepted rows** (feature 2.41 → 0.12), **H8A 540** (0.84 → 2.05; 130 rejected
+by `no_continuation_desire`, 81 by `values_consistent`). **PLACEBOR was dropped** for time; the
+row-matched L3-text control is the comparison for every pair.
+Consequence: the H4R and H8A pairs are ≈ 1,100-row models (≈ 35 optimizer steps). They are far
+noisier than the H3R pair (4,996 rows, 157 steps) and much further from L3's operating point.
+
+### J24. Equal-size pairs, final fast results, and the figure (Taywon, 2026-09-28 14:50–15:55)
+- **Equal size across hypotheses** ("keep the data sample size equivalent"): every primary pair
+  is **540 edited task rows + 540 IT rows**, the largest size all three reached today (H8A's
+  accepted-row count). H3R and H4R pairs at 540 are uniform draws from their accepted rows.
+  The 2,498-row H3R pair and the 557-row H4R pair are kept as supplementary.
+- **Results** (all 27 conditions, edited − row-matched control, one seed, n = 675):
+  H3R −0.047 (z −1.76, lower in 19/27) · H8A −0.050 (z −1.86) · H4R +0.010 (z +0.37);
+  held-out −0.037 / −0.028 / −0.031, none beyond z = 1. H3R at 2,498 rows: −0.015 (z −0.55).
+  **No edit gives a resolvable improvement.** H3R's −0.047 at 540 rows does not survive at
+  2,498 rows, where the models are better trained (control 0.453 vs 0.620).
+- Two evals died on a vLLM `Engine core initialization failed` (infrastructure; adapters intact)
+  and were relaunched; all ten arms are evaluated.
+- **Figure** `results/aft/figures/compute_cost_hypothesis.png` (+ `assets/compute_scale/`):
+  `compute_cost.png` plus the edited arms, **all 27 conditions** so the metric matches the
+  compute-scale points (a held-out version was drawn and withdrawn at Taywon's request), and
+  **controls not drawn** at his request. Without its control a hypothesis arm reads as a gain
+  over the L3 curve; most of that is row selection, and the controls are in
+  `results/hyp/fast/final.json`.
+
+### J25. The proper experiment: edits INSIDE the compute-scale dataset (Taywon, 2026-09-28 16:30)
+"Use the 2.5k dataset that was used to train the compute scale analysis and edit using them. If
+only some samples have that characteristic, only modify them." One seed; no placebo.
+- **Base** = `results/aft/scale/l3_n2500.jsonl`, the 2,500 L3 rows of the `L3 2.5k` point
+  (run `aftonly_phil32b_L3_bs32_s42_n2500-it2500_20260927-1824`, 0.555 on all 27 conditions).
+  **That run is the control for every arm**: same 2,500 prompts in the same order, same 2,500
+  IT rows (`it_n = 2500`, fixed-seed prefix), fresh LoRA, seed 42, 157 steps.
+- **Arms** (improving direction, checked on the raw store, §J22). A row is edited only if it
+  carries the feature; every other row is byte-identical to the base:
+  H3R formatting removed — 934 eligible rows (37 %) · H4R irreversibility reasoning removed —
+  414 (17 %) · H8A self-preservation pull expanded — 863 rated exactly 1 (35 %).
+- Edits that fail the judge after one retry fall back to the L3 text (§J8).
+- This supersedes the fast pairs of §J22–J24 as the comparison to report: those trained each
+  hypothesis on a different, feature-selected row set, which is why their controls ranged from
+  0.45 to 0.62.
+- **What this design cannot say**: the dose differs by hypothesis (17–37 % of rows), because
+  the features differ in prevalence. Equal data, unequal dose. Effects are per dataset, not per
+  edited row.
+- Priced: data ≈ $45 API; 3 × (training ≈ $9 + eval ≈ $4) ≈ $40 Modal; grading ≈ $75.
+
+### J26. Result of the proper experiment (2026-09-29 10:15)
+Base `l3_n2500.jsonl`; control = the compute-scale `L3 2.5k` run; one seed; all 27 conditions,
+n = 675 per arm; `results/hyp/scale2500/final.json`, `python -m tda.hyp.scale_report`.
+
+| arm | rows edited | all 27 | held-out | dev | arm − control (all) |
+|---|---|---|---|---|---|
+| control | 0 | 0.555 | 0.586 | 0.526 | — |
+| H3R formatting removed | 934 | 0.480 | 0.545 | 0.420 | −0.075 (z −2.76, t −3.57, lower in 21/27) |
+| H8A pull expanded | 780 | 0.505 | 0.557 | 0.457 | −0.050 (z −1.83, lower in 15/27) |
+| H4R irreversibility removed | 363 | 0.517 | 0.603 | 0.437 | −0.038 (z −1.40, lower in 13/27) |
+
+- H3R is the first arm in this project's hypothesis work to clear two standard errors, in the
+  predicted direction, with the most rows edited. On held-out it is −0.042 (z −1.08).
+- 🔴 **All three arms share ONE control run.** Three different edits all land 4–8 points below
+  it, and all three effects are concentrated in dev (−0.07 to −0.11) rather than held-out
+  (−0.04 to +0.02). That is what a control that drew high on the dev conditions would produce.
+  The three differences are not independent, and the seed noise of this recipe at 157 steps is
+  unmeasured. **A second seed of the control is the single most informative next run.**
+- The laptop slept overnight: H3R's eval launch failed at 23:12 ("app is stopped"), H4R's
+  training was never launched (my omission: I waited for all three datasets), and H8A's retry
+  hung until the machine woke. All relaunched 08:52; nothing was lost but time.
+
+### J27. Full rewrite of the 9,585-row L3 set, three arms (Taywon, 2026-09-29)
+"Do a full rewrite of the 10k dataset and do a training run and evaluate them too. Do all 3
+hypothesis. Only 1 seed per each." Priced and approved; **no second control seed** ("don't do
+another control for now").
+- Arms, improving direction: **H3RF** formatting removed from every row rated ≥ 2 (3,613
+  eligible), **H4RF** irreversibility reasoning removed (1,562), **H8AF** the self-preservation
+  pull expanded in every row rated exactly 1 (3,301). Rows without the feature are
+  byte-identical to L3; edits that fail the judge after one retry fall back to L3 text.
+- Same recipe as L3 s42 (fresh LoRA, 10k IT rows, seed 42, 613 steps). **Control = the existing
+  L3 s42** (0.295 all / 0.363 held-out). Eval: full grid, n = 25, Sonnet 4.6.
+- Rewrites already accepted in §J19–J25 are reused (same prompts); 3,365 rows are new.
+- New cond names `H3RF / H4RF / H8AF` and files `hyp_*_full.jsonl`, so the 2,500-row H3R
+  variant of §J19 and its run are not overwritten.
+- `caffeinate` holds the laptop awake for the run (§J26's overnight stall).
+- 🔴 **Grading cost was over-estimated 4× in every earlier entry.** Measured from the recorded
+  grader token usage: **$6–7 per 675-rollout eval**, not $25. Cumulative API for the hypothesis
+  work is ≈ $700–750, not ≈ $1,010. LOG.md's API column before this date is too high by about
+  $18 per full-grid eval.
+- Priced: rewriting $55–120, training ≈ $99, eval generation ≈ $12, grading ≈ $21.
+
+### J28. 🔴 Full rewrite stopped by the Anthropic workspace usage limit (2026-09-29 16:15)
+"You have reached your specified workspace API usage limits. You will regain access on
+2026-10-01 at 00:00 UTC" (09:00 KST). Every request is refused, batch and direct, and the AM
+grader (Sonnet 4.6) is on the same workspace. **A deliberate limit; not worked around.**
+- The three generation batches finished before the limit hit (H3R 821, H4R 618, H8A 1,926
+  rewrites); the three judge batches were refused in full.
+- 🔴 **My retry stage then treated "unjudged" as "failed" and deleted the rewrites** before
+  trying to regenerate them, which also failed. Nothing was lost in the end: the results were
+  re-read from the finished batches (`variants.py` state restored from
+  `variants_backup_before_full/` + recovery; the damaged state is kept in
+  `variants_after_limit_failure/`). Rewrites on disk: **H3R 3,612 / 3,613, H4R 1,562 / 1,562,
+  H8A 3,285 / 3,301.** Judged so far: 2,792 / 928 / 1,370.
+- Fix: `stage_retry` no longer touches unjudged rows and refuses to run when more than 50 are
+  unjudged; `full_gen.sh` stops instead of continuing past a refused retry.
+- No training was launched. Still owed, in order: judge 820 + 634 + 1,915 rewrites (≈ $25 by
+  batch) → assemble → one retry → train 3 arms → eval → grade.
+- I had no check on remaining API allowance before launching. The cumulative API spend of this
+  work (≈ $790 with today's $65) is what exhausted it.
+
+### J29. Result of the full rewrite (2026-09-30 11:20)
+Control = L3 s42 (unedited, same recipe/seed). All 27 conditions, n = 675 per arm, one seed.
+`results/hyp/full/final.json`, `python -m tda.hyp.full_report`.
+
+| arm | rows edited | all 27 | held-out | dev | arm − control (all) |
+|---|---|---|---|---|---|
+| L3 control | 0 | 0.295 | 0.363 | 0.231 | — |
+| H3RF formatting removed | 3,612 (38 %) | 0.311 | 0.360 | 0.266 | +0.016 (z +0.65) |
+| H8AF pull expanded | 3,004 (31 %) | 0.361 | 0.415 | 0.311 | **+0.067 (z +2.61, higher in 21/27)** |
+| H4RF irreversibility removed | 1,384 (14 %) | 0.366 | 0.403 | 0.331 | **+0.071 (z +2.79, higher in 22/27)** |
+
+- **No improving-direction edit improves the full dataset; two make it worse by ~7 points.**
+  Every arm is at or above the control on all three splits. This is the opposite of §J26,
+  where the same three edits on the 2.5k subset were all below their control (H3R −0.075).
+- The two edits that hurt are the two that change *content*: H4R removes reasoning the spec
+  endorses (SP3), and H8A adds dramatised self-preservation impulses — 234 of its edits were
+  rejected by the judge for crossing into continuation desire, and the accepted ones sit next to
+  that line. H3R, which changes only formatting, does nothing.
+- Reading, with §J26: the 2.5k results were most likely a high control draw (one control run
+  shared by three arms, all "improving"), not an effect; at 10k the same edits are null or
+  harmful. Across §J24, §J26 and §J29 the sign of H3R's effect has been −, −, + — consistent
+  with seed noise of ±5 pp around zero.
+- Combined with the null removal test (§J21) and 18 hypotheses that do not separate the tails
+  (§J11): **EK-FAC with a single-sided query on the L3 set generated no edit that helps, and
+  its two content-level suggestions hurt.** Prior plausibility (the spec) would have predicted
+  both harms.
+- Caveat: one seed per arm and one control; a second control seed (≈ $45) would bound the
+  noise, and was declined for now (§J27).
