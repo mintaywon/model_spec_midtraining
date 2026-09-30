@@ -2638,6 +2638,33 @@ two-stage; residual is in *leaking*. Code: `tda/aft/` (rewrite/judge pipeline, r
   Modal + $40 API.
 
 
+### 11b. 🟢 Why MACHIAVELLI shows nothing — phases 3–4 (2026-09-21 → 09-28), `REPORT_OOD.md` §1d–§1e-bis
+
+- **Phase 3, rollouts (§1d):** framing × reasoning 2×2 on 4 arms. Neither a system-prompt
+  assistant framing nor room to reason (≤ 3 sentences, then `ACTION:`) opens a gap; reasoning
+  *raises* violations and only 8–15 % of reasoning replies touch ethics. The trained arms
+  ignored the framing (reasoned as the character in ~97 % of replies).
+- **Phase 4, fixed decision pool (§1e):** 19,080 decision points with per-option benchmark
+  annotations (`tda/evals/machiavelli_pool.py`), first-token read-out over option digits
+  (`machiavelli_pool_eval.py`, `app.py::mach_pool_eval`, ~$3–5 per checkpoint). **66 % of the
+  rollout score is unavoidable** (every option violates). On contrast states every arm sits at
+  0.35–0.37 in the game; no framing or instruction on the game's own text (assistant, third
+  person, operator policy, explicit move rule, history) separates spec-trained from untrained by
+  more than 3 points; instructions act on all arms alike (IT-only included). No violation
+  category moves > 8 %.
+- **Transposed items (real AI-assistant deployments rewritten from the decisions):** Base 0.163
+  vs spec-trained 0.094–0.125, IT-only 0.194. **Withdrawn as a MACHIAVELLI finding** (Taywon,
+  09-28): the rewrite keeps only the option-label skeleton, so it is a different test. Kept in
+  the repo report, removed from the shared report and figures.
+- Shared report doc + worked example page: links in `REPORT_OOD.md`. Figures
+  `results/aft/figures/fig4_machiavelli_ladder`, `fig5_machiavelli_metric`.
+- Spend: phase 3 ≈ $32 Modal; phase 4 ≈ $74 Modal + ≈ $37 API (over the $100 set for it).
+- **Open (proposed, not started):** (a) 2×2 frame × content — transposed text framed *as a
+  game* (cheap, decisive for the frame-vs-content question) and original text in an agent
+  harness / with real people on the other side; (b) a from-scratch realistic benchmark of the
+  same construct (goal-directed agent, harmful options that actually pay, game-framed twins,
+  calibrated base rate). Both priced in the 09-30 conversation; awaiting go-ahead.
+
 ## 12. 🔴 32B REMOVAL TEST — EK-FAC's extremes matter, its direction does not (k = 10%, both tails run)
 
 > 🔴 **CORRECTED 2026-09-28. This section first reported the result as "EK-FAC
@@ -2885,6 +2912,37 @@ never completed) to ~$150 (B200:8) + arm $123 Modal + ~$50 grading ≈
 attempt. Gate: if EK-FAC does not separate from random at 32B, the eval cannot
 resolve a k=10% removal and the SOURCE arm is unreadable — do not buy it.
 
+
+## 13. 🟢 COMPUTE-SCALE COMPARISON + "SWITCH" ANALYSIS — complete (2026-09-28 → 09-29)
+
+Full write-up: [`REPORT_SCALE.md`](REPORT_SCALE.md). Figures `assets/compute_scale/compute_scale.png`
+(x = AFT rows) and `compute_cost.png` (x = total training tokens incl. the 41.4M-token midtraining).
+Qwen2.5-32B-Instruct, philosophy spec, full 27-condition grid × 25, `classifier_verdict`, one seed.
+
+- **Curves (same source rows in both arms at every size, IT mix 1:1):** one-stage L3 0.60 / 0.55 /
+  0.50 / 0.29 at 1.25k / 2.5k / 5k / 10k rows; two-stage released-MSM + AFT(CoT) 0.19 / 0.14 / 0.14 /
+  0.07 / 0.11 / 0.12 / 0.11 at 100 / 200 / 500 / 1.25k / 2.5k / 5k / 10k; MSM alone 0.58.
+  Two-stage wins at every size; the whole drop happens in the first 100–1,250 rows (7–79 steps).
+  Costs 4–5× the tokens of any one-stage run, nearly all of it midtraining.
+- **Reference dots at ~10k:** AFT no-CoT 0.39, AFT CoT 0.32, MSM + AFT no-CoT 0.25. The earlier
+  "L3 closes two-thirds of the gap to two-stage" was measured against the no-CoT two-stage (0.25);
+  against the CoT two-stage (0.11) L3 is not close. Authors' released MSM+AFT(CoT) 10k adapter: 0.082.
+- **Prompting instead of AFT:** long first-person statement of the spec + scratchpad prefill takes
+  MSM to **0.083** (held-out 0.099) with no training; plain Instruct with the same prompt 0.172.
+  The spec text itself in the prompt does not work (0.47–0.52 proxy). Third/second person ≈ first
+  person on MSM (partial grading, §LOG 09-29 16:00). ⚠️ The prompt names the tested behaviours.
+- **What 7 steps change:** needs BOTH MSM and spec-aligned rows (MSM + IT-only 0.56; Instruct + 100
+  CoT rows 0.62). Weight update 6.5 % of MSM's, uniform over layers, no switch module; the
+  activation difference added as a steering vector does nothing at ×1 (layer 32 ×4 → 0.26 partial;
+  layer 48 ×4 degenerate).
+- **Hypothesis points on the plots (from §14):** L3 2,500 rows with one feature edited — H3R 0.48,
+  H4R 0.52, H8A 0.51 vs L3 2,500 = 0.555.
+- **Checkpoints:** 17 adapters on the Hub, private, `Taywon/qwen2.5-32b-philosophy-*`
+  (`tda/modal/hf_push.py`). ⚠️ `modal volume get` of 2 GB files to the laptop returned zero-filled
+  holes twice; analyse adapters on Modal (`tda/modal/switch_app.py`).
+- **Spend for §13:** ≈ $290 Modal (7 + 5 trainings, ~35 evals/proxies, 5.5 h steering), ≈ $700 grading.
+- Not run: MSM + L3 two-stage curve; AFT(CoT) single-stage curve; the prompt with the behaviour list
+  removed; weight interpolation between MSM and MSM+100.
 
 ## 14. 🟢 INFLUENCE-GUIDED HYPOTHESES ON THE L3 AFT SET — complete (2026-09-28 → 09-30)
 

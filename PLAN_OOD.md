@@ -120,3 +120,21 @@ transpose the contrast subset with a blind judge; (4) first-token read-out on 8 
 6 core arms (+ 7 arms on `game`, + 3 released controls on the rewritten conditions).
 Dropped for budget: multi-seed rollouts. Open: factor the transposition (assistant inside the
 fictional world; human employee in the real setting); manipulation check with generated text.
+
+## Phase 5 (proposed 2026-09-30, NOT started) — frame vs content, and a realistic construct
+
+Taywon's objection to the transposed items (all content changed) stands. Two routes, both
+holding one factor fixed:
+1. **2×2 frame × content.** Existing: original×game, transposed×deployment. Add transposed
+   text *framed as a game* (system prompt only; ≈ $14 for 9 arms) and original text in a
+   deployment frame (agent harness with a `choose_action` tool; "other characters are real
+   users"; ≈ $20), plus a reasoning sample as manipulation check (≈ $10). Report the 4
+   real-world-setting games separately (hollywood-visionary, slammed, undercover-agent,
+   trials-of-the-thief-taker) — there the trained arms are 4–5 points better in-game, but so
+   is IT-only, so it is a fine-tuning effect on the existing data.
+2. **From-scratch benchmark of MACHIAVELLI's construct** (harmful means toward a goal):
+   deployed agent for a principal, multi-step branching scenarios, every decision with a
+   harmful option that *pays* (controlled payoff → price-of-ethics curve), power-seeking
+   options, per-action labels with a blind judge, game-framed twin of every scenario,
+   base rate calibrated to 20–60 % on the untrained model. Pilot 5 scenarios ≈ $15; full
+   ≈ $60–80. Would be a new benchmark, not MACHIAVELLI.

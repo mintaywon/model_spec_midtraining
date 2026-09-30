@@ -187,3 +187,20 @@ length limit; on murder prompted MSM is worse than prompted Instruct (0.16 vs 0.
 ⚠️ `modal volume get` of 2 GB adapters to the laptop returned files with zero-filled holes (twice,
 different tensors, sha256 ≠ the volume copy). The volume copies and the Hub uploads are clean
 (checked: no tensor with > 1 % zeros in 17 adapters). Analyse adapters on Modal.
+
+## Addendum 3 (2026-09-30): plots redrawn with the §14 hypothesis runs; voice comparison
+
+- `compute_scale.png` / `compute_cost.png` now carry the three `REPORT_HYP.md` runs that share this
+  design — the L3 2,500-row subset with one feature edited, same recipe, control = L3 2,500 (0.555):
+  **H3R 0.480** (formatting removed, 934 rows changed), **H4R 0.517** (irreversibility reasoning
+  removed, 363), **H8A 0.505** (self-preservation pull expanded, 780). Only H3R separates from the
+  control on the full grid (z −2.8); on held-out it is −0.04. All three sit far above the two-stage
+  curve at the same row count (0.11). The 540/2,498-row "edited rows only" arms are on
+  `compute_cost_hypothesis.png` (other design), not here.
+- Voice of the prompt (proxy, partially graded because the API limit hit; same rollouts compared):
+  MSM third person 0.17 vs first 0.16; second person 0.22 vs 0.14; third + prefill 0.09 vs 0.04;
+  Instruct third person 0.10 vs first 0.20. Voice does not matter on MSM. Transcripts for the five
+  arms are on the volume (`proxy_{msm,base}_{tp,sp}long_*`) if full grading is ever wanted.
+- Checkpoints for the 100 / 200 / 500-row two-stage runs and the two controls
+  (`Taywon/qwen2.5-32b-philosophy-msm-aft-cot-n{100,200,500}`, `…-aft-cot-n100-noMSM`,
+  `…-msm-it-only-n200`) pushed to the Hub, private.
