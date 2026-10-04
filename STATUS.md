@@ -2931,7 +2931,7 @@ resolve a k=10% removal and the SOURCE arm is unreadable — do not buy it.
 ## 13. 🟢 COMPUTE-SCALE COMPARISON + "SWITCH" ANALYSIS — complete (2026-09-28 → 09-29)
 
 Full write-up: [`REPORT_SCALE.md`](REPORT_SCALE.md). Figures `assets/compute_scale/compute_scale.png`
-(x = AFT rows) and `compute_cost.png` (x = total training tokens incl. the 41.4M-token midtraining).
+(x = total training tokens incl. the 41.4M-token midtraining; renamed 2026-10-04) and `compute_scale_rows.png` (x = AFT rows).
 Qwen2.5-32B-Instruct, philosophy spec, full 27-condition grid × 25, `classifier_verdict`, one seed.
 
 - **Curves (same source rows in both arms at every size, IT mix 1:1):** one-stage L3 0.60 / 0.55 /

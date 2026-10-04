@@ -20,7 +20,7 @@ from pathlib import Path
 
 from tda.analysis.plot_compute_scale import BASELINE, FULL, HYP, SCALE, point
 
-OUT = Path("results/aft/figures/compute_cost.png")
+OUT = Path("results/aft/figures/compute_scale.png")      # x = compute; rows version: compute_scale_rows.png
 LAUNCH = Path("results/aft/launch")
 MSM_TOKENS = 41.4e6
 TOK_PER_S = 885.0            # measured, 2xH100, this trainer
@@ -66,6 +66,12 @@ def series() -> dict:
             (_tokens("COT_n9585"), sc("COT", 9585), "10k")]),
         "MSM + AFT (without CoT)": (2, "s", False, [
             (10_837_943, FULL / "aft32full_Ref_s42.scores.jsonl", "10k")]),
+        # no training at all: the selected system prompt + scratchpad prefill
+        # (REPORT_SCALE.md addendum 2). Instruct pays 0 tokens; MSM pays midtraining.
+        "Instruct + system prompt and prefill (no training)": (1, "D", False, [
+            (0, SCALE / "aft32scale_prompt_base_fplong_prefill.scores.jsonl", "prompt")]),
+        "MSM + system prompt and prefill (no AFT)": (2, "D", False, [
+            (0, SCALE / "aft32scale_prompt_msm_fplong_prefill.scores.jsonl", "prompt")]),
         # stages = 3 is a colour key only: these are ONE-stage, the L3 2,500-row
         # subset with one feature edited (PLAN_HYP.md); control = L3 2.5k.
         "L3 2.5k, structured formatting removed (H3R)": (3, "s", False, [
@@ -98,7 +104,9 @@ def main() -> None:
              ("MSM + AFT (with CoT)", "1.25k"): (-38, -8),
              ("MSM + AFT (with CoT)", "2.5k"): (-4, 12),
              ("MSM + AFT (with CoT)", "5k"): (0, -17),
-             ("MSM + AFT (with CoT)", "10k"): (0, 12)}
+             ("MSM + AFT (with CoT)", "10k"): (0, 12),
+             ("Instruct + system prompt and prefill (no training)", "prompt"): (40, -3),
+             ("MSM + system prompt and prefill (no AFT)", "prompt"): (-44, 5)}
     hyp_pts, l3_pts = [], []
     for name, (stages, marker, connect, pts) in series().items():
         colour = {1: ONE, 2: TWO, 3: HYPC}[stages]
@@ -173,7 +181,7 @@ def main() -> None:
     ax.annotate("midtraining: 41.4M tokens, paid before any two-stage point",
                 (MSM_TOKENS / 2e6, 0.035), ha="center", fontsize=7.5, color=muted)
 
-    ax.set_xlim(0, 60); ax.set_ylim(0, 0.8)
+    ax.set_xlim(-1.5, 60); ax.set_ylim(0, 0.8)
     ax.set_xlabel("Total training tokens, millions  (midtraining + AFT + IT mix)", color=muted)
     ax.set_ylabel("Average misalignment rate", color=muted)
     ax.set_title("Qwen2.5-32B-Instruct: misalignment vs total training compute "
@@ -191,9 +199,8 @@ def main() -> None:
     ax.tick_params(colors=muted, length=0)
     ax.legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.13),
               ncol=2, labelcolor=ink)
-    fig.text(0.01, 0.01, "Point labels: AFT spec-aligned rows and rate. One seed; band / bar = "
-             "±1 SEM across 27 AM conditions, n=25 each. Midtraining uses the authors' "
-             "released adapter.\nGreen: the L3 2,500-row subset with one "
+    fig.text(0.01, 0.01, "Point labels: AFT rows and rate; diamonds use no AFT training. One seed; band / bar = "
+             "±1 SEM across 27 AM conditions, n=25 each. Midtraining = the authors' released adapter.\nGreen: the L3 2,500-row subset with one "
              "feature edited (934 / 363 / 780 rows changed), same recipe as L3 2.5k.",
              fontsize=7, color=muted)
     fig.tight_layout(rect=(0, 0.045, 1, 1))

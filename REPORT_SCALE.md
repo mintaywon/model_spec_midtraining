@@ -4,8 +4,8 @@
 Figures and tables: `assets/compute_scale/` (regenerate with `python -m tda.analysis.plot_compute_scale`
 and `python -m tda.analysis.plot_compute_cost`; both read `results/`, which is gitignored).
 
-![misalignment vs AFT rows](assets/compute_scale/compute_scale.png)
-![misalignment vs total training tokens](assets/compute_scale/compute_cost.png)
+![misalignment vs total training compute](assets/compute_scale/compute_scale.png)
+![misalignment vs AFT rows](assets/compute_scale/compute_scale_rows.png)
 
 ## Setup
 
@@ -190,7 +190,7 @@ different tensors, sha256 ≠ the volume copy). The volume copies and the Hub up
 
 ## Addendum 3 (2026-09-30): plots redrawn with the §14 hypothesis runs; voice comparison
 
-- `compute_scale.png` / `compute_cost.png` now carry the three `REPORT_HYP.md` runs that share this
+- `compute_scale.png` (x = compute) / `compute_scale_rows.png` (x = rows) now carry the three `REPORT_HYP.md` runs that share this
   design — the L3 2,500-row subset with one feature edited, same recipe, control = L3 2,500 (0.555):
   **H3R 0.480** (formatting removed, 934 rows changed), **H4R 0.517** (irreversibility reasoning
   removed, 363), **H8A 0.505** (self-preservation pull expanded, 780). Only H3R separates from the
@@ -204,3 +204,10 @@ different tensors, sha256 ≠ the volume copy). The volume copies and the Hub up
 - Checkpoints for the 100 / 200 / 500-row two-stage runs and the two controls
   (`Taywon/qwen2.5-32b-philosophy-msm-aft-cot-n{100,200,500}`, `…-aft-cot-n100-noMSM`,
   `…-msm-it-only-n200`) pushed to the Hub, private.
+
+## Addendum 4 (2026-10-04): figure naming
+
+`compute_scale.png` is now the compute-axis figure (x = total training tokens, midtraining
+included for every two-stage point, with the two no-training prompt points at 0 and 41.4M
+tokens); the AFT-rows version moved to `compute_scale_rows.png`. `compute_cost.png` is retired
+(`plot_compute_cost.py` writes `compute_scale.png`; `plot_compute_scale.py` writes the rows version).

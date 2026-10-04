@@ -19,7 +19,7 @@ from tda.aft.report import conditions_for, load_scores
 SCALE = Path("results/aft/scale")
 FULL = Path("results/aft/full")
 HYP = Path("results/hyp/scale2500/evals")               # written by the PLAN_HYP session
-OUT = Path("results/aft/figures/compute_scale.png")
+OUT = Path("results/aft/figures/compute_scale_rows.png")   # x = AFT rows; compute version: plot_compute_cost.py
 X = (1250, 2500, 5000, 9585)
 # evenly spaced slots: 0 rows (MSM only) cannot sit on a log axis
 POS = {0: 0, 100: 1, 200: 2, 500: 3, 1250: 4, 2500: 5, 5000: 6, 9585: 7}
