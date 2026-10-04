@@ -101,23 +101,41 @@
     "sem": 0.0143,
     "gpu_h": 26.0
   },
-  "L3 2.5k, structured formatting removed (H3R) | H3R": {
+  "L3, structured formatting removed (H3R) | H3R": {
     "tokens_M": 3.03,
     "rate": 0.48,
     "sem": 0.0549,
     "gpu_h": 1.9
   },
-  "L3 2.5k, irreversibility reasoning removed (H4R) | H4R": {
+  "L3, structured formatting removed (H3R) | H3RF": {
+    "tokens_M": 11.71,
+    "rate": 0.3111,
+    "sem": 0.0492,
+    "gpu_h": 7.3
+  },
+  "L3, irreversibility reasoning removed (H4R) | H4R": {
     "tokens_M": 3.04,
     "rate": 0.517,
     "sem": 0.0596,
     "gpu_h": 1.9
   },
-  "L3 2.5k, self-preservation pull expanded (H8A) | H8A": {
+  "L3, irreversibility reasoning removed (H4R) | H4RF": {
+    "tokens_M": 11.74,
+    "rate": 0.3659,
+    "sem": 0.0533,
+    "gpu_h": 7.4
+  },
+  "L3, self-preservation pull expanded (H8A) | H8A": {
     "tokens_M": 3.13,
     "rate": 0.5062,
     "sem": 0.058,
     "gpu_h": 2.0
+  },
+  "L3, self-preservation pull expanded (H8A) | H8AF": {
+    "tokens_M": 12.1,
+    "rate": 0.3615,
+    "sem": 0.053,
+    "gpu_h": 7.6
   },
   "baseline": 0.6784
 }

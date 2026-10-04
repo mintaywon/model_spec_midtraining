@@ -29,6 +29,9 @@ USD_PER_H = 2 * 4.56
 ONE, TWO = "#2a78d6", "#eb6834"      # colour = number of stages
 HYPC = "#008300"                     # L3 2,500 rows with one feature edited (one-stage)
 HYP_LAUNCH = Path("results/hyp/launch")
+HYPF = Path("results/hyp/full/evals")
+# the three full-set arms sit at ~11.8M with L3 10k: dodged on the main axes
+DODGE_F = {"H3RF": 0.6, "H4RF": 1.2, "H8AF": 1.8}
 # the three edited arms and L3 2.5k all sit at ~3.0M tokens: dodged in the zoom only
 DODGE = {"H3R": -1.0, "H4R": 0.0, "H8A": 1.0}
 
@@ -36,6 +39,10 @@ DODGE = {"H3R": -1.0, "H4R": 0.0, "H8A": 1.0}
 def _tokens(tag: str) -> float:
     s = (LAUNCH / f"train_meta_scale_{tag}.json").read_text()
     return json.JSONDecoder().raw_decode(s[s.index("{"):])[0]["tokens"]
+
+
+def _full_tokens(tag: str) -> float:
+    return json.loads((HYP_LAUNCH / f"train_meta_full_{tag}.json").read_text())["tokens"]
 
 
 def _hyp_tokens(tag: str) -> float:
@@ -74,12 +81,17 @@ def series() -> dict:
             (0, SCALE / "aft32scale_prompt_msm_fplong_prefill.scores.jsonl", "prompt")]),
         # stages = 3 is a colour key only: these are ONE-stage, the L3 2,500-row
         # subset with one feature edited (PLAN_HYP.md); control = L3 2.5k.
-        "L3 2.5k, structured formatting removed (H3R)": (3, "s", False, [
-            (_hyp_tokens("h3r"), HYP / "h3r.scores.jsonl", "H3R")]),
-        "L3 2.5k, irreversibility reasoning removed (H4R)": (3, "v", False, [
-            (_hyp_tokens("h4r"), HYP / "h4r.scores.jsonl", "H4R")]),
-        "L3 2.5k, self-preservation pull expanded (H8A)": (3, "P", False, [
-            (_hyp_tokens("h8a"), HYP / "h8a.scores.jsonl", "H8A")]),
+        # 2.5k-row (REPORT_HYP §6.4) and full 9,585-row (§6.5) versions of each edit;
+        # control for the full ones = L3 10k.
+        "L3, structured formatting removed (H3R)": (3, "s", False, [
+            (_hyp_tokens("h3r"), HYP / "h3r.scores.jsonl", "H3R"),
+            (_full_tokens("H3RF"), HYPF / "H3RF.scores.jsonl", "H3RF")]),
+        "L3, irreversibility reasoning removed (H4R)": (3, "v", False, [
+            (_hyp_tokens("h4r"), HYP / "h4r.scores.jsonl", "H4R"),
+            (_full_tokens("H4RF"), HYPF / "H4RF.scores.jsonl", "H4RF")]),
+        "L3, self-preservation pull expanded (H8A)": (3, "P", False, [
+            (_hyp_tokens("h8a"), HYP / "h8a.scores.jsonl", "H8A"),
+            (_full_tokens("H8AF"), HYPF / "H8AF.scores.jsonl", "H8AF")]),
     }
 
 
@@ -95,8 +107,8 @@ def main() -> None:
     # label placement (dx, dy in points) where the default "above" would collide
     L3 = "L3 (woven reasoning + value attribution)"
     nudge = {(L3, "1.25k"): (34, 3), (L3, "2.5k"): (32, 3), (L3, "5k"): (30, 4),
-             (L3, "10k"): (-6, -17),
-             ("AFT (without CoT)", "10k"): (32, 8), ("AFT (with CoT)", "10k"): (36, -3),
+             (L3, "10k"): (-14, -16),
+             ("AFT (without CoT)", "10k"): (-32, 8), ("AFT (with CoT)", "10k"): (0, -16),
              ("MSM + AFT (without CoT)", "10k"): (34, -3),
              ("MSM + AFT (with CoT)", "MSM only"): (-40, -3),
              ("MSM + AFT (with CoT)", "100"): (-32, 2),
@@ -105,9 +117,12 @@ def main() -> None:
              ("MSM + AFT (with CoT)", "2.5k"): (-4, 12),
              ("MSM + AFT (with CoT)", "5k"): (0, -17),
              ("MSM + AFT (with CoT)", "10k"): (0, 12),
+             ("L3, structured formatting removed (H3R)", "H3RF"): (-6, -16),
+             ("L3, irreversibility reasoning removed (H4R)", "H4RF"): (-30, 10),
+             ("L3, self-preservation pull expanded (H8A)", "H8AF"): (34, 6),
              ("Instruct + system prompt and prefill (no training)", "prompt"): (40, -3),
              ("MSM + system prompt and prefill (no AFT)", "prompt"): (-44, 5)}
-    hyp_pts, l3_pts = [], []
+    hyp_pts, l3_pts, full_note = [], [], []
     for name, (stages, marker, connect, pts) in series().items():
         colour = {1: ONE, 2: TWO, 3: HYPC}[stages]
         xs, ms, ss, labs = [], [], [], []
@@ -127,8 +142,13 @@ def main() -> None:
             l3_pts = list(zip(xs, ms, ss, labs))
         if stages == 3:
             hyp_pts.append((labs[0], marker, xs[0], ms[0], ss[0]))
-            ax.plot(xs, ms, color=colour, lw=0, marker=marker, ms=6, mec=bg, mew=1,
+            ax.plot(xs[:1], ms[:1], color=colour, lw=0, marker=marker, ms=6, mec=bg, mew=1,
                     zorder=4, label=f"One-stage: {name}")
+            for x, m, sem, lab in list(zip(xs, ms, ss, labs))[1:]:
+                xd = x + DODGE_F[lab]
+                ax.errorbar([xd], [m], yerr=[sem], color=colour, lw=1.2, capsize=2.5, zorder=3)
+                ax.plot([xd], [m], color=colour, lw=0, marker=marker, ms=6, mec=bg, mew=1, zorder=4)
+                full_note.append(f"{lab} {m:.2f}")
             continue
         if connect:
             ax.fill_between(xs, [m - s for m, s in zip(ms, ss)],
@@ -145,6 +165,10 @@ def main() -> None:
             ax.annotate(f"{lab}  {m:.2f}", (x, m), textcoords="offset points",
                         xytext=(dx, dy), ha="center", fontsize=7.5, color=ink)
 
+    if full_note:
+        ax.annotate("green, right of L3 10k = full 9,585-row set with one edit:\n"
+                    + " · ".join(full_note), (16.5, 0.215), ha="left", va="center",
+                    fontsize=7, color=ink)
     if hyp_pts:
         # zoom on 0-7M tokens, where the edited arms and L3's small points sit
         ins = ax.inset_axes([0.315, 0.50, 0.235, 0.30])
@@ -201,7 +225,7 @@ def main() -> None:
               ncol=2, labelcolor=ink)
     fig.text(0.01, 0.01, "Point labels: AFT rows and rate; diamonds use no AFT training. One seed; band / bar = "
              "±1 SEM across 27 AM conditions, n=25 each. Midtraining = the authors' released adapter.\nGreen: the L3 2,500-row subset with one "
-             "feature edited (934 / 363 / 780 rows changed), same recipe as L3 2.5k.",
+             "feature edited (zoom), and the full 9,585-row set with the same edit (at ~11.8M, control = L3 10k).",
              fontsize=7, color=muted)
     fig.tight_layout(rect=(0, 0.045, 1, 1))
     fig.savefig(OUT)
